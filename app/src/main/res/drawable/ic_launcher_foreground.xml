@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Open book: two warm paper leaves with a dark spine. -->
+    <path
+        android:fillColor="#F4EFE4"
+        android:pathData="M23,39 C33,35 44,39 52,45 L52,80 C44,74 33,70 23,73 Z" />
+    <path
+        android:fillColor="#EFE7D8"
+        android:pathData="M85,39 C75,35 64,39 56,45 L56,80 C64,74 75,70 85,73 Z" />
+    <path
+        android:fillColor="#C7B79E"
+        android:pathData="M52,45 L56,45 L56,80 L52,80 Z" />
+
+    <!-- Quiet page rules. -->
+    <path
+        android:strokeColor="#8B7B63"
+        android:strokeWidth="1.1"
+        android:strokeLineCap="round"
+        android:strokeAlpha="0.42"
+        android:pathData="M30,51 L47,54 M30,58 L47,61 M61,54 L78,51 M61,61 L78,58" />
+
+    <!-- One tapered brush stroke rising out of the book. -->
+    <path
+        android:strokeColor="#B49A72"
+        android:strokeWidth="5.2"
+        android:strokeLineCap="round"
+        android:pathData="M40,67 C51,60 61,50 72,36" />
+    <path
+        android:strokeColor="#B49A72"
+        android:strokeWidth="2.6"
+        android:strokeLineCap="round"
+        android:pathData="M68,43 C73,37 77,31 80,25" />
+    <path
+        android:fillColor="#D8C39C"
+        android:pathData="M80,22 L84,28 L78,27 Z" />
+
+    <!-- A small ink dot as the author's mark. -->
+    <path
+        android:fillColor="#20201C"
+        android:pathData="M34,78 C36,78 37.5,79.5 37.5,81.5 C37.5,83.5 36,85 34,85 C32,85 30.5,83.5 30.5,81.5 C30.5,79.5 32,78 34,78 Z" />
+</vector>
