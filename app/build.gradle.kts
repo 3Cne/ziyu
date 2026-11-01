@@ -22,8 +22,8 @@ android {
         applicationId = "com.moyu.writer"
         minSdk = 26
         targetSdk = 36
-        versionCode = 493
-        versionName = "3.7.110"
+        versionCode = 494
+        versionName = "3.7.111"
         val updateRepo = (project.findProperty("updateRepo") as String?) ?: ""
         buildConfigField("String", "UPDATE_REPO", "\"$updateRepo\"")
         vectorDrawables { useSupportLibrary = true }
@@ -86,6 +86,7 @@ dependencies {
     testImplementation("io.github.takahirom.roborazzi:roborazzi:1.74.0")
     testImplementation("io.github.takahirom.roborazzi:roborazzi-compose:1.74.0")
 }
+
 
 
 

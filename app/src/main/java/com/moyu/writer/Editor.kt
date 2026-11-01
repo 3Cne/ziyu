@@ -402,8 +402,13 @@ fun WritingScreen(
         val start = min(body.selection.start, body.selection.end).coerceIn(0, body.text.length)
         val end = max(body.selection.start, body.selection.end).coerceIn(0, body.text.length)
         pushUndo()
-        val newText = body.text.replaceRange(start, end, text)
-        body = TextFieldValue(newText, TextRange(start + text.length))
+        // A section break ends with a fresh empty line. The native TextWatcher
+        // only indents when a character is typed later, so the caret sat at
+        // column 0 until then. Put the two ideographic spaces into the insert
+        // itself, making the caret and the visual line agree immediately.
+        val insert = if (settings.indent && text.endsWith('\n')) "$text　　" else text
+        val newText = body.text.replaceRange(start, end, insert)
+        body = TextFieldValue(newText, TextRange(start + insert.length))
     }
 
     fun findTodoLineStart(todo: Todo): Int {
