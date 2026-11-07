@@ -192,9 +192,53 @@ internal fun ComposeBodyHost(
                 .fillMaxSize()
                 .padding(horizontal = settings.pageMargin.dp)
                 .drawBehind {
-                    if (settings.paperStyle == "plain") return@drawBehind
                     val result = layout ?: return@drawBehind
                     val scroll = scrollState.value.toFloat()
+                    val textNow = state.text
+                    // Done todos get the native TodoDoneSpan equivalent: a
+                    // thin strike across the line. The box glyph itself is the
+                    // source of truth; the model supplies the done flag.
+                    if (textNow.isNotEmpty()) {
+                        val strikeColor = palette.ink.copy(alpha = .42f)
+                        var boxIndex = 0
+                        var cursor = 0
+                        while (cursor < textNow.length) {
+                            val next = textNow.indexOf('\n', cursor).let { if (it < 0) textNow.length else it }
+                            val isBox = cursor < textNow.length &&
+                                (textNow[cursor] == '☐' || textNow[cursor] == '☑')
+                            if (isBox && textNow[cursor] == '☑' &&
+                                inlineTodos.getOrNull(boxIndex)?.done == true
+                            ) {
+                                val firstLine = result.getLineForOffset(cursor)
+                                val lastLine = result.getLineForOffset((next - 1).coerceAtLeast(cursor))
+                                for (line in firstLine..lastLine) {
+                                    val top = result.getLineTop(line) - scroll
+                                    val bottom = result.getLineBottom(line) - scroll
+                                    val mid = (top + bottom) / 2f
+                                    val lineStart = result.getLineStart(line)
+                                    val lineEnd = result.getLineEnd(line)
+                                    val from = if (line == firstLine) cursor else lineStart
+                                    var to = (lineEnd - 1).coerceAtLeast(from)
+                                    if (to < textNow.length && textNow[to] == '\n') {
+                                        to = (to - 1).coerceAtLeast(from)
+                                    }
+                                    val left = result.getBoundingBox(from).left
+                                    val right = result.getBoundingBox(to).right
+                                    if (right > left) {
+                                        drawLine(
+                                            strikeColor,
+                                            Offset(left, mid),
+                                            Offset(right, mid),
+                                            1.2.dp.toPx(),
+                                        )
+                                    }
+                                }
+                            }
+                            if (isBox) boxIndex++
+                            cursor = next + 1
+                        }
+                    }
+                    if (settings.paperStyle == "plain") return@drawBehind
                     val lineColor = palette.ink.copy(alpha = (settings.paperLineAlpha * .38f).coerceIn(0f, 1f))
                     val solid = settings.paperStyle == "solid"
                     val stroke = 1.dp.toPx()
