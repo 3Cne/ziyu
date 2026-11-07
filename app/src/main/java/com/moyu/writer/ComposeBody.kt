@@ -1,9 +1,14 @@
 package com.moyu.writer
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.AnimationVector1D
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -16,26 +21,40 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.input.InputTransformation
 import androidx.compose.foundation.text.input.TextFieldLineLimits
 import androidx.compose.foundation.text.input.TextFieldState
+import androidx.compose.foundation.text.selection.LocalTextSelectionColors
+import androidx.compose.foundation.text.selection.TextSelectionColors
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalTextToolbar
+import androidx.compose.ui.platform.TextToolbar
+import androidx.compose.ui.platform.TextToolbarStatus
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.TextFieldValue
@@ -43,18 +62,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 /**
- * Test branch: the native `BodyEditText` rewritten as a Compose field.
+ * Test branch: the native BodyEditText rewritten as a Compose field.
  *
- * Why: `Modifier.layerBackdrop` records Compose draw content only. A native
- * EditText hosted through `AndroidView` draws itself in the View tree, so the
- * glass dock could never sample the real glyphs (3.8.3 / 3.9.9 / 3.9.12 all
- * hit this). With the body inside the Compose tree the same
- * `rememberLayerBackdrop()` that the TabBar uses now sees the text.
- *
- * The TextFieldState overload of BasicTextField owns its scroll range and
- * keeps the caret above the IME; the trailing spacer in `decorationBox` adds
- * the dock height to that range, so the last line still stops above the dock
- * while text keeps drawing under it for the glass to sample.
+ * Modifier.layerBackdrop records Compose draw content only; a native EditText
+ * hosted through AndroidView draws itself in the View tree, so the glass dock
+ * could never sample the real glyphs (3.8.3 / 3.9.9 / 3.9.12). With the body
+ * inside the Compose tree the dock's liquidGlassBar samples the text directly.
  */
 @Composable
 internal fun ComposeBodyHost(
@@ -71,27 +84,43 @@ internal fun ComposeBodyHost(
     bodySize: Float,
     dockBottomInsetPx: Int,
     onScroll: () -> Unit,
+    onController: (ComposeBodyController) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val density = LocalDensity.current
+    val context = LocalContext.current
     val state = remember(seedKey) { TextFieldState(initialText) }
     val scrollState = rememberScrollState()
     var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
     val latestBody by rememberUpdatedState(body)
     val latestChange by rememberUpdatedState(onBodyChange)
     var applyingExternal by remember { mutableStateOf(false) }
-    // Last value this field itself published. When `body` comes back equal to
-    // it the effect must not write into the field again: a redundant full
-    // replace resets the IME composition region and the keyboard re-commits
-    // the word (this showed up as doubled words and dropped spaces).
+    var suppressRangeClear by remember { mutableStateOf(false) }
+    // Last value this field itself published. When \`body\` comes back equal to
+    // it, do not write into the field again: a redundant full replace resets
+    // the IME composition and the keyboard re-commits the word.
     var lastPublished by remember { mutableStateOf(TextFieldValue(initialText, TextRange.Zero)) }
 
-    // Compose mirror -> field. Undo, the symbol row and reminder-line edits all
-    // change `body` from outside, so the field has to accept them too.
+    val controller = remember(state) { ComposeBodyController(state, context) }
+    LaunchedEffect(controller) { onController(controller) }
+
+    // Per-todo check animation: 0 = empty box, 1 = filled + check.
+    val checkAnims = remember { mutableStateMapOf<String, Animatable<Float, AnimationVector1D>>() }
+    LaunchedEffect(inlineTodos) {
+        inlineTodos.forEach { todo ->
+            val anim = checkAnims.getOrPut(todo.id) {
+                Animatable(if (todo.done) 1f else 0f)
+            }
+            anim.animateTo(
+                targetValue = if (todo.done) 1f else 0f,
+                animationSpec = tween(190),
+            )
+        }
+    }
+
     LaunchedEffect(body) {
         val current = state.text.toString()
         if (current == body.text && state.selection == body.selection) return@LaunchedEffect
-        // Echo of our own publish: the field already holds it.
         if (body == lastPublished) return@LaunchedEffect
         applyingExternal = true
         runCatching {
@@ -106,13 +135,25 @@ internal fun ComposeBodyHost(
         applyingExternal = false
     }
 
-    // Field -> Compose mirror. This is also where the automatic indent lands:
-    // a single trailing newline typed at the caret gets the two ideographic
-    // spaces immediately, matching the native TextWatcher branch.
     LaunchedEffect(state) {
         snapshotFlow { state.text.toString() to state.selection }
             .collect { (text, selection) ->
                 if (applyingExternal) return@collect
+                if (!selection.collapsed) {
+                    // Native long-press selection: move it into the controller
+                    // and collapse the field so the system panel disappears.
+                    controller.captureNativeSelection(selection)
+                    suppressRangeClear = true
+                    val collapsed = TextFieldValue(text, TextRange(selection.end.coerceIn(0, text.length)))
+                    lastPublished = collapsed
+                    latestChange(collapsed)
+                    return@collect
+                }
+                if (suppressRangeClear) {
+                    suppressRangeClear = false
+                    return@collect
+                }
+                if (controller.range != null) controller.clearRange()
                 val previous = latestBody
                 if (text == previous.text && selection == previous.selection) return@collect
                 if (settings.indent && selection.collapsed &&
@@ -135,7 +176,6 @@ internal fun ComposeBodyHost(
         snapshotFlow { scrollState.value }.collect { onScroll() }
     }
 
-    val lineStep = (bodySize * settings.lineHeight).sp
     val style = TextStyle(
         color = palette.ink,
         fontSize = bodySize.sp,
@@ -143,26 +183,13 @@ internal fun ComposeBodyHost(
         fontFamily = fontFamilyFor(settings.font),
         letterSpacing = 0.sp,
     )
-    val paperStepPx = with(density) { lineStep.toPx() }
     val dockInsetDp = with(density) { dockBottomInsetPx.toDp() }
+    val selectionColors = TextSelectionColors(
+        handleColor = accent,
+        backgroundColor = accent.copy(alpha = .22f),
+    )
 
-    val indentTransformation = remember(settings.indent) {
-        // The indent is applied in the snapshot collector above, not here: the
-        // transformation also runs for external replaces (undo / symbol row),
-        // where inserting spaces would double-indent.
-        null as InputTransformation?
-    }
-
-    // The 1.9 TextFieldState overload takes a [TextFieldDecorator] instead of a
-    // decorationBox. Wrapping the inner field in a Column leaves room for the
-    // dock height as trailing content, so the last line still stops above the
-    // dock while the glyphs keep drawing under it.
-    val currentSettings = settings
-    val currentPalette = palette
-    val currentSize = bodySize
-    val currentHint = placeholder
-    val dockDp = dockInsetDp
-    val decorator = remember(state, currentSettings, currentPalette, currentSize, currentHint, dockDp) {
+    val decorator = remember(state, settings, palette, bodySize, placeholder, dockInsetDp) {
         object : androidx.compose.foundation.text.input.TextFieldDecorator {
             @Composable
             override fun Decoration(innerTextField: @Composable () -> Unit) {
@@ -170,197 +197,374 @@ internal fun ComposeBodyHost(
                     Box {
                         if (state.text.isEmpty()) {
                             Txt(
-                                currentHint,
-                                size = currentSize,
-                                color = currentPalette.muted.copy(alpha = .42f),
-                                fontFamily = fontFamilyFor(currentSettings.font),
-                                lineHeight = currentSize * currentSettings.lineHeight,
+                                placeholder,
+                                size = bodySize,
+                                color = palette.muted.copy(alpha = .42f),
+                                fontFamily = fontFamilyFor(settings.font),
+                                lineHeight = bodySize * settings.lineHeight,
                             )
                         }
                         innerTextField()
                     }
-                    Spacer(Modifier.height(dockDp))
+                    Spacer(Modifier.height(dockInsetDp))
                 }
             }
         }
     }
 
     Box(modifier.fillMaxSize()) {
-        BasicTextField(
-            state = state,
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = settings.pageMargin.dp)
-                .drawBehind {
-                    val result = layout ?: return@drawBehind
-                    val scroll = scrollState.value.toFloat()
-                    val textNow = state.text
-                    // Done todos get the native TodoDoneSpan equivalent: a
-                    // thin strike across the line. The box glyph itself is the
-                    // source of truth; the model supplies the done flag.
-                    if (textNow.isNotEmpty()) {
-                        val strikeColor = palette.ink.copy(alpha = .42f)
-                        var boxIndex = 0
-                        var cursor = 0
-                        while (cursor < textNow.length) {
-                            val next = textNow.indexOf('\n', cursor).let { if (it < 0) textNow.length else it }
-                            val isBox = cursor < textNow.length &&
-                                (textNow[cursor] == '☐' || textNow[cursor] == '☑')
-                            if (isBox && textNow[cursor] == '☑' &&
-                                inlineTodos.getOrNull(boxIndex)?.done == true
-                            ) {
-                                val firstLine = result.getLineForOffset(cursor)
-                                val lastLine = result.getLineForOffset((next - 1).coerceAtLeast(cursor))
-                                for (line in firstLine..lastLine) {
-                                    val top = result.getLineTop(line) - scroll
-                                    val bottom = result.getLineBottom(line) - scroll
-                                    val mid = (top + bottom) / 2f
-                                    val lineStart = result.getLineStart(line)
-                                    val lineEnd = result.getLineEnd(line)
-                                    val from = if (line == firstLine) cursor else lineStart
-                                    var to = (lineEnd - 1).coerceAtLeast(from)
-                                    if (to < textNow.length && textNow[to] == '\n') {
-                                        to = (to - 1).coerceAtLeast(from)
+        CompositionLocalProvider(
+            LocalTextToolbar provides NoTextToolbar,
+            LocalTextSelectionColors provides selectionColors,
+        ) {
+            BasicTextField(
+                state = state,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = settings.pageMargin.dp)
+                    .drawWithContent {
+                        drawContent()
+                        drawCustomSelection(layout, scrollState.value, controller.range, accent)
+                        drawPaperLines(layout, scrollState.value, settings, palette, density.density)
+                        drawTodoBoxes(layout, scrollState.value, state, inlineTodos, checkAnims, palette, accent)
+                    }
+                    .pointerInput(state, layout, inlineTodos) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            val result = layout ?: return@awaitEachGesture
+                            val text = state.text.toString()
+                            val scroll = scrollState.value
+                            val slop = 12.dp.toPx()
+                            // Hit the exact rectangle the checkbox is drawn in.
+                            // A line-band lookup drifted one row from the drawn
+                            // box because the canvas and tap spaces differ.
+                            var lineStart = -1
+                            var hitId: String? = null
+                            var boxIndex = 0
+                            var cursor = 0
+                            while (cursor < text.length) {
+                                val next = text.indexOf('\n', cursor).let { if (it < 0) text.length else it }
+                                if (text[cursor] == '☐' || text[cursor] == '☑') {
+                                    val r = todoBoxRect(result, scroll, cursor, 1f)
+                                    if (down.position.x in (r.left - slop)..(r.right + slop) &&
+                                        down.position.y in (r.top - slop)..(r.bottom + slop)
+                                    ) {
+                                        lineStart = cursor
+                                        hitId = inlineTodos.getOrNull(boxIndex)?.id
+                                        break
                                     }
-                                    val left = result.getBoundingBox(from).left
-                                    val right = result.getBoundingBox(to).right
-                                    if (right > left) {
-                                        drawLine(
-                                            strikeColor,
-                                            Offset(left, mid),
-                                            Offset(right, mid),
-                                            1.2.dp.toPx(),
-                                        )
-                                    }
+                                    boxIndex++
+                                }
+                                cursor = next + 1
+                            }
+                            if (lineStart < 0) return@awaitEachGesture
+                            down.consume()
+                            var upChange: androidx.compose.ui.input.pointer.PointerInputChange? = null
+                            var cancelled = false
+                            while (upChange == null && !cancelled) {
+                                val event = awaitPointerEvent(
+                                    androidx.compose.ui.input.pointer.PointerEventPass.Initial
+                                )
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                if (change.changedToUpIgnoreConsumed()) {
+                                    upChange = change
+                                } else if ((change.position - down.position).getDistance() >
+                                    viewConfiguration.touchSlop
+                                ) {
+                                    cancelled = true
+                                } else {
+                                    change.consume()
                                 }
                             }
-                            if (isBox) boxIndex++
-                            cursor = next + 1
-                        }
-                    }
-                    if (settings.paperStyle == "plain") return@drawBehind
-                    val lineColor = palette.ink.copy(alpha = (settings.paperLineAlpha * .38f).coerceIn(0f, 1f))
-                    val solid = settings.paperStyle == "solid"
-                    val stroke = 1.dp.toPx()
-                    var index = 0
-                    while (index < result.lineCount) {
-                        val y = result.getLineBottom(index) - scroll
-                        if (y > -4f && y < size.height + 4f) {
-                            if (solid) {
-                                drawLine(lineColor, Offset(0f, y), Offset(size.width, y), stroke)
-                            } else {
-                                val dash = 5.dp.toPx()
-                                val gap = 7.dp.toPx()
-                                var x = 0f
-                                while (x < size.width) {
-                                    drawLine(
-                                        lineColor,
-                                        Offset(x, y),
-                                        Offset((x + dash).coerceAtMost(size.width), y),
-                                        stroke,
-                                    )
-                                    x += dash + gap
-                                }
+                            val up = upChange
+                            if (cancelled || up == null) return@awaitEachGesture
+                            up.consume()
+                            val id = hitId
+                                ?: inlineTodos.firstOrNull { it.start == lineStart }?.id
+                            if (id != null) {
+                                val next = if (text[lineStart] == '☑') '☐' else '☑'
+                                state.edit { replace(lineStart, lineStart + 1, next.toString()) }
+                                val modelDone = inlineTodos.firstOrNull { it.id == id }?.done
+                                if (modelDone != (next == '☑')) onTodoToggle(id)
                             }
                         }
-                        index++
+                    },
+                textStyle = style,
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Text,
+                    imeAction = ImeAction.Default,
+                ),
+                lineLimits = TextFieldLineLimits.MultiLine(),
+                onTextLayout = { getResult -> layout = getResult() },
+                cursorBrush = SolidColor(accent),
+                scrollState = scrollState,
+                inputTransformation = null as InputTransformation?,
+                decorator = decorator,
+            )
+        }
+    }
+}
+
+/** Hides Compose's floating selection panel; the editor dock carries the actions. */
+private object NoTextToolbar : TextToolbar {
+    override val status: TextToolbarStatus get() = TextToolbarStatus.Hidden
+    override fun showMenu(
+        rect: Rect,
+        onCopyRequested: (() -> Unit)?,
+        onCutRequested: (() -> Unit)?,
+        onPasteRequested: (() -> Unit)?,
+        onSelectAllRequested: (() -> Unit)?,
+    ) = Unit
+    override fun hide() = Unit
+}
+
+/** The rectangle a todo checkbox is painted in, shared by draw and hit-test. */
+private fun todoBoxRect(
+    layout: TextLayoutResult,
+    scroll: Int,
+    offset: Int,
+    progress: Float,
+): Rect {
+    val b = layout.getBoundingBox(offset)
+    val top = b.top - scroll
+    val bottom = b.bottom - scroll
+    val glyphW = (b.right - b.left).coerceAtLeast(1f)
+    val glyphH = (bottom - top).coerceAtLeast(1f)
+    val side = minOf(glyphW * .92f, glyphH * .58f) * (0.92f + 0.08f * progress)
+    val cx = b.left + glyphW / 2f
+    val cy = (top + bottom) / 2f
+    return Rect(cx - side / 2f, cy - side / 2f, cx + side / 2f, cy + side / 2f)
+}
+
+/** Highlight + accent handles for the controller-owned selection. */
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCustomSelection(
+    result: TextLayoutResult?,
+    scroll: Int,
+    range: TextRange?,
+    accent: Color,
+) {
+    if (range == null || range.collapsed) return
+    val layout = result ?: return
+    val start = range.min.coerceIn(0, layout.layoutInput.text.length)
+    val end = range.max.coerceIn(0, layout.layoutInput.text.length)
+    if (end <= start) return
+    val firstLine = layout.getLineForOffset(start)
+    val lastLine = layout.getLineForOffset((end - 1).coerceAtLeast(start))
+    val fill = accent.copy(alpha = .20f)
+    for (line in firstLine..lastLine) {
+        val lineStart = layout.getLineStart(line)
+        val lineEnd = layout.getLineEnd(line)
+        val from = maxOf(start, lineStart)
+        val to = minOf(end, lineEnd)
+        if (to <= from) continue
+        val x1 = layout.getBoundingBox(from).left
+        val x2 = layout.getBoundingBox((to - 1).coerceAtLeast(from)).right
+        val top = layout.getLineTop(line) - scroll
+        val bottom = layout.getLineBottom(line) - scroll
+        drawRect(fill, Offset(x1, top), Size((x2 - x1).coerceAtLeast(2f), bottom - top))
+    }
+    val handleRadius = 5.5.dp.toPx()
+    val startBox = layout.getBoundingBox(start)
+    val endBox = layout.getBoundingBox((end - 1).coerceAtLeast(start))
+    drawCircle(accent, handleRadius, Offset(startBox.left, startBox.bottom - scroll + handleRadius))
+    drawCircle(accent, handleRadius, Offset(endBox.right, endBox.bottom - scroll + handleRadius))
+}
+
+/** Paper rules across the whole page, not only where text happens to sit. */
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawPaperLines(
+    result: TextLayoutResult?,
+    scroll: Int,
+    settings: AppSettings,
+    palette: InkPalette,
+    densityScale: Float,
+) {
+    if (settings.paperStyle == "plain") return
+    val layout = result ?: return
+    if (layout.lineCount == 0) return
+    val step = if (layout.lineCount > 1) {
+        layout.getLineTop(1) - layout.getLineTop(0)
+    } else {
+        (layout.layoutInput.style.fontSize.value * densityScale * settings.lineHeight)
+    }
+    if (step <= 0f) return
+    val lineColor = palette.ink.copy(alpha = (settings.paperLineAlpha * .38f).coerceIn(0f, 1f))
+    val solid = settings.paperStyle == "solid"
+    val stroke = 1.dp.toPx()
+    var y = layout.getLineBottom(0) - scroll
+    while (y > -step) y -= step
+    while (y < size.height + step) {
+        if (solid) {
+            drawLine(lineColor, Offset(0f, y), Offset(size.width, y), stroke)
+        } else {
+            val dash = 5.dp.toPx()
+            val gap = 7.dp.toPx()
+            var x = 0f
+            while (x < size.width) {
+                drawLine(
+                    lineColor,
+                    Offset(x, y),
+                    Offset((x + dash).coerceAtMost(size.width), y),
+                    stroke,
+                )
+                x += dash + gap
+            }
+        }
+        y += step
+    }
+}
+
+/** Rounded checkboxes drawn over the ☐/☑ characters, with a spring-ish fill. */
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawTodoBoxes(
+    result: TextLayoutResult?,
+    scroll: Int,
+    state: TextFieldState,
+    todos: List<Todo>,
+    anims: Map<String, Animatable<Float, AnimationVector1D>>,
+    palette: InkPalette,
+    accent: Color,
+) {
+    val layout = result ?: return
+    val text = state.text
+    if (text.isEmpty()) return
+    var boxIndex = 0
+    var cursor = 0
+    while (cursor < text.length) {
+        val next = text.indexOf('\n', cursor).let { if (it < 0) text.length else it }
+        val isBox = cursor < text.length && (text[cursor] == '☐' || text[cursor] == '☑')
+        if (isBox) {
+            val todo = todos.getOrNull(boxIndex)
+            val glyphDone = text[cursor] == '☑'
+            val progress = todo?.let { (anims[it.id]?.value ?: if (glyphDone) 1f else 0f) }
+                ?: if (glyphDone) 1f else 0f
+            val bounds = layout.getBoundingBox(cursor)
+            val top = bounds.top - scroll
+            val bottom = bounds.bottom - scroll
+            if (bottom > -24f && top < size.height + 24f) {
+                val rect = todoBoxRect(layout, scroll, cursor, progress)
+                val side = rect.width
+                val left = rect.left
+                val boxTop = rect.top
+                val cy = rect.center.y
+                // Opaque paper hides the raw glyph underneath.
+                drawRect(
+                    color = palette.paper,
+                    topLeft = Offset(bounds.left - 2f, top - 1f),
+                    size = Size(bounds.width + 4f, bounds.height + 2f),
+                )
+                val radius = side * .34f
+                drawRoundRect(
+                    color = lerp(Color.Transparent, accent, progress),
+                    topLeft = Offset(left, boxTop),
+                    size = Size(side, side),
+                    cornerRadius = CornerRadius(radius, radius),
+                )
+                drawRoundRect(
+                    color = palette.ink.copy(alpha = .38f * (1f - progress)),
+                    topLeft = Offset(left, boxTop),
+                    size = Size(side, side),
+                    cornerRadius = CornerRadius(radius, radius),
+                    style = Stroke(width = 1.4.dp.toPx()),
+                )
+                if (progress > .02f) {
+                    val path = Path().apply {
+                        moveTo(left + side * .26f, cy + side * .01f)
+                        lineTo(left + side * .43f, cy + side * .18f)
+                        lineTo(left + side * .75f, cy - side * .19f)
                     }
+                    drawPath(
+                        path = path,
+                        color = Color.White.copy(alpha = progress.coerceIn(0f, 1f)),
+                        style = Stroke(
+                            width = (2.dp.toPx() * (0.5f + progress * .5f)),
+                            cap = StrokeCap.Round,
+                        ),
+                    )
                 }
-                .pointerInput(state, layout, inlineTodos) {
-                    awaitEachGesture {
-                        val down = awaitFirstDown(requireUnconsumed = false)
-                        val result = layout ?: return@awaitEachGesture
-                        val text = state.text.toString()
-                        // Hit the box glyph itself. getOffsetForPosition only
-                        // gives a character, so the box's own bounds decide:
-                        // a tap on the space after it used to start a text
-                        // selection instead of toggling.
-                        val scroll = scrollState.value
-                        val y = down.position.y + scroll
-                        // Which visual line contains the tap, by its vertical
-                        // band. getOffsetForPosition returns the nearest caret
-                        // and, for a tap at the left edge, picked the next
-                        // line, so the box was never recognised.
-                        var line = 0
-                        while (line < result.lineCount - 1 && y > result.getLineBottom(line)) line++
-                        val lineStart = result.getLineStart(line)
-                        val isBoxChar = lineStart < text.length &&
-                            (text[lineStart] == '☐' || text[lineStart] == '☑')
-                        val slop = 12.dp.toPx()
-                        val box = if (isBoxChar) result.getBoundingBox(lineStart) else null
-                        val isBox = box != null &&
-                            down.position.x in (box.left - slop)..(box.right + slop) &&
-                            y in (box.top - slop)..(box.bottom + slop)
-                        if (!isBox) return@awaitEachGesture
-                        // Claim the down before BasicTextField does; otherwise
-                        // its handler consumes the up and waitForUpOrCancellation
-                        // returns null (tap moved the caret but never toggled).
-                        down.consume()
-                        // Wait for the up in the Initial pass. BasicTextField's
-                        // inner handler consumes the up in the Main pass, which
-                        // made waitForUpOrCancellation return null and the box
-                        // only moved the caret.
-                        var upChange: androidx.compose.ui.input.pointer.PointerInputChange? = null
-                        var cancelled = false
-                        while (upChange == null && !cancelled) {
-                            val event = awaitPointerEvent(
-                                androidx.compose.ui.input.pointer.PointerEventPass.Initial
-                            )
-                            val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                            if (change.changedToUpIgnoreConsumed()) {
-                                upChange = change
-                            } else if ((change.position - down.position).getDistance() >
-                                viewConfiguration.touchSlop
-                            ) {
-                                cancelled = true
-                            } else {
-                                change.consume()
-                            }
-                        }
-                        val up = upChange
-                        if (cancelled || up == null) return@awaitEachGesture
-                        up.consume()
-                        val lineEnd = text.indexOf('\n', lineStart).let { if (it < 0) text.length else it }
-                        val content = text.substring((lineStart + 2).coerceAtMost(lineEnd), lineEnd).trim()
-                        // Todo lines follow inlineTodos order; the live text can
-                        // drift from the stored todo.text, so index first.
-                        var boxIndex = 0
-                        var cursor = 0
-                        while (cursor < lineStart) {
-                            val next = text.indexOf('\n', cursor).let { if (it < 0) text.length else it }
-                            if (next > cursor && (text[cursor] == '☐' || text[cursor] == '☑')) boxIndex++
-                            cursor = next + 1
-                        }
-                        val id = inlineTodos.getOrNull(boxIndex)?.id
-                            ?: inlineTodos.firstOrNull { it.start == lineStart }?.id
-                            ?: inlineTodos.firstOrNull { it.text.trim() == content }?.id
-                        if (id != null) {
-                            // The native path flipped the span glyph and the todo
-                            // model together; here the text is the source of the
-                            // box, so flip it before reporting the toggle.
-                            val next = if (text[lineStart] == '☑') '☐' else '☑'
-                            state.edit { replace(lineStart, lineStart + 1, next.toString()) }
-                            // Model follows the glyph. The stored todo may
-                            // already be out of sync (the old native span and
-                            // the model could disagree); only toggle when the
-                            // model is different from the glyph's new state.
-                            val modelDone = inlineTodos.firstOrNull { it.id == id }?.done
-                            if (modelDone != (next == '☑')) onTodoToggle(id)
-                        }
-                    }
-                },
-            textStyle = style,
-            keyboardOptions = KeyboardOptions(
-                keyboardType = KeyboardType.Text,
-                imeAction = ImeAction.Default,
-            ),
-            lineLimits = TextFieldLineLimits.MultiLine(),
-            onTextLayout = { getResult -> layout = getResult() },
-            cursorBrush = SolidColor(accent),
-            scrollState = scrollState,
-            inputTransformation = indentTransformation,
-            decorator = decorator,
-        )
+            }
+            boxIndex++
+        }
+        cursor = next + 1
+    }
+}
+
+/** Dock-side text actions for the Compose body (the native menuAction is gone). */
+internal class ComposeBodyController(
+    private val state: TextFieldState,
+    private val context: Context,
+) {
+    // Selection lives here, not in the text field: a non-collapsed
+    // TextFieldState selection makes MIUI/Sogou show their own floating text
+    // panel, which the dock replaces. The field keeps a collapsed caret.
+    var range by mutableStateOf<TextRange?>(null)
+        private set
+    private val clipboard: ClipboardManager?
+        get() = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+
+    fun captureNativeSelection(selection: TextRange) {
+        range = selection
+        // Collapse the field's own selection so the system floating panel has
+        // nothing to anchor to.
+        state.edit { this.selection = TextRange(selection.end.coerceIn(0, length)) }
+    }
+
+    fun clearRange() {
+        if (range != null) range = null
+    }
+
+    private fun chosen(): String {
+        val r = range
+        if (r != null && !r.collapsed) {
+            return state.text.substring(r.min.coerceIn(0, state.text.length), r.max.coerceIn(0, state.text.length))
+        }
+        val start = minOf(state.selection.start, state.selection.end).coerceIn(0, state.text.length)
+        val end = maxOf(state.selection.start, state.selection.end).coerceIn(0, state.text.length)
+        return state.text.substring(start, end)
+    }
+
+    fun selectAll() {
+        val len = state.text.length
+        range = TextRange(0, len)
+        state.edit { selection = TextRange(len) }
+    }
+
+    fun collapse() {
+        range = null
+        state.edit { selection = TextRange(selection.end.coerceIn(0, length)) }
+    }
+
+    fun copy() {
+        val text = chosen()
+        if (text.isNotEmpty()) {
+            clipboard?.setPrimaryClip(ClipData.newPlainText("字隅", text))
+        }
+    }
+
+    fun cut() {
+        if (chosen().isNotEmpty()) {
+            copy()
+            deleteSelection()
+        }
+    }
+
+    fun paste() {
+        val text = clipboard?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString().orEmpty()
+        if (text.isEmpty()) return
+        state.edit {
+            val start = minOf(selection.start, selection.end).coerceIn(0, length)
+            val end = maxOf(selection.start, selection.end).coerceIn(0, length)
+            replace(start, end, text)
+            selection = TextRange((start + text.length).coerceAtMost(length))
+        }
+    }
+
+    fun deleteSelection() {
+        val r = range
+        val start = (r?.min ?: minOf(state.selection.start, state.selection.end)).coerceIn(0, state.text.length)
+        val end = (r?.max ?: maxOf(state.selection.start, state.selection.end)).coerceIn(0, state.text.length)
+        range = null
+        state.edit {
+            if (end > start) replace(start, end, "")
+        }
     }
 }
 

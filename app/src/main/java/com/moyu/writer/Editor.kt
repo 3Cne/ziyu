@@ -331,6 +331,8 @@ fun WritingScreen(
     val scope = rememberCoroutineScope()
     val keyboard = LocalSoftwareKeyboardController.current
     var bodyEditor by remember { mutableStateOf<BodyEditText?>(null) }
+    // Compose body actions (copy/paste/select-all) for the dock's selection row.
+    var composeController by remember(seedKey) { mutableStateOf<ComposeBodyController?>(null) }
 
     fun hideEditorKeyboard() {
         // Compose body: clearing focus discards the IME composition buffer, so
@@ -1136,6 +1138,7 @@ fun WritingScreen(
                         dockBottomInsetPx = dockHeightPx +
                             with(density) { 6.dp.toPx() }.toInt(),
                         onScroll = { bodyScrollTick.intValue++ },
+                        onController = { composeController = it },
                         modifier = Modifier
                             .fillMaxSize()
                             .layerBackdrop(bodyBackdrop),
@@ -1321,31 +1324,61 @@ fun WritingScreen(
                     onCollapse = { showSymbols = false },
                     onSymbol = { insertRaw(it) },
                     onExpand = { showSymbols = true },
-                    selectionMode = body.selection.start != body.selection.end,
+                    selectionMode = if (EditorTest.composeBody) {
+                        composeController?.range != null
+                    } else {
+                        body.selection.start != body.selection.end
+                    },
                     onCopy = {
-                        bodyEditor?.menuAction(android.R.id.copy)
-                        bodyEditor?.collapseSelection()
+                        if (EditorTest.composeBody) {
+                            composeController?.copy()
+                            composeController?.collapse()
+                        } else {
+                            bodyEditor?.menuAction(android.R.id.copy)
+                            bodyEditor?.collapseSelection()
+                        }
                         selectionMenu = null
                     },
                     onCut = {
-                        bodyEditor?.menuAction(android.R.id.cut)
-                        bodyEditor?.collapseSelection()
+                        if (EditorTest.composeBody) {
+                            composeController?.cut()
+                        } else {
+                            bodyEditor?.menuAction(android.R.id.cut)
+                            bodyEditor?.collapseSelection()
+                        }
                         selectionMenu = null
                     },
                     onPaste = {
-                        bodyEditor?.menuAction(android.R.id.paste)
-                        bodyEditor?.collapseSelection()
+                        if (EditorTest.composeBody) {
+                            composeController?.paste()
+                        } else {
+                            bodyEditor?.menuAction(android.R.id.paste)
+                            bodyEditor?.collapseSelection()
+                        }
                         selectionMenu = null
                     },
                     onSelectAll = {
-                        bodyEditor?.menuAction(android.R.id.selectAll)
+                        if (EditorTest.composeBody) {
+                            composeController?.selectAll()
+                        } else {
+                            bodyEditor?.menuAction(android.R.id.selectAll)
+                        }
                     },
                     onDelete = {
-                        bodyEditor?.deleteSelection()
+                        if (EditorTest.composeBody) {
+                            composeController?.deleteSelection()
+                            composeController?.collapse()
+                        } else {
+                            bodyEditor?.deleteSelection()
+                        }
                         selectionMenu = null
                     },
                     onCancelSelection = {
-                        bodyEditor?.collapseSelection()
+                        if (EditorTest.composeBody) {
+                            composeController?.collapse()
+                        } else {
+                            bodyEditor?.collapseSelection()
+                        }
                         selectionMenu = null
                     },
                     backdrop = if (EditorTest.composeBody) bodyBackdrop else editorBodyBackdrop,
@@ -3763,6 +3796,7 @@ private fun EditorDock(
 ) {
     val ui = LocalInk.current
     val p = ui.palette
+    val s = ui.settings
     // Solid bar: one straight full-width strip, a touch deeper than the theme
     // paper, so the tools and symbols own their surface. No glass, no rounding.
     // The bar is the theme paper nudged towards the accent, not the raw accent:
@@ -3802,11 +3836,12 @@ private fun EditorDock(
                             shape = androidx.compose.foundation.shape.RoundedCornerShape(0.dp),
                             palette = p,
                             epoch = epoch,
-                            blurDp = 8f,
-                            refractionDp = 18f,
-                            dispersion = false,
-                            shadowAlpha = .16f,
-                            edgeStrength = .5f,
+                            blurDp = s.tabBlur,
+                            refractionDp = s.tabRefraction,
+                            dispersion = s.tabDispersion,
+                            shadowAlpha = s.tabShadow,
+                            veil = s.tabBarOpacity,
+                            edgeStrength = s.tabEdge,
                         )
                     } else {
                         base.background(bar)
