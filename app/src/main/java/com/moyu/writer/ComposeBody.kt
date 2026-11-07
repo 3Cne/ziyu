@@ -7,6 +7,7 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.AnimationVector1D
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ScrollState
+import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
@@ -30,6 +31,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -45,11 +47,15 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalTextToolbar
 import androidx.compose.ui.platform.TextToolbar
 import androidx.compose.ui.platform.TextToolbarStatus
@@ -61,6 +67,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Test branch: the native BodyEditText rewritten as a Compose field.
@@ -111,6 +119,9 @@ internal fun ComposeBodyHost(
 
     val controller = remember(state) { ComposeBodyController(state, context) }
     LaunchedEffect(controller) { onController(controller) }
+    val scope = rememberCoroutineScope()
+    val keyboard = LocalSoftwareKeyboardController.current
+    val focusRequester = remember { FocusRequester() }
 
     // Per-todo check animation: 0 = empty box, 1 = filled + check.
     val checkAnims = remember { mutableStateMapOf<String, Animatable<Float, AnimationVector1D>>() }
@@ -161,7 +172,9 @@ internal fun ComposeBodyHost(
                     suppressRangeClear = false
                     return@collect
                 }
-                if (controller.range != null) controller.clearRange()
+                // Range is cleared explicitly by a tap or a dock action. Clearing
+                // it here also wiped the word a long-press had just captured,
+                // because collapse emits more than one snapshot.
                 val previous = latestBody
                 if (text == previous.text && selection == previous.selection) return@collect
                 if (settings.indent && selection.collapsed &&
@@ -257,6 +270,7 @@ internal fun ComposeBodyHost(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(horizontal = settings.pageMargin.dp)
+                    .focusRequester(focusRequester)
                     .drawWithContent {
                         drawContent()
                         drawCustomSelection(layout, scrollState.value, controller.range, accent)
@@ -292,7 +306,69 @@ internal fun ComposeBodyHost(
                                 }
                                 cursor = next + 1
                             }
-                            if (lineStart < 0) return@awaitEachGesture
+                            if (lineStart < 0) {
+                                // Full gesture takeover: BasicTextField's own
+                                // long-press selection is what woke the system
+                                // floating panel. This handler owns tap, drag,
+                                // fling and long-press; the field selection stays
+                                // collapsed and the range lives in the controller.
+                                down.consume()
+                                var lastPos = down.position
+                                var moved = false
+                                var longPressed = false
+                                var dragged = false
+                                var totalDy = 0f
+                                val startedAt = down.uptimeMillis
+                                var up: androidx.compose.ui.input.pointer.PointerInputChange? = null
+                                while (up == null) {
+                                    val event = withTimeoutOrNull(
+                                        if (moved || longPressed) 10_000L else 480L
+                                    ) { awaitPointerEvent(PointerEventPass.Initial) }
+                                    if (event == null) {
+                                        longPressed = true
+                                        selectWordAt(state, controller, result, down.position, scroll)
+                                        continue
+                                    }
+                                    val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                    if (!moved &&
+                                        (change.position - down.position).getDistance() >
+                                        viewConfiguration.touchSlop
+                                    ) {
+                                        moved = true
+                                    }
+                                    if (moved && !longPressed) {
+                                        dragged = true
+                                        val dy = change.position.y - lastPos.y
+                                        totalDy += dy
+                                        if (dy != 0f) scrollState.dispatchRawDelta(-dy)
+                                    }
+                                    lastPos = change.position
+                                    change.consume()
+                                    if (change.changedToUpIgnoreConsumed()) up = change
+                                }
+                                val lifted = up ?: return@awaitEachGesture
+                                lifted.consume()
+                                when {
+                                    longPressed -> Unit
+                                    dragged -> {
+                                        val elapsed = (lifted.uptimeMillis - startedAt).coerceAtLeast(16L)
+                                        val velocity = totalDy / elapsed * 1000f
+                                        if (kotlin.math.abs(velocity) > 800f) {
+                                            scope.launch { scrollState.animateScrollBy(-velocity * 0.18f) }
+                                        }
+                                    }
+                                    else -> {
+                                        val offset = result.getOffsetForPosition(
+                                            Offset(down.position.x, down.position.y + scroll)
+                                        ).coerceIn(0, state.text.length)
+                                        state.edit { selection = TextRange(offset) }
+                                        controller.clearRange()
+                                        focusRequester.requestFocus()
+                                        keyboard?.show()
+                                    }
+                                }
+                                return@awaitEachGesture
+                            }
                             down.consume()
                             var upChange: androidx.compose.ui.input.pointer.PointerInputChange? = null
                             var cancelled = false
@@ -633,4 +709,28 @@ internal class ComposeBodyController(
 internal object EditorTest {
     const val composeBody = true
     const val glassDock = true
+}
+
+/** Long-press word selection: expand from the tapped offset to delimiters. */
+private fun selectWordAt(
+    state: TextFieldState,
+    controller: ComposeBodyController,
+    layout: TextLayoutResult,
+    position: Offset,
+    scroll: Int,
+) {
+    val text = state.text.toString()
+    val offset = layout.getOffsetForPosition(
+        Offset(position.x, position.y + scroll)
+    ).coerceIn(0, text.length)
+    val delimiters = "，。！？；：、,.!?;:\n\"'“”‘’（）()【】[] \t"
+    var start = offset
+    var end = offset
+    while (start > 0 && text[start - 1] !in delimiters) start--
+    while (end < text.length && text[end] !in delimiters) end++
+    if (start == end) {
+        start = (offset - 1).coerceAtLeast(0)
+        end = (offset + 1).coerceAtMost(text.length)
+    }
+    if (end > start) controller.captureNativeSelection(TextRange(start, end))
 }
