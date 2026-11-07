@@ -39,6 +39,7 @@ import androidx.compose.ui.unit.dp
 import com.kyant.backdrop.Backdrop
 import com.kyant.backdrop.drawBackdrop
 import com.kyant.backdrop.effects.blur
+import com.kyant.backdrop.effects.colorControls
 import com.kyant.backdrop.effects.lens
 import com.kyant.backdrop.effects.vibrancy
 import com.kyant.backdrop.shadow.InnerShadow
@@ -121,6 +122,7 @@ internal fun MoyuTabBar(
                     shadowAlpha = s.tabShadow,
                     veil = s.tabBarOpacity,
                     edgeStrength = s.tabEdge,
+                    light = s.tabBarLight,
                 )
         ) {
             BoxWithConstraints(
@@ -163,6 +165,11 @@ internal fun MoyuTabBar(
                                     backdrop = backdrop!!,
                                     shape = { capsule },
                                     effects = {
+                                        if (s.tabLensLight > 0f) {
+                                            colorControls(
+                                                brightness = 1f + s.tabLensLight.coerceIn(0f, 1f) * .7f,
+                                            )
+                                        }
                                         vibrancy()
                                         if (s.lensBlur > 0f) blur(s.lensBlur.dp.toPx())
                                         if (s.lensRefraction > 0f) {

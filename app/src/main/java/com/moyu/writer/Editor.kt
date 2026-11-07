@@ -3852,12 +3852,13 @@ private fun EditorDock(
                             ),
                             palette = p,
                             epoch = epoch,
-                            blurDp = s.tabBlur,
-                            refractionDp = s.tabRefraction,
-                            dispersion = s.tabDispersion,
-                            shadowAlpha = s.tabShadow,
-                            veil = s.tabBarOpacity,
-                            edgeStrength = s.tabEdge,
+                            blurDp = s.dockBlur,
+                            refractionDp = s.dockRefraction,
+                            dispersion = s.dockDispersion,
+                            shadowAlpha = s.dockShadow,
+                            veil = s.dockBarOpacity,
+                            edgeStrength = s.dockEdge,
+                            light = s.dockLight,
                         )
                     } else {
                         base.background(bar)

@@ -123,6 +123,18 @@ data class AppSettings(
     val lensBlur: Float = 0f,
     val lensDispersion: Boolean = true,
     val lensShadow: Float = .28f,
+    // Dock glass: its own six knobs, independent from the tab bar.
+    val dockBlur: Float = 8f,
+    val dockRefraction: Float = 30f,
+    val dockDispersion: Boolean = true,
+    val dockShadow: Float = .30f,
+    val dockBarOpacity: Float = 0f,
+    val dockEdge: Float = 1f,
+    /** Projected-content brightness for the three glass surfaces: boosts the
+     *  sampled layer itself (vibrancy), never a white overlay. 0 = today. */
+    val tabBarLight: Float = 0f,
+    val tabLensLight: Float = 0f,
+    val dockLight: Float = 0f,
     val tabNames: List<String> = listOf("书架", "笔记", "数据", "设置"),
     val dailyGoal: Int = 2000,
     val indent: Boolean = true,
@@ -647,6 +659,21 @@ class AppStore(context: Context) {
                 tabLensOpacity = settings.tabLensOpacity.coerceIn(0f, 1f),
             )
         }
+        if (settings.dockEdge !in 0f..1f || settings.dockBarOpacity !in 0f..1f) {
+            settings = settings.copy(
+                dockEdge = settings.dockEdge.coerceIn(0f, 1f),
+                dockBarOpacity = settings.dockBarOpacity.coerceIn(0f, 1f),
+            )
+        }
+        if (settings.tabBarLight !in 0f..1f || settings.tabLensLight !in 0f..1f ||
+            settings.dockLight !in 0f..1f
+        ) {
+            settings = settings.copy(
+                tabBarLight = settings.tabBarLight.coerceIn(0f, 1f),
+                tabLensLight = settings.tabLensLight.coerceIn(0f, 1f),
+                dockLight = settings.dockLight.coerceIn(0f, 1f),
+            )
+        }
         if (settings.noteFloatW >= .59f) {
             // Widths saved while the notes were a floating card, and by the
             // first side-panel draft, took too much of the page. The panel now
@@ -843,6 +870,11 @@ private fun encodeSettings(s: AppSettings): JSONObject = JSONObject().apply {
     put("lensRefraction", s.lensRefraction.toDouble()); put("lensDispersion", s.lensDispersion)
     put("lensBlur", s.lensBlur.toDouble())
     put("lensShadow", s.lensShadow.toDouble())
+    put("dockBlur", s.dockBlur.toDouble()); put("dockRefraction", s.dockRefraction.toDouble())
+    put("dockDispersion", s.dockDispersion); put("dockShadow", s.dockShadow.toDouble())
+    put("dockBarOpacity", s.dockBarOpacity.toDouble()); put("dockEdge", s.dockEdge.toDouble())
+    put("tabBarLight", s.tabBarLight.toDouble()); put("tabLensLight", s.tabLensLight.toDouble())
+    put("dockLight", s.dockLight.toDouble())
     put("tabNames", JSONArray(s.tabNames))
     put("dailyGoal", s.dailyGoal); put("indent", s.indent)
     put("sectionStyle", s.sectionStyle); put("sectionSymbol", s.sectionSymbol)
@@ -897,6 +929,15 @@ private fun decodeSettings(o: JSONObject?) = AppSettings(
     lensBlur = (o?.optDouble("lensBlur", 0.0) ?: 0.0).toFloat(),
     lensDispersion = o?.optBoolean("lensDispersion", true) ?: true,
     lensShadow = (o?.optDouble("lensShadow", .28) ?: .28).toFloat(),
+    dockBlur = (o?.optDouble("dockBlur", 8.0) ?: 8.0).toFloat(),
+    dockRefraction = (o?.optDouble("dockRefraction", 30.0) ?: 30.0).toFloat(),
+    dockDispersion = o?.optBoolean("dockDispersion", true) ?: true,
+    dockShadow = (o?.optDouble("dockShadow", .30) ?: .30).toFloat(),
+    dockBarOpacity = (o?.optDouble("dockBarOpacity", 0.0) ?: 0.0).toFloat().coerceIn(0f, 1f),
+    dockEdge = (o?.optDouble("dockEdge", 1.0) ?: 1.0).toFloat().coerceIn(0f, 1f),
+    tabBarLight = (o?.optDouble("tabBarLight", 0.0) ?: 0.0).toFloat().coerceIn(0f, 1f),
+    tabLensLight = (o?.optDouble("tabLensLight", 0.0) ?: 0.0).toFloat().coerceIn(0f, 1f),
+    dockLight = (o?.optDouble("dockLight", 0.0) ?: 0.0).toFloat().coerceIn(0f, 1f),
     tabNames = o?.optJSONArray("tabNames")?.let { a -> (0 until a.length()).map { a.optString(it) } }
         ?: listOf("书架", "笔记", "数据", "设置"),
     dailyGoal = o?.optInt("dailyGoal", 2000) ?: 2000,

@@ -19,6 +19,7 @@ import androidx.compose.ui.unit.dp
 import com.kyant.backdrop.Backdrop
 import com.kyant.backdrop.drawBackdrop
 import com.kyant.backdrop.effects.blur
+import com.kyant.backdrop.effects.colorControls
 import com.kyant.backdrop.effects.lens
 import com.kyant.backdrop.effects.vibrancy
 import com.kyant.backdrop.shadow.InnerShadow
@@ -60,6 +61,9 @@ internal fun Modifier.liquidGlassBar(
     /** 0..1 strength of the inner bevel band. Reads as glass thickness; it is
      *  a soft band, not a glow. */
     edgeStrength: Float = 1f,
+    /** 0..1 brightness of the *projected* content: boosts the sampled layer
+     *  itself (colorControls), never a white overlay on the glass. */
+    light: Float = 0f,
 ): Modifier {
     if (backdrop == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
         val fallback = if (palette.isDark) {
@@ -83,6 +87,11 @@ internal fun Modifier.liquidGlassBar(
         backdrop = backdrop,
         shape = { shape },
         effects = {
+            if (light > 0f) {
+                // Brighten the sampled pixels, not the glass: 1.0 keeps the page
+                // as-is, 1.7 at light = 1 is still inside a readable range.
+                colorControls(brightness = 1f + light.coerceIn(0f, 1f) * .7f)
+            }
             vibrancy()
             if (blurDp > 0f) blur(blurDp.dp.toPx())
             if (refractionDp > 0f) {
