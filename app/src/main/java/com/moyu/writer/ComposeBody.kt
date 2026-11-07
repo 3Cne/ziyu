@@ -205,6 +205,10 @@ internal fun ComposeBodyHost(
         // the dock again.
         kotlinx.coroutines.delay(90)
         clamp()
+        // The IME slide can run ~300 ms; the field may bring the caret again
+        // after the first clamp, so settle once more at the end of the motion.
+        kotlinx.coroutines.delay(280)
+        clamp()
     }
 
     val style = TextStyle(
