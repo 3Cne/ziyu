@@ -284,6 +284,35 @@ internal fun ComposeBodyHost(
                             val text = state.text.toString()
                             val scroll = scrollState.value
                             val slop = 12.dp.toPx()
+                            // Selection handles take priority over text/boxes.
+                            val handleRects = selectionHandleRects(result, scroll, controller.range, density.density)
+                            if (handleRects != null) {
+                                val (startH, endH) = handleRects
+                                val pad = 14.dp.toPx()
+                                val onStart = down.position.x in (startH.left - pad)..(startH.right + pad) &&
+                                    down.position.y in (startH.top - pad)..(startH.bottom + pad)
+                                val onEnd = down.position.x in (endH.left - pad)..(endH.right + pad) &&
+                                    down.position.y in (endH.top - pad)..(endH.bottom + pad)
+                                if (onStart || onEnd) {
+                                    down.consume()
+                                    var upH: androidx.compose.ui.input.pointer.PointerInputChange? = null
+                                    while (upH == null) {
+                                        val ev = awaitPointerEvent(PointerEventPass.Initial)
+                                        val ch = ev.changes.firstOrNull { it.id == down.id } ?: break
+                                        val off = result.getOffsetForPosition(
+                                            Offset(ch.position.x, ch.position.y + scroll)
+                                        ).coerceIn(0, text.length)
+                                        val r = controller.range
+                                        if (r != null) {
+                                            if (onStart) controller.setRange(minOf(off, r.max), r.max)
+                                            else controller.setRange(r.min, maxOf(off, r.min))
+                                        }
+                                        ch.consume()
+                                        if (ch.changedToUpIgnoreConsumed()) upH = ch
+                                    }
+                                    return@awaitEachGesture
+                                }
+                            }
                             // Hit the exact rectangle the checkbox is drawn in.
                             // A line-band lookup drifted one row from the drawn
                             // box because the canvas and tap spaces differ.
@@ -489,11 +518,12 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCustomSelection
         val bottom = layout.getLineBottom(line) - scroll
         drawRect(fill, Offset(x1, top), Size((x2 - x1).coerceAtLeast(2f), bottom - top))
     }
-    val handleRadius = 5.5.dp.toPx()
-    val startBox = layout.getBoundingBox(start)
-    val endBox = layout.getBoundingBox((end - 1).coerceAtLeast(start))
-    drawCircle(accent, handleRadius, Offset(startBox.left, startBox.bottom - scroll + handleRadius))
-    drawCircle(accent, handleRadius, Offset(endBox.right, endBox.bottom - scroll + handleRadius))
+    val handles = selectionHandleRects(layout, scroll, range, density)
+    if (handles != null) {
+        val radius = androidx.compose.ui.geometry.CornerRadius(5.5.dp.toPx(), 5.5.dp.toPx())
+        drawRoundRect(accent, handles.first.topLeft, handles.first.size, radius)
+        drawRoundRect(accent, handles.second.topLeft, handles.second.size, radius)
+    }
 }
 
 /** Paper rules across the whole page, not only where text happens to sit. */
@@ -648,6 +678,13 @@ internal class ComposeBodyController(
         if (range != null) range = null
     }
 
+    /** Update the range while a handle is dragged; keeps the field collapsed. */
+    fun setRange(start: Int, end: Int) {
+        val a = minOf(start, end).coerceIn(0, state.text.length)
+        val b = maxOf(start, end).coerceIn(0, state.text.length)
+        range = TextRange(a, b)
+    }
+
     private fun chosen(): String {
         val r = range
         if (r != null && !r.collapsed) {
@@ -733,4 +770,25 @@ private fun selectWordAt(
         end = (offset + 1).coerceAtMost(text.length)
     }
     if (end > start) controller.captureNativeSelection(TextRange(start, end))
+}
+
+/** Teardrop-ish selection handles: start above the line, end below it. */
+private fun selectionHandleRects(
+    layout: TextLayoutResult,
+    scroll: Int,
+    range: TextRange?,
+    density: Float,
+): Pair<Rect, Rect>? {
+    if (range == null || range.collapsed) return null
+    val len = layout.layoutInput.text.length
+    val startOffset = range.min.coerceIn(0, len)
+    val endOffset = (range.max - 1).coerceIn(startOffset, (len - 1).coerceAtLeast(startOffset))
+    val s = layout.getBoundingBox(startOffset)
+    val e = layout.getBoundingBox(endOffset)
+    val w = 5.5f * density
+    val h = 22f * density
+    val gap = 4f * density
+    val start = Rect(s.left - w, s.top - scroll - gap - h, s.left + w, s.top - scroll - gap)
+    val end = Rect(e.right - w, e.bottom - scroll + gap, e.right + w, e.bottom - scroll + gap + h)
+    return start to end
 }
