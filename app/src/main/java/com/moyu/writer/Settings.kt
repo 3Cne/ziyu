@@ -570,6 +570,7 @@ private fun AppearancePage(store: AppStore, onBack: () -> Unit) {
                 }
             }
         }
+        item { DockGlassSection(store) { preview = 2 } }
         item { SectionCaption("字体") }
         item {
             Segmented(
@@ -1657,3 +1658,103 @@ private fun openNotificationSettings(context: Context) {
 
 
 
+
+
+@Composable
+private fun DockGlassSection(store: AppStore, onPreview: () -> Unit) {
+    val ui = LocalInk.current
+    val s = ui.settings
+    SectionCaption("投射亮度")
+    SettingGroup {
+        Column {
+            SettingRow("标签栏", "${(s.tabBarLight * 100).roundToInt()}%", Glyph.Sparkles)
+            InkSlider(s.tabBarLight, { v -> store.updateSettings { it.copy(tabBarLight = v) }; onPreview() },
+                0f, 1f, modifier = Modifier.padding(horizontal = 16.dp))
+        }
+        RowDivider()
+        Column {
+            SettingRow("选中镜片", "${(s.tabLensLight * 100).roundToInt()}%", Glyph.Sparkles)
+            InkSlider(s.tabLensLight, { v -> store.updateSettings { it.copy(tabLensLight = v) }; onPreview() },
+                0f, 1f, modifier = Modifier.padding(horizontal = 16.dp))
+        }
+        RowDivider()
+        Column {
+            SettingRow("工具 dock", "${(s.dockLight * 100).roundToInt()}%", Glyph.Sparkles)
+            InkSlider(s.dockLight, { v -> store.updateSettings { it.copy(dockLight = v) }; onPreview() },
+                0f, 1f, modifier = Modifier.padding(horizontal = 16.dp))
+        }
+    }
+    Spacer(Modifier.height(12.dp))
+    SectionCaption("工具 dock 玻璃")
+    SettingGroup {
+        Column {
+            SettingRow("模糊", "${s.dockBlur.roundToInt()} dp", Glyph.Sparkles)
+            InkSlider(s.dockBlur, { v -> store.updateSettings { it.copy(dockBlur = (v * 10).roundToInt() / 10f) }; onPreview() },
+                0f, 20f, modifier = Modifier.padding(horizontal = 16.dp))
+        }
+        RowDivider()
+        Column {
+            SettingRow("边缘折射", "${s.dockRefraction.roundToInt()} dp", Glyph.Sparkles)
+            InkSlider(s.dockRefraction, { v -> store.updateSettings { it.copy(dockRefraction = (v * 10).roundToInt() / 10f) }; onPreview() },
+                0f, 60f, modifier = Modifier.padding(horizontal = 16.dp))
+        }
+        RowDivider()
+        Column {
+            SettingRow("内外阴影", "${(s.dockShadow * 100).roundToInt()}%", Glyph.Sparkles)
+            InkSlider(s.dockShadow, { v -> store.updateSettings { it.copy(dockShadow = v) }; onPreview() },
+                0f, 1f, modifier = Modifier.padding(horizontal = 16.dp))
+        }
+        RowDivider()
+        Column {
+            SettingRow("dock 不透明度", "${(s.dockBarOpacity * 100).roundToInt()}%", Glyph.Sparkles)
+            InkSlider(s.dockBarOpacity, { v -> store.updateSettings { it.copy(dockBarOpacity = v) }; onPreview() },
+                0f, 1f, modifier = Modifier.padding(horizontal = 16.dp))
+        }
+        RowDivider()
+        Column {
+            SettingRow("边缘带", "${(s.dockEdge * 100).roundToInt()}%", Glyph.Sparkles)
+            InkSlider(s.dockEdge, { v -> store.updateSettings { it.copy(dockEdge = v) }; onPreview() },
+                0f, 1f, modifier = Modifier.padding(horizontal = 16.dp))
+        }
+        RowDivider()
+        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Txt("边缘色散", size = 10f, color = ui.palette.ink)
+            Spacer(Modifier.weight(1f))
+            Segmented(listOf("开", "关"), if (s.dockDispersion) 0 else 1,
+                { i -> store.updateSettings { it.copy(dockDispersion = i == 0) }; onPreview() },
+                Modifier.width(120.dp))
+        }
+    }
+    Spacer(Modifier.height(10.dp))
+    DockGlassPreview()
+}
+
+@Composable
+private fun DockGlassPreview() {
+    val ui = LocalInk.current
+    val p = ui.palette
+    val s = ui.settings
+    val backdrop = rememberLayerBackdrop()
+    Box(Modifier.fillMaxWidth().height(104.dp).clip(RoundedCornerShape(14.dp))) {
+        Column(Modifier.fillMaxSize().layerBackdrop(backdrop).background(p.paper).padding(16.dp)) {
+            Box(Modifier.fillMaxWidth(.85f).height(6.dp).background(p.ink.copy(alpha = .30f), RoundedCornerShape(3.dp)))
+            Spacer(Modifier.height(8.dp))
+            Box(Modifier.fillMaxWidth(.6f).height(6.dp).background(p.ink.copy(alpha = .30f), RoundedCornerShape(3.dp)))
+        }
+        Box(
+            Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(48.dp).liquidGlassBar(
+                backdrop = backdrop,
+                shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
+                palette = p,
+                blurDp = s.dockBlur,
+                refractionDp = s.dockRefraction,
+                dispersion = s.dockDispersion,
+                shadowAlpha = s.dockShadow,
+                veil = s.dockBarOpacity,
+                edgeStrength = s.dockEdge,
+                light = s.dockLight,
+            ),
+            contentAlignment = Alignment.Center,
+        ) { Txt("工具 dock 预览", size = 9f, color = p.ink) }
+    }
+}
