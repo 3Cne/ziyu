@@ -3844,7 +3844,12 @@ private fun EditorDock(
                     if (glass && backdrop != null) {
                         base.liquidGlassBar(
                             backdrop = backdrop,
-                            shape = androidx.compose.foundation.shape.RoundedCornerShape(0.dp),
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(
+                                topStart = 26.dp,
+                                topEnd = 26.dp,
+                                bottomStart = 0.dp,
+                                bottomEnd = 0.dp,
+                            ),
                             palette = p,
                             epoch = epoch,
                             blurDp = s.tabBlur,

@@ -184,13 +184,21 @@ internal fun ComposeBodyHost(
     LaunchedEffect(state.selection, dockBottomInsetPx, viewportH, layout) {
         val result = layout ?: return@LaunchedEffect
         if (viewportH <= 0) return@LaunchedEffect
-        val caret = state.selection.end.coerceIn(0, state.text.length)
-        val line = result.getLineForOffset(caret)
-        val bottomInView = result.getLineBottom(line) - scrollState.value
         val limit = viewportH - dockBottomInsetPx - with(density) { 8.dp.toPx() }
-        if (bottomInView > limit) {
-            scrollState.scrollTo((scrollState.value + bottomInView - limit).toInt())
+        suspend fun clamp() {
+            val caret = state.selection.end.coerceIn(0, state.text.length)
+            val line = result.getLineForOffset(caret)
+            val bottomInView = result.getLineBottom(line) - scrollState.value
+            if (bottomInView > limit) {
+                scrollState.scrollTo((scrollState.value + bottomInView - limit).toInt())
+            }
         }
+        clamp()
+        // BasicTextField's own bring runs after the IME resize; re-check once it
+        // has settled, otherwise the caret lands at the viewport edge behind
+        // the dock again.
+        kotlinx.coroutines.delay(90)
+        clamp()
     }
 
     val style = TextStyle(
@@ -425,22 +433,18 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawPaperLines(
             }
         }
     }
-    // One rule per real text line, so rules track wrapping and line-height
-    // changes; then continue the same rhythm above and below the text.
-    var index = 0
-    while (index < layout.lineCount) {
-        rule(layout.getLineBottom(index) - scroll)
-        index++
-    }
-    var y = layout.getLineBottom(layout.lineCount - 1) - scroll + step
+    // Same anchoring as the stable BodyEditText.drawPaper(): first baseline +
+    // descent + a third of the leftover space, then a fixed grid. Anchoring on
+    // line boxes put the rules at the next line's top, which read as misaligned.
+    val em = (step / settings.lineHeight.coerceAtLeast(.1f)).coerceAtLeast(1f)
+    val descent = em * .25f
+    val glyphHeight = em * 1.16f
+    val gap = ((step - glyphHeight) * .35f).coerceIn(2f, 6f * densityScale)
+    var y = layout.getLineBaseline(0) + descent + gap - scroll
+    while (y > -step) y -= step
     while (y < size.height + step) {
         rule(y)
         y += step
-    }
-    var up = layout.getLineBottom(0) - scroll - step
-    while (up > -step) {
-        rule(up)
-        up -= step
     }
 }
 
