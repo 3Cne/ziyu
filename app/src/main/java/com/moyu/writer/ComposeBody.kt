@@ -94,6 +94,12 @@ internal fun ComposeBodyHost(
     val scrollState = rememberScrollState()
     var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
     var viewportH by remember { mutableStateOf(0) }
+    // Grid phase is captured once per typography, not recomputed from the live
+    // layout: a newline or an empty first line used to move the anchor and the
+    // rules visibly jumped while typing.
+    var gridPhase by remember(settings.font, settings.lineHeight, bodySize, settings.paperStyle) {
+        mutableStateOf<Float?>(null)
+    }
     val latestBody by rememberUpdatedState(body)
     val latestChange by rememberUpdatedState(onBodyChange)
     var applyingExternal by remember { mutableStateOf(false) }
@@ -250,7 +256,7 @@ internal fun ComposeBodyHost(
                     .drawWithContent {
                         drawContent()
                         drawCustomSelection(layout, scrollState.value, controller.range, accent)
-                        drawPaperLines(layout, scrollState.value, settings, palette, density.density)
+                        drawPaperLines(layout, scrollState.value, settings, palette, density.density, gridPhase)
                         drawTodoBoxes(layout, scrollState.value, state, inlineTodos, checkAnims, palette, accent)
                     }
                     .pointerInput(state, layout, inlineTodos) {
@@ -320,7 +326,22 @@ internal fun ComposeBodyHost(
                     imeAction = ImeAction.Default,
                 ),
                 lineLimits = TextFieldLineLimits.MultiLine(),
-                onTextLayout = { getResult -> layout = getResult() },
+                onTextLayout = { getResult ->
+                    val result = getResult()
+                    layout = result
+                    if (gridPhase == null && result != null && result.lineCount > 0) {
+                        val step = if (result.lineCount > 1) {
+                            result.getLineTop(1) - result.getLineTop(0)
+                        } else {
+                            with(density) {
+                                (bodySize * settings.lineHeight).sp.toPx()
+                            }
+                        }
+                        val em = (step / settings.lineHeight.coerceAtLeast(.1f)).coerceAtLeast(1f)
+                        gridPhase = result.getLineBaseline(0) + em * .25f +
+                            ((step - em * 1.16f) * .35f).coerceIn(2f, 6f * density.density)
+                    }
+                },
                 cursorBrush = SolidColor(accent),
                 scrollState = scrollState,
                 inputTransformation = null as InputTransformation?,
@@ -402,6 +423,7 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawPaperLines(
     settings: AppSettings,
     palette: InkPalette,
     densityScale: Float,
+    phase: Float?,
 ) {
     if (settings.paperStyle == "plain") return
     val layout = result ?: return
@@ -440,7 +462,7 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawPaperLines(
     val descent = em * .25f
     val glyphHeight = em * 1.16f
     val gap = ((step - glyphHeight) * .35f).coerceIn(2f, 6f * densityScale)
-    var y = layout.getLineBaseline(0) + descent + gap - scroll
+    var y = (phase ?: (layout.getLineBaseline(0) + descent + gap)) - scroll
     while (y > -step) y -= step
     while (y < size.height + step) {
         rule(y)
