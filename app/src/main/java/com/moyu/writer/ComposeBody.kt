@@ -47,6 +47,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalTextToolbar
@@ -92,6 +93,7 @@ internal fun ComposeBodyHost(
     val state = remember(seedKey) { TextFieldState(initialText) }
     val scrollState = rememberScrollState()
     var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
+    var viewportH by remember { mutableStateOf(0) }
     val latestBody by rememberUpdatedState(body)
     val latestChange by rememberUpdatedState(onBodyChange)
     var applyingExternal by remember { mutableStateOf(false) }
@@ -176,6 +178,21 @@ internal fun ComposeBodyHost(
         snapshotFlow { scrollState.value }.collect { onScroll() }
     }
 
+    // The dock overlays the body; when the IME opens the viewport shrinks and
+    // BasicTextField only keeps the caret inside its own bounds, which still
+    // extends under the dock. Push the caret line above the dock explicitly.
+    LaunchedEffect(state.selection, dockBottomInsetPx, viewportH, layout) {
+        val result = layout ?: return@LaunchedEffect
+        if (viewportH <= 0) return@LaunchedEffect
+        val caret = state.selection.end.coerceIn(0, state.text.length)
+        val line = result.getLineForOffset(caret)
+        val bottomInView = result.getLineBottom(line) - scrollState.value
+        val limit = viewportH - dockBottomInsetPx - with(density) { 8.dp.toPx() }
+        if (bottomInView > limit) {
+            scrollState.scrollTo((scrollState.value + bottomInView - limit).toInt())
+        }
+    }
+
     val style = TextStyle(
         color = palette.ink,
         fontSize = bodySize.sp,
@@ -212,7 +229,7 @@ internal fun ComposeBodyHost(
         }
     }
 
-    Box(modifier.fillMaxSize()) {
+    Box(modifier.fillMaxSize().onSizeChanged { viewportH = it.height }) {
         CompositionLocalProvider(
             LocalTextToolbar provides NoTextToolbar,
             LocalTextSelectionColors provides selectionColors,
@@ -390,11 +407,9 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawPaperLines(
     val lineColor = palette.ink.copy(alpha = (settings.paperLineAlpha * .38f).coerceIn(0f, 1f))
     val solid = settings.paperStyle == "solid"
     val stroke = 1.dp.toPx()
-    var y = layout.getLineBottom(0) - scroll
-    while (y > -step) y -= step
-    while (y < size.height + step) {
+    fun rule(atY: Float) {
         if (solid) {
-            drawLine(lineColor, Offset(0f, y), Offset(size.width, y), stroke)
+            drawLine(lineColor, Offset(0f, atY), Offset(size.width, atY), stroke)
         } else {
             val dash = 5.dp.toPx()
             val gap = 7.dp.toPx()
@@ -402,14 +417,30 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawPaperLines(
             while (x < size.width) {
                 drawLine(
                     lineColor,
-                    Offset(x, y),
-                    Offset((x + dash).coerceAtMost(size.width), y),
+                    Offset(x, atY),
+                    Offset((x + dash).coerceAtMost(size.width), atY),
                     stroke,
                 )
                 x += dash + gap
             }
         }
+    }
+    // One rule per real text line, so rules track wrapping and line-height
+    // changes; then continue the same rhythm above and below the text.
+    var index = 0
+    while (index < layout.lineCount) {
+        rule(layout.getLineBottom(index) - scroll)
+        index++
+    }
+    var y = layout.getLineBottom(layout.lineCount - 1) - scroll + step
+    while (y < size.height + step) {
+        rule(y)
         y += step
+    }
+    var up = layout.getLineBottom(0) - scroll - step
+    while (up > -step) {
+        rule(up)
+        up -= step
     }
 }
 

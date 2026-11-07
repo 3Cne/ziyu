@@ -405,6 +405,10 @@ fun WritingScreen(
     // Test branch: a Compose body records itself as a real Compose layer, so
     // the dock's glass can sample the glyphs instead of a software bitmap.
     val bodyBackdrop = rememberLayerBackdrop()
+    // The dock must sample the page, not just the body layer: the tab bar
+    // samples the whole page (paper + content) and that is what makes it read
+    // as the same 1-type glass. Record the writing page here.
+    val pageBackdrop = rememberLayerBackdrop()
     // 1型玻璃 only re-samples when its draw node records a new frame. The body
     // is a native EditText, so Compose never sees its scroll. Bump this tick on
     // every body scroll / text change and pass it as the glass epoch.
@@ -786,6 +790,12 @@ fun WritingScreen(
                 },
             )
             Box(Modifier.weight(1f).fillMaxWidth()) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(p.paper)
+                    .layerBackdrop(pageBackdrop)
+            ) {
             Row(
                 Modifier
                     .fillMaxSize()
@@ -1250,6 +1260,7 @@ fun WritingScreen(
                 )
             }
             }
+            }
             Box(
                 Modifier
                     .align(Alignment.BottomCenter)
@@ -1381,7 +1392,7 @@ fun WritingScreen(
                         }
                         selectionMenu = null
                     },
-                    backdrop = if (EditorTest.composeBody) bodyBackdrop else editorBodyBackdrop,
+                    backdrop = if (EditorTest.composeBody) pageBackdrop else editorBodyBackdrop,
                     glass = EditorTest.glassDock && EditorTest.composeBody,
                     epoch = bodyScrollTick.intValue,
                     scrollTick = bodyScrollTick,
