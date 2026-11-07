@@ -541,7 +541,7 @@ fun ExportSheet(book: Book, onDismiss: () -> Unit) {
             ) { format = "txt"; result = null }
         }
         Spacer(Modifier.height(14.dp))
-        MoyuSurface(SurfaceRole.CARD, Modifier.fillMaxWidth(), radius = 18f) {
+        MoyuSurface(Modifier.fillMaxWidth(), radius = 18f, flat = true) {
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 11.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -589,7 +589,7 @@ fun ExportSheet(book: Book, onDismiss: () -> Unit) {
             )
         } else {
             val r = result!!
-            MoyuSurface(SurfaceRole.CARD, Modifier.fillMaxWidth(), radius = 22f) {
+            MoyuSurface(Modifier.fillMaxWidth(), radius = 22f, flat = true) {
                 Column(Modifier.padding(16.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(
@@ -684,7 +684,7 @@ fun NoteExportSheet(note: Note, onDismiss: () -> Unit) {
             )
         } else {
             val r = result!!
-            MoyuSurface(SurfaceRole.CARD, Modifier.fillMaxWidth(), radius = 22f) {
+            MoyuSurface(Modifier.fillMaxWidth(), radius = 22f, flat = true) {
                 Column(Modifier.padding(16.dp)) {
                     Txt("导出完成", size = 13.5f, weight = FontWeight.Medium)
                     Txt(r.fileName, size = 9.5f, color = ui.palette.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)

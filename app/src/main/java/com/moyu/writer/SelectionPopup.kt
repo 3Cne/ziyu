@@ -81,10 +81,10 @@ class SelectionPopup(
                             animationSpec = tween(130, easing = FastOutSlowInEasing),
                         ),
                     ) {
-                        MoyuSurface(
-                            SurfaceRole.BAR,
-                            Modifier.fillMaxWidth().height(48.dp),
+                        MoyuSurface(Modifier.fillMaxWidth().height(48.dp),
                             radius = 24f,
+                            flat = true,
+                            tone = dockTone(LocalInk.current),
                         ) {
                             Row(
                                 Modifier.fillMaxWidth().padding(horizontal = 6.dp),

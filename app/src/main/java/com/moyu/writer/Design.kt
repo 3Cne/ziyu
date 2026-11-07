@@ -29,9 +29,11 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
+import kotlinx.coroutines.withTimeoutOrNull
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -87,6 +89,7 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -100,11 +103,13 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathMeasure
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.addOutline
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
@@ -429,22 +434,39 @@ fun Modifier.liquidGlass(
         // surface made fillOverride irrelevant: every card used the fixed
         // 96/98/99% branch and the Fill slider did nothing.
         val solid = frost >= .99f && fillOverride == null
+        // The gradient used to keep a fixed 10/16/26 percent of transparency even at
+// fill = 1, so a control set to 100 dispensed still let the page show through
+// and its labels ghosted onto whatever sat behind. Interpolate towards fully
+// opaque instead: at fill 1 the three stops are all alpha 1, and the old
+// falloff only applies below that.
         val fill = if (p.isDark) {
+            val stops = if (fillAmount >= 1f) {
+                floatArrayOf(1f, 1f, 1f)
+            } else {
+                floatArrayOf(.045f, .86f, .96f)
+            }
             Brush.linearGradient(
                 colors = listOf(
-                    Color.White.copy(alpha = if (solid) .06f else bodyAlpha * .045f),
-                    frostColor.copy(alpha = if (solid) .985f else bodyAlpha * .86f),
-                    bodyTint.copy(alpha = if (solid) .99f else bodyAlpha * .96f),
+                    Color.White.copy(alpha = if (solid) .06f else bodyAlpha * stops[0]),
+                    frostColor.copy(alpha = if (solid) .985f else bodyAlpha * stops[1]),
+                    bodyTint.copy(alpha = if (solid) .99f else bodyAlpha * stops[2]),
                 ),
                 start = Offset(0f, 0f),
                 end = Offset(w, h),
             )
         } else {
+            // Stops no longer fade to 74% at the far corner once fill is 1: that fade is
+            // what made a solid control look like a ghost of itself.
+            val stops = if (fillAmount >= 1f) {
+                floatArrayOf(1f, 1f, 1f)
+            } else {
+                floatArrayOf(.90f, .84f, .74f)
+            }
             Brush.linearGradient(
                 colors = listOf(
-                    bodyTint.copy(alpha = if (solid) .96f else bodyAlpha * .90f),
-                    bodyTint.copy(alpha = if (solid) .985f else bodyAlpha * .84f),
-                    bodyTint.copy(alpha = if (solid) .99f else bodyAlpha * .74f),
+                    bodyTint.copy(alpha = if (solid) .96f else bodyAlpha * stops[0]),
+                    bodyTint.copy(alpha = if (solid) .985f else bodyAlpha * stops[1]),
+                    bodyTint.copy(alpha = if (solid) .99f else bodyAlpha * stops[2]),
                 ),
                 start = Offset(0f, 0f),
                 end = Offset(w, h),
@@ -452,8 +474,12 @@ fun Modifier.liquidGlass(
         }
         val caustic = Brush.radialGradient(
             colors = listOf(
+                // 折射 is the only thing that may push these two glows around.
+                // Scaling them by the fill as well meant that raising 填充 made
+                // the surface look hazier instead of more opaque, which is the
+                // opposite of what the slider promises.
                 Color.White.copy(
-                    alpha = if (p.isDark) opacity * .06f * refractionStrength else opacity * .52f * refractionStrength,
+                    alpha = if (p.isDark) .06f * refractionStrength else .52f * refractionStrength,
                 ),
                 Color.Transparent,
             ),
@@ -463,7 +489,7 @@ fun Modifier.liquidGlass(
         val lowerCaustic = Brush.radialGradient(
             colors = listOf(
                 (if (iridescent) accentColor else Color.White)
-                    .copy(alpha = opacity * .14f * refractionStrength),
+                    .copy(alpha = .14f * refractionStrength),
                 Color.Transparent,
             ),
             center = Offset(w * .86f, h * .94f),
@@ -595,7 +621,11 @@ fun GlassSurface(
     // a flat gray slab. Tint the blur toward the paper color in each theme.
     val hazeTint = if (LocalInk.current.palette.isDark) 0x4D101312L else 0x40FFFFFFL
     val blurScale = .55f
-    val effectiveBlur = hazeBlur * (0.35f + (blurOverride ?: blurScale) * 1.40f)
+    val blurValue = (blurOverride ?: blurScale).coerceIn(0f, 1f)
+    // 模糊 0 must mean no blurring at all. The old curve kept a 35% floor, so
+    // pulling the slider to 0 still left the backdrop smeared and the setting
+    // read as broken.
+    val effectiveBlur = hazeBlur * (blurValue * 1.75f)
     val liveHaze = if (useHaze) haze ?: LocalHazeHandle.current else null
     val glass = if (liveHaze != null) HazeBridge.effect(clipped, liveHaze, effectiveBlur, hazeTint) else clipped
     Box(
@@ -625,23 +655,57 @@ fun Modifier.bouncy(
     enabled: Boolean = true,
     scale: Float = .97f,
     hapticType: Int = 0,
+    /** Release with a small overshoot so even a quick tap reads as a bounce. */
+    overshoot: Boolean = false,
+    /** When present the same modifier owns tap and long press; two detectors
+     *  would race for the same down. */
+    onLongPress: (() -> Unit)? = null,
+    onPressChange: (Boolean) -> Unit = {},
     onClick: () -> Unit,
 ): Modifier {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val haptic = LocalHaptic.current
     val motion = LocalInk.current.settings.motion
-    val s by animateFloatAsState(
-        targetValue = if (pressed && enabled) scale else 1f,
-        animationSpec = if (motion == "none") tween(0) else spring(.64f, 700f),
-        label = "pressScale",
-    )
-    return this
-        .graphicsLayer { scaleX = s; scaleY = s }
-        .clickable(interactionSource = interaction, indication = null, enabled = enabled) {
+    // Optional hook so a parent can react to the press (the liquid tab bar uses
+    // it to squash its lens). Defaults to a no-op for every existing caller.
+    LaunchedEffect(pressed) { onPressChange(pressed) }
+    val anim = remember { Animatable(1f) }
+    val peak = 1f + (1f - scale) * .32f
+    LaunchedEffect(pressed, enabled) {
+        val down = pressed && enabled
+        if (motion == "none") {
+            anim.snapTo(if (down) scale else 1f)
+            return@LaunchedEffect
+        }
+        if (down) {
+            anim.animateTo(scale, spring(.55f, 900f))
+        } else if (overshoot) {
+            // Tap: shrink, spring past 1, settle. The whole point is that a
+            // 50 ms press still shows a visible bounce.
+            anim.animateTo(peak, tween(70, easing = FastOutSlowInEasing))
+            anim.animateTo(1f, spring(.5f, 480f))
+        } else {
+            anim.animateTo(1f, spring(.64f, 700f))
+        }
+    }
+    val clicks = if (onLongPress != null) {
+        Modifier.combinedClickable(
+            interactionSource = interaction,
+            indication = null,
+            enabled = enabled,
+            onLongClick = { haptic(hapticType); onLongPress() },
+            onClick = { haptic(hapticType); onClick() },
+        )
+    } else {
+        Modifier.clickable(interactionSource = interaction, indication = null, enabled = enabled) {
             haptic(hapticType)
             onClick()
         }
+    }
+    return this
+        .graphicsLayer { scaleX = anim.value; scaleY = anim.value }
+        .then(clicks)
 }
 
 @Composable
@@ -692,6 +756,11 @@ fun PrimaryButton(
     }
 }
 
+/** The dock tone, shared by the editor toolbar and every flat button.
+ *  Paper nudged towards the accent: low contrast, one solid colour, no shadow. */
+internal fun dockTone(ui: InkUi): Color =
+    lerp(ui.palette.paper, ui.accent, if (ui.palette.isDark) .14f else .10f)
+
 @Composable
 fun GlassButton(
     label: String,
@@ -701,13 +770,13 @@ fun GlassButton(
     tint: Color? = null,
 ) {
     val ui = LocalInk.current
-    MoyuSurface(
-        SurfaceRole.CONTROL,
-        modifier
+    MoyuSurface(modifier
             .heightIn(min = 50.dp)
             .clip(CircleShape),
         radius = 999f,
         shape = CircleShape,
+        flat = true,
+        tone = dockTone(ui),
     ) {
         Row(
             Modifier
@@ -734,13 +803,14 @@ fun GlassIconButton(
     tint: Color = LocalInk.current.palette.ink,
     strength: Float = .78f,
 ) {
-    MoyuSurface(
-        SurfaceRole.CONTROL,
-        modifier
+    val ui = LocalInk.current
+    MoyuSurface(modifier
             .size(size)
             .clip(CircleShape),
         radius = size.value / 2f,
         shape = CircleShape,
+        flat = true,
+        tone = dockTone(ui),
     ) {
         Box(Modifier.fillMaxSize().bouncy { onClick() }, contentAlignment = Alignment.Center) {
             LineIcon(glyph, tint, 21.dp)
@@ -779,11 +849,11 @@ fun GlassChip(
             Txt(label, size = 11.5f, color = fg, weight = FontWeight.Medium)
         }
     } else {
-        MoyuSurface(
-            SurfaceRole.CONTROL,
-            Modifier.clip(CircleShape),
+        MoyuSurface(Modifier.clip(CircleShape),
             radius = 20f,
             shape = CircleShape,
+            flat = true,
+            tone = dockTone(ui),
         ) {
             Row(
                 Modifier.bouncy { onClick() }.padding(horizontal = 13.dp, vertical = 8.dp),
@@ -929,7 +999,7 @@ fun SettingGroup(
                 modifier = Modifier.padding(start = 8.dp, bottom = 9.dp),
             )
         }
-        MoyuSurface(SurfaceRole.CARD, Modifier.fillMaxWidth()) {
+        MoyuSurface(Modifier.fillMaxWidth(), flat = true) {
             Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) { content() }
         }
     }
@@ -1095,39 +1165,52 @@ fun lerp(a: Color, b: Color, t: Float): Color = Color(
  * movement wins.
  */
 @Composable
-private fun Modifier.sliderGesture(widthPx: Int, onUpdate: (Float) -> Unit): Modifier {
+private fun Modifier.sliderGesture(
+    widthPx: Int,
+    onGrabChanged: (Boolean) -> Unit = {},
+    onUpdate: (Float) -> Unit,
+): Modifier {
     // The callback changes when the role tab changes. Keeping the first
     // callback would make a drag update the previously selected role.
     val currentUpdate by rememberUpdatedState(onUpdate)
+    val currentGrab by rememberUpdatedState(onGrabChanged)
     return pointerInput(widthPx) {
         awaitEachGesture {
             val down = awaitFirstDown(requireUnconsumed = false)
-            var dragging = false
-            val slop = viewConfiguration.touchSlop
-            while (true) {
-                val event = awaitPointerEvent()
-                val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                if (change.changedToUpIgnoreConsumed()) {
-                    val upDx = change.position.x - down.position.x
-                    val upDy = change.position.y - down.position.y
-                    if (!dragging && !change.isConsumed &&
-                        upDx * upDx + upDy * upDy <= slop * slop
-                    ) {
-                        currentUpdate(change.position.x)
+            val limit = widthPx.toFloat()
+            // A slider only arms after a short hold. A finger that lands on a
+            // row while scrolling moves within ~30 ms and is ignored, which is
+            // what used to change a value by accident. Once armed, horizontal
+            // movement follows the finger; a quick tap does nothing at all.
+            val first = withTimeoutOrNull(120) {
+                var ev: androidx.compose.ui.input.pointer.PointerEvent
+                do {
+                    ev = awaitPointerEvent()
+                } while (ev.changes.none { it.id == down.id })
+                ev
+            }
+            if (first == null) {
+                currentGrab(true)
+                try {
+                    while (true) {
+                        val ev = awaitPointerEvent()
+                        val change = ev.changes.firstOrNull { it.id == down.id } ?: break
+                        change.consume()
+                        if (!change.pressed) break
+                        currentUpdate(change.position.x.coerceIn(0f, limit))
                     }
-                    break
+                } finally {
+                    currentGrab(false)
                 }
-                val dx = change.position.x - down.position.x
-                val dy = change.position.y - down.position.y
-                if (!dragging && kotlin.math.abs(dx) > slop &&
-                    kotlin.math.abs(dx) > kotlin.math.abs(dy)
-                ) {
-                    dragging = true
-                    change.consume()
-                }
-                if (dragging) {
-                    change.consume()
-                    currentUpdate(change.position.x)
+            } else {
+                // Moved before the hold completed: a tap or a list scroll.
+                // Swallow nothing so the LazyColumn keeps scrolling.
+                if (first.changes.any { it.id == down.id && it.pressed }) {
+                    while (true) {
+                        val ev = awaitPointerEvent()
+                        val change = ev.changes.firstOrNull { it.id == down.id } ?: break
+                        if (!change.pressed) break
+                    }
                 }
             }
         }
@@ -1156,13 +1239,23 @@ fun InkSlider(
         onChange(snap(min + (max - min) * (x / widthPx)))
     }
     val fraction = ((value - min) / (max - min)).coerceIn(0f, 1f)
+    var grabbed by remember { mutableStateOf(false) }
+    val haptic = LocalHaptic.current
+    val knob by animateFloatAsState(
+        targetValue = if (grabbed) 1.35f else 1f,
+        animationSpec = if (ui.settings.motion == "none") tween(0) else spring(.6f, 500f),
+        label = "knobGrab",
+    )
     Box(
         modifier
             .fillMaxWidth()
             .height(38.dp)
             .onSizeChanged { widthPx = it.width.coerceAtLeast(1) }
             .semantics { progressBarRangeInfo = androidx.compose.ui.semantics.ProgressBarRangeInfo(value, min..max, 0) }
-            .sliderGesture(widthPx) { x -> update(x) },
+            .sliderGesture(widthPx, onGrabChanged = { on ->
+                grabbed = on
+                if (on) haptic(1)
+            }) { x -> update(x) },
         contentAlignment = Alignment.CenterStart,
     ) {
         Box(
@@ -1186,7 +1279,13 @@ fun InkSlider(
             Modifier
                 .offset(x = knobOffset)
                 .size(22.dp)
-                .graphicsLayer { shadowElevation = 8f; shape = CircleShape; clip = true }
+                .graphicsLayer {
+                    shadowElevation = 8f
+                    shape = CircleShape
+                    clip = true
+                    scaleX = knob
+                    scaleY = knob
+                }
                 .clip(CircleShape)
                 .background(if (ui.palette.isDark) Color(0xFFF4F1E9) else Color.White)
                 .border(.8.dp, Color.Black.copy(alpha = .06f), CircleShape)
@@ -1354,13 +1453,12 @@ fun GlassDialog(
                         scaleIn(initialScale = .965f, animationSpec = tween(190, easing = FastOutSlowInEasing)),
                 ) {
                     CompositionLocalProvider(LocalGlassLite provides performanceMode) {
-                        MoyuSurface(
-                            SurfaceRole.POPUP,
-                            modifier
+                        MoyuSurface(modifier
                                 .padding(horizontal = 18.dp)
                                 .fillMaxWidth()
                                 .widthIn(max = 560.dp)
                                 .heightIn(max = panelMax),
+                            flat = true,
                         ) {
                             Column(
                                 Modifier
@@ -1489,7 +1587,7 @@ fun InlineModalSheet(
         }
     }
 
-    val sheetCorner = ui.settings.materialFor(ui.settings.theme, SurfaceRole.POPUP).corner
+    val sheetCorner = GlassStyle.corner
     val panelShape = RoundedCornerShape(
         topStart = sheetCorner.dp,
         topEnd = sheetCorner.dp,
@@ -1534,19 +1632,36 @@ fun InlineModalSheet(
                     animationSpec = tween(210, easing = FastOutSlowInEasing),
                 ) + fadeOut(tween(150)),
             ) {
-                MoyuSurface(
-                    SurfaceRole.POPUP,
-                    Modifier
+                // Consume taps that land on the sheet itself so the scrim behind
+                // does not close it, while leaving every child row's own tap
+                // handling intact. This lives on the sheet container, not on the
+                // scrolling content column: putting an empty `clickable` there
+                // won the hit test ahead of the rows and made bound notes
+                // impossible to tap.
+                Box(Modifier.pointerInput(Unit) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            awaitPointerEvent(PointerEventPass.Final).changes.forEach { it.consume() }
+                        }
+                    }
+                }) {
+                MoyuSurface(Modifier
                         .fillMaxWidth()
                         .heightIn(max = panelMax),
                     radius = sheetCorner,
                     shape = panelShape,
+                    flat = true,
                 ) {
                     Column(
                         Modifier
                             .fillMaxWidth()
-                            .background(ui.palette.paper.copy(alpha = .82f))
-                            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {}
+                            // No tap consumer on the content column at all. The
+                            // scrim behind already ignores taps that land on the
+                            // sheet: it is laid out first and the sheet paints
+                            // over it, so Compose routes the tap to the sheet
+                            // subtree. An empty `clickable` here used to win the
+                            // hit test before every row inside it, which is why
+                            // bound notes could never be tapped to unbind.
                             .navigationBarsPadding()
                             .verticalScroll(rememberScrollState())
                             .padding(horizontal = 20.dp)
@@ -1554,6 +1669,7 @@ fun InlineModalSheet(
                     ) {
                         content { close() }
                     }
+                }
                 }
             }
         }
@@ -1567,7 +1683,7 @@ fun ModalSheet(
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val ui = LocalInk.current
-    val sheetCorner = ui.settings.materialFor(ui.settings.theme, SurfaceRole.POPUP).corner
+    val sheetCorner = GlassStyle.corner
     val panelShape = RoundedCornerShape(
         topStart = sheetCorner.dp,
         topEnd = sheetCorner.dp,
@@ -1605,13 +1721,12 @@ fun ModalSheet(
                         animationSpec = tween(220, easing = FastOutSlowInEasing),
                     ) + fadeIn(tween(170)),
                 ) {
-                    MoyuSurface(
-                        SurfaceRole.POPUP,
-                        Modifier
+                    MoyuSurface(Modifier
                             .fillMaxWidth()
                             .heightIn(max = panelMax),
                         radius = sheetCorner,
                         shape = panelShape,
+                        flat = true,
                     ) {
                     Column(
                         Modifier
@@ -1642,51 +1757,14 @@ fun ModalSheet(
 
 @Composable
 fun AmbientBackground(modifier: Modifier = Modifier, overlayOnly: Boolean = false) {
-    val ui = LocalInk.current
-    val p = ui.palette
+    val p = LocalInk.current.palette
+    // One flat page colour. The old layer was a top-to-bottom gradient plus a
+    // white radial bloom at 12% width and 90 dots of grain; all three made the
+    // paper read as uneven even on a still screen. A page is a sheet of paper,
+    // not a lit surface.
     Canvas(modifier.fillMaxSize()) {
         if (!overlayOnly) {
-            drawRect(
-                Brush.verticalGradient(
-                    listOf(p.bgTop, p.bgBottom),
-                    startY = 0f,
-                    endY = size.height,
-                )
-            )
-            if (ui.settings.glow) {
-                drawCircle(
-                    brush = Brush.radialGradient(
-                        listOf(ui.accent.copy(alpha = if (p.isDark) .22f else .11f), Color.Transparent),
-                        center = Offset(size.width * .88f, size.height * .07f),
-                        radius = size.width * .82f,
-                    ),
-                    radius = size.width * .82f,
-                    center = Offset(size.width * .88f, size.height * .07f),
-                )
-                drawCircle(
-                    brush = Brush.radialGradient(
-                        listOf(Color.White.copy(alpha = if (p.isDark) .045f else .34f), Color.Transparent),
-                        center = Offset(size.width * .12f, size.height * .62f),
-                        radius = size.width * .9f,
-                    ),
-                    radius = size.width * .9f,
-                    center = Offset(size.width * .12f, size.height * .62f),
-                )
-            }
-        }
-        if (ui.settings.grain) {
-            var i = 0
-            while (i < 90) {
-                val n = i * 2.399f
-                val x = (sin(n) * .5f + .5f) * size.width
-                val y = (sin(n * 1.61f + .3f) * .5f + .5f) * size.height
-                drawCircle(
-                    Color.White.copy(alpha = if (p.isDark) .018f else .045f),
-                    radius = .7f,
-                    center = Offset(x, y),
-                )
-                i++
-            }
+            drawRect(p.bgTop)
         }
     }
 }
@@ -1713,10 +1791,10 @@ fun ToastLayer(modifier: Modifier = Modifier) {
     ) {
         val text = display
         if (text != null) {
-            MoyuSurface(
-                SurfaceRole.CONTROL,
-                Modifier.padding(horizontal = 28.dp),
+            MoyuSurface(Modifier.padding(horizontal = 28.dp),
                 radius = 999f,
+                flat = true,
+                tone = dockTone(ui),
             ) {
                 Row(
                     Modifier.padding(horizontal = 17.dp, vertical = 11.dp),

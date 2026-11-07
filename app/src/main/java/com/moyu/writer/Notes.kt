@@ -98,7 +98,9 @@ fun NotesScreen(
 
     fun create() {
         val note = Note(
-            title = "无标题笔记",
+            // Empty on purpose: the editor draws "无标题笔记" as a muted hint, the
+            // same as other placeholder text, instead of real title content.
+            title = "",
             groupId = selectedGroup?.takeIf { it.isNotEmpty() },
         )
         hiddenNewNote = note.id
@@ -121,12 +123,6 @@ fun NotesScreen(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Txt("笔记", size = 34f, weight = FontWeight.SemiBold, letterSpacing = .4f)
-                            Spacer(Modifier.height(5.dp))
-                            Txt(
-                                if (notes.isEmpty()) "所有想法，先放在这里。" else "${notes.size} 条笔记 · $totalTodos 项待办 · $totalReminders 个提醒",
-                                size = 11f,
-                                color = p.muted,
-                            )
                         }
                         GlassIconButton(Glyph.Plus, { create() }, size = 44.dp)
                     }
@@ -172,6 +168,7 @@ fun NotesScreen(
                     NoteCard(
                         note = note,
                         groupName = store.noteGroups.firstOrNull { it.id == note.groupId }?.name,
+                        chapterBadge = noteChapterBadge(store, note),
                         onClick = { onOpenNote(note.id) },
                         onMore = { menuNote = note },
                     )
@@ -282,12 +279,18 @@ fun NotesScreen(
 }
 
 @Composable
-private fun NoteCard(note: Note, groupName: String?, onClick: () -> Unit, onMore: () -> Unit) {
+private fun NoteCard(
+    note: Note,
+    groupName: String?,
+    chapterBadge: String? = null,
+    onClick: () -> Unit,
+    onMore: () -> Unit,
+) {
     val ui = LocalInk.current
     val p = ui.palette
     val pending = note.todos.count { !it.done }
     val next = note.nextReminder()
-    MoyuSurface(SurfaceRole.CARD, Modifier.fillMaxWidth(), radius = 24f) {
+    MoyuSurface(Modifier.fillMaxWidth(), radius = 24f, flat = true) {
         Column(
             Modifier
                 .fillMaxWidth()
@@ -333,9 +336,12 @@ private fun NoteCard(note: Note, groupName: String?, onClick: () -> Unit, onMore
                     LineIcon(Glyph.More, p.muted.copy(alpha = .7f), 17.dp)
                 }
             }
-            if (note.todos.isNotEmpty() || next != null || groupName != null) {
+            if (note.todos.isNotEmpty() || next != null || groupName != null || chapterBadge != null) {
                 Spacer(Modifier.height(12.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (chapterBadge != null) {
+                        NoteBadge(glyph = Glyph.Link, text = chapterBadge, accent = false)
+                    }
                     if (groupName != null) {
                         NoteBadge(glyph = Glyph.Layers, text = groupName, accent = false)
                     }

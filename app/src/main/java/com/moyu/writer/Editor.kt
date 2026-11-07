@@ -3,6 +3,7 @@ package com.moyu.writer
 import android.animation.ValueAnimator
 import android.content.ClipboardManager
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Path
@@ -63,6 +64,7 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.border
@@ -107,8 +109,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.State
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -119,15 +125,29 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.drawscope.translate
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.GraphicsLayerScope
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -151,9 +171,17 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.kyant.backdrop.Backdrop
+import com.kyant.backdrop.backdrops.layerBackdrop
+import com.kyant.backdrop.backdrops.rememberCanvasBackdrop
+import com.kyant.backdrop.backdrops.rememberLayerBackdrop
+import com.kyant.backdrop.effects.blur
+import com.kyant.backdrop.effects.lens
+import com.kyant.backdrop.effects.vibrancy
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.findViewTreeLifecycleOwner
@@ -172,6 +200,24 @@ private data class EditorSnapshot(
     val title: String,
     val body: TextFieldValue,
     val todos: List<Todo> = emptyList(),
+)
+
+/**
+ * Everything the writing screen needs to show the bound notes and to open the
+ * binding sheet. Kept as one value so the editor never reaches into the store
+ * for chapter identity.
+ */
+data class NoteLinkUi(
+    val notes: List<Note>,
+    val floatOn: Boolean,
+    val onOpenSheet: () -> Unit,
+    val onToggleFloat: (Boolean) -> Unit,
+    val onOpenNote: (Note) -> Unit,
+    val floatX: Float = .62f,
+    val floatY: Float = 0f,
+    val floatW: Float = .60f,
+    val floatH: Float = .52f,
+    val onFloatPlacement: (x: Float, y: Float, w: Float, h: Float) -> Unit = { _, _, _, _ -> },
 )
 
 data class SelectionBar(val x1: Int, val y1: Int, val x2: Int, val y2: Int)
@@ -272,6 +318,8 @@ fun WritingScreen(
     initialTodos: List<Todo> = emptyList(),
     onTodosChange: ((List<Todo>) -> Unit)? = null,
     metaPrefix: String = "",
+    noteLinks: NoteLinkUi? = null,
+    chapterTags: (@Composable () -> Unit)? = null,
 ) {
     val ui = LocalInk.current
     val p = ui.palette
@@ -285,6 +333,15 @@ fun WritingScreen(
     var bodyEditor by remember { mutableStateOf<BodyEditText?>(null) }
 
     fun hideEditorKeyboard() {
+        // Compose body: clearing focus discards the IME composition buffer, so
+        // a long pinyin string vanished when 收起 was tapped. Hide the keyboard
+        // and keep focus; the field commits on its own next edit.
+        if (EditorTest.composeBody) {
+            val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+            imm?.hideSoftInputFromWindow(view.windowToken, 0)
+            keyboard?.hide()
+            return
+        }
         focusManager.clearFocus(force = true)
         bodyEditor?.clearFocus()
         val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
@@ -326,7 +383,31 @@ fun WritingScreen(
     var saved by remember(seedKey) { mutableStateOf(true) }
     var dirty by remember(seedKey) { mutableStateOf(false) }
     var showType by remember { mutableStateOf(false) }
+    // The dock's 「笔记」 toggles this one panel. It starts closed so the page
+    // opens on full-width text: the 行文时悬浮 setting decides whether the panel
+    // may be shown, not whether it is already open.
+    var floatNotePanel by remember(seedKey) { mutableStateOf(false) }
     var showSymbols by remember { mutableStateOf(true) }
+    // The editor dock overlays the body instead of sitting below it. The body
+    // layer is recorded separately so the dock can sample the real text under
+    // its glass, and dockHeight keeps the caret/last line above the dock.
+    var dockHeightPx by remember { mutableIntStateOf(0) }
+
+    // A Compose layerBackdrop records Compose draw content only, so it cannot
+    // see the native BodyEditText (AndroidView). This backdrop draws the real
+    // view into a software bitmap that the dock's 1型玻璃 samples; see
+    // EditorBodyBackdrop at the bottom of this file.
+    val editorBodyBackdrop = remember(p.paper) {
+        EditorBodyBackdrop({ bodyEditor }, p.paper)
+    }
+    // Test branch: a Compose body records itself as a real Compose layer, so
+    // the dock's glass can sample the glyphs instead of a software bitmap.
+    val bodyBackdrop = rememberLayerBackdrop()
+    // 1型玻璃 only re-samples when its draw node records a new frame. The body
+    // is a native EditText, so Compose never sees its scroll. Bump this tick on
+    // every body scroll / text change and pass it as the glass epoch.
+    val bodyScrollTick = remember { mutableIntStateOf(0) }
+
     val latestSave by androidx.compose.runtime.rememberUpdatedState(onSave)
     val latestTitle by androidx.compose.runtime.rememberUpdatedState(title)
     val latestBody by androidx.compose.runtime.rememberUpdatedState(body.text)
@@ -451,15 +532,17 @@ fun WritingScreen(
         } else nextStart
         val nextLine = if (nextEnd > nextStart) text.substring(nextStart, nextEnd) else ""
         val hasReminderLine = isReminderLine(nextLine)
-        var newText = text
-        var caret = lineEnd
+        // One (from, to, insert) edit per case. The change is applied to the live
+        // editor in place: rebuilding the whole body through `setText` re-laid the
+        // page out and dragged the viewport to the caret.
+        var from = -1
+        var to = -1
+        var insert = ""
 
         if (at == null) {
             if (hasReminderLine) {
-                val from = if (nextStart > 0 && text[nextStart - 1] == '\n') nextStart - 1 else nextStart
-                val to = if (nextEnd < text.length && text[nextEnd] == '\n') nextEnd + 1 else nextEnd
-                newText = text.replaceRange(from, to, "")
-                caret = from
+                from = if (nextStart > 0 && text[nextStart - 1] == '\n') nextStart - 1 else nextStart
+                to = if (nextEnd < text.length && text[nextEnd] == '\n') nextEnd + 1 else nextEnd
             }
         } else {
             val ldt = java.time.Instant.ofEpochMilli(at)
@@ -467,16 +550,45 @@ fun WritingScreen(
             val line = "$REMINDER_LINE_MARK ${ldt.monthValue}月${ldt.dayOfMonth}日 " +
                 String.format(java.util.Locale.US, "%02d:%02d:%02d", ldt.hour, ldt.minute, ldt.second)
             if (hasReminderLine) {
-                newText = text.replaceRange(nextStart, nextEnd, line)
-            } else if (lineEnd < text.length) {
-                newText = text.substring(0, lineEnd) + "\n$line" + text.substring(lineEnd)
+                from = nextStart
+                to = nextEnd
+                insert = line
             } else {
-                newText = text + "\n$line"
+                from = lineEnd
+                to = lineEnd
+                insert = "\n$line"
             }
-            caret = lineEnd + 1 + line.length
         }
 
         if (at != null) ensureReminderPermission()
+        val editor = bodyEditor
+        if (editor != null && from >= 0) {
+            // The edit itself records the undo entry through onBodyChange, so the
+            // snapshot still holds the pre-change body and todos.
+            editor.replaceKeepingViewport(from, to, insert)
+            inlineTodos = inlineTodos.map {
+                if (it.id == todoId) it.copy(remindAt = at, notified = false) else it
+            }
+            onTodosChange?.invoke(inlineTodos)
+            // The body text changed in place, so the Compose update block skips its
+            // own span pass; restyle the new/removed reminder line here.
+            editor.applyTodoSpans(inlineTodos)
+            return
+        }
+
+        // Fallback for a body that is not attached yet: rebuild the text through
+        // the Compose mirror.
+        var newText = text
+        var caret = lineEnd
+        if (at == null) {
+            if (hasReminderLine) {
+                newText = text.replaceRange(from, to, "")
+                caret = from
+            }
+        } else {
+            newText = text.replaceRange(from, to, insert)
+            caret = from + insert.length
+        }
         pushUndo()
         body = TextFieldValue(newText, TextRange(caret.coerceIn(0, newText.length)))
         inlineTodos = inlineTodos.map {
@@ -587,6 +699,23 @@ fun WritingScreen(
     val imePx = WindowInsets.ime.getBottom(density)
     val navPx = WindowInsets.navigationBars.getBottom(density)
     val imeNowState = rememberUpdatedState(imePx)
+    // Tapping the body opens the IME and shortens the page. Feed the view both
+    // the current and the last full IME height so the tap can reserve the
+    // keyboard's space up front and land in one move.
+    val imeOpen = imePx > 0
+    SideEffect {
+        val editor = bodyEditor ?: return@SideEffect
+        editor.imeInsetPx = imePx
+        // Remember the tallest IME seen, not the value of the current frame:
+        // during the slide-in animation imePx grows every frame, so assigning
+        // it directly kept lastIme == ime and the reservation at zero.
+        if (imePx > editor.lastImePx) editor.lastImePx = imePx
+    }
+    LaunchedEffect(imeOpen) {
+        if (imeOpen) {
+            bodyEditor?.ensureCaretVisible()
+        }
+    }
     val bodySize = (17f * settings.fontScale).coerceIn(12f, 28f)
     LaunchedEffect(settings.paperStyle, settings.lineHeight, settings.fontScale, settings.paperLineAlpha) {
         bodyEditor?.let { editor ->
@@ -654,7 +783,12 @@ fun WritingScreen(
                     onMore()
                 },
             )
-            Column(Modifier.weight(1f).fillMaxWidth()) {
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+            Row(
+                Modifier
+                    .fillMaxSize()
+            ) {
+            Column(Modifier.weight(1f)) {
                 BasicTextField(
                     value = title,
                     onValueChange = {
@@ -736,6 +870,16 @@ fun WritingScreen(
                         color = p.muted.copy(alpha = .75f),
                     )
                 }
+                if (chapterTags != null) {
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(start = settings.pageMargin.dp)
+                            .padding(bottom = 8.dp),
+                    ) {
+                        chapterTags()
+                    }
+                }
                 // Native EditText is the single scroll/caret/IME owner. Compose's
                 // BasicTextField nested inside a custom viewport caused two scrollers
                 // and a caret that could stop at the dock edge. Android's editor has
@@ -753,6 +897,7 @@ fun WritingScreen(
                         .weight(1f)
                         .fillMaxWidth()
                 ) {
+                if (!EditorTest.composeBody) {
                 AndroidView(
                     factory = { ctx ->
                         BodyEditText(
@@ -785,7 +930,11 @@ fun WritingScreen(
                                 dirty = true
                                 saveTick++
                             },
-                            onTodoSwipe = { _, _ -> },
+                            // No todo-pull handler in the note editor. Passing an
+                            // empty lambda here made every downward drag on a todo
+                            // paragraph get consumed (see ACTION_MOVE) with no effect.
+                            onTodoSwipe = null,
+                            onBodyScroll = { bodyScrollTick.intValue++ },
                         ).apply {
                             background = null
                             val side = maxOf(
@@ -793,7 +942,12 @@ fun WritingScreen(
                                 (selectHandleWidth.div(2f)) +
                                     with(density) { 4.dp.toPx() },
                             )
-                            setPadding(side.toInt(), 0, side.toInt(), panelBottomInset)
+                            // Text must be able to draw under the dock so the glass can sample it.
+                            // The last line still stops above the dock because contentMaxScroll()
+                            // adds dockBottomInset back to the scroll range.
+                            dockBottomInset = panelBottomInset + dockHeightPx +
+                                with(density) { 6.dp.toPx() }.toInt()
+                            setPadding(side.toInt(), 0, side.toInt(), 0)
                             gravity = Gravity.TOP or Gravity.START
                             inputType = InputType.TYPE_CLASS_TEXT or
                                 InputType.TYPE_TEXT_FLAG_MULTI_LINE or
@@ -852,6 +1006,8 @@ fun WritingScreen(
                                     }
                                 }
                                 override fun afterTextChanged(s: Editable?) {
+                                    self.renderRevision++
+                                    bodyScrollTick.intValue++
                                     if (syncing.value) return
                                     if (s == null) return
                                     val caret = selectionStart
@@ -930,7 +1086,9 @@ fun WritingScreen(
                             (et.selectHandleWidth.div(2f)) +
                                 with(density) { 4.dp.toPx() },
                         )
-                        et.setPadding(side.toInt(), 0, side.toInt(), et.panelBottomInset)
+                        et.dockBottomInset = et.panelBottomInset + dockHeightPx +
+                            with(density) { 6.dp.toPx() }.toInt()
+                        et.setPadding(side.toInt(), 0, side.toInt(), 0)
                         et.setTextColor(p.ink.toArgb())
                         et.setHintTextColor(p.muted.copy(alpha = .42f).toArgb())
                         et.setTextSize(TypedValue.COMPLEX_UNIT_SP, bodySize)
@@ -954,6 +1112,35 @@ fun WritingScreen(
                     },
                     modifier = Modifier.fillMaxSize().clipToBounds(),
                 )
+                } else {
+                    ComposeBodyHost(
+                        seedKey = seedKey,
+                        initialText = initialContent,
+                        body = body,
+                        onBodyChange = { onBodyChange(it) },
+                        inlineTodos = inlineTodos,
+                        onTodoToggle = { id ->
+                            val updated = latestTodos.map {
+                                if (it.id == id) it.copy(done = !it.done) else it
+                            }
+                            inlineTodos = updated
+                            latestTodosChange?.invoke(updated)
+                            dirty = true
+                            saveTick++
+                        },
+                        placeholder = placeholder,
+                        settings = settings,
+                        palette = p,
+                        accent = ui.accent,
+                        bodySize = bodySize,
+                        dockBottomInsetPx = dockHeightPx +
+                            with(density) { 6.dp.toPx() }.toInt(),
+                        onScroll = { bodyScrollTick.intValue++ },
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .layerBackdrop(bodyBackdrop),
+                    )
+                }
                 SelectionOverlay(
                     geometry = selectionGeometry,
                     handleDrawable = bodyEditor?.selectHandleDrawable,
@@ -1018,8 +1205,58 @@ fun WritingScreen(
                         }
                     }
                 }
-                }
             }
+            }
+            // Side notes: the writing column above gives up exactly this width,
+            // so nothing is ever drawn over the text and nothing jumps.
+            val sideLinks = noteLinks
+            val sideOfNotes = sideLinks != null &&
+                sideLinks.floatOn &&
+                floatNotePanel &&
+                sideLinks.notes.isNotEmpty()
+            if (sideLinks != null) {
+                NoteSidePanel(
+                    links = sideLinks,
+                    visible = sideOfNotes,
+                    onOpenNote = { note ->
+                        floatNotePanel = false
+                        sideLinks.onOpenNote(note)
+                    },
+                    clearEditorFocus = {
+                        // A swipe on the panel must never move the body caret.
+                        val ed = bodyEditor
+                        if (ed != null && ed.hasFocus()) {
+                            ed.clearFocus()
+                            collapseBodySelection()
+                        }
+                    },
+                    onWidthSettled = {
+                        bodyEditor?.releaseScrollAnchor()
+                    },
+                    onWidthAnimating = { bodyEditor?.captureScrollAnchorIfNone() },
+                    onResizeStart = { bodyEditor?.captureScrollAnchor() },
+                    // The panel shares this Row with the writing column while the
+                    // dock is drawn over the Row's bottom edge, so the panel must
+                    // reserve the measured dock height plus a gap. A flat 12dp
+                    // padding left the panel's rounded bottom buried under the
+                    // toolbar, and the IME only shortened the Row, which kept the
+                    // panel cut off instead of riding above the keyboard.
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .padding(bottom = with(density) { dockHeightPx.toDp() } + 12.dp),
+                )
+            }
+            }
+            Box(
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    // 1型玻璃 only redraws when this node's draw is invalidated.
+                    // Reading the scroll tick inside the draw scope subscribes the
+                    // draw itself, so every body scroll re-samples the EditText
+                    // bitmap instead of freezing the dock on its first frame.
+                    .onGloballyPositioned { dockHeightPx = it.size.height }
+            ) {
             if (showSymbols) {
                 EditorDock(
                     canUndo = undo.isNotEmpty(),
@@ -1040,6 +1277,43 @@ fun WritingScreen(
                         if (todoId != null) openReminderEditor(todoId) else insertTodoLine()
                     },
                     todoActive = activeTodoId != null,
+                    boundNotes = noteLinks?.notes?.size ?: 0,
+                    onNotes = noteLinks?.let { links ->
+                        {
+                            // One entry, one panel: open (or close) the side notes.
+                            // The binding sheet stays behind a long press so the
+                            // dock never opens two things at once. Do NOT dismiss
+                            // the IME here: the re-wrap anchor needs the caret to
+                            // stay active and visible while the width changes.
+                            // Capture before the row is re-laid out: the first
+                            // animation frame already re-wraps the body, and
+                            // TextView's own bring-caret-into-view would have
+                            // moved the page by then.
+                            bodyEditor?.captureScrollAnchor()
+                            if (links.notes.isEmpty()) {
+                                // Nothing bound yet: the sheet is the only way
+                                // to bind, so open it instead of an empty panel.
+                                bodyEditor?.setInputLocked(true)
+                                links.onOpenSheet()
+                            } else if (!links.floatOn) {
+                                // The side panel only exists while 行文时悬浮 is on.
+                                // With it off, the old tap flipped an invisible flag and
+                                // the dock button looked dead. One tap now turns the
+                                // mode on and opens the panel it belongs to.
+                                links.onToggleFloat(true)
+                                floatNotePanel = true
+                            } else {
+                                floatNotePanel = !floatNotePanel
+                            }
+                        }
+                    },
+                    onNotesLongPress = noteLinks?.let { links ->
+                        {
+                            hideEditorKeyboard()
+                            bodyEditor?.setInputLocked(true)
+                            links.onOpenSheet()
+                        }
+                    },
                     onHideKeyboard = {
                         hideEditorKeyboard()
                         showSymbols = true
@@ -1074,6 +1348,11 @@ fun WritingScreen(
                         bodyEditor?.collapseSelection()
                         selectionMenu = null
                     },
+                    backdrop = if (EditorTest.composeBody) bodyBackdrop else editorBodyBackdrop,
+                    glass = EditorTest.glassDock && EditorTest.composeBody,
+                    epoch = bodyScrollTick.intValue,
+                    scrollTick = bodyScrollTick,
+                    bodyEditor = bodyEditor,
                 )
             } else {
                 Row(
@@ -1085,7 +1364,10 @@ fun WritingScreen(
                     GlassIconButton(Glyph.Keyboard, { showSymbols = true }, size = 40.dp)
                 }
             }
+            }
+            }
         }
+
 
         AnimatedVisibility(
             visible = editReminderTodo != null,
@@ -1179,10 +1461,10 @@ private fun SelectionToolbar(
             animationSpec = tween(150, easing = FastOutSlowInEasing),
         ),
     ) {
-        MoyuSurface(
-            SurfaceRole.BAR,
-            Modifier.height(48.dp),
+        MoyuSurface(Modifier.height(48.dp),
             radius = 24f,
+            flat = true,
+            tone = dockTone(LocalInk.current),
         ) {
             Row(
                 Modifier.fillMaxHeight().padding(horizontal = 6.dp),
@@ -1395,6 +1677,7 @@ private class BodyEditText(
     private val onTodoCursor: ((String?) -> Unit)? = null,
     private val onReminderTap: ((String) -> Unit)? = null,
     private val onTodoDeleted: ((String) -> Unit)? = null,
+    private val onBodyScroll: (() -> Unit)? = null,
 ) : EditText(context) {
     // TextView calls onSelectionChanged() from its own constructor, before this
     // property is initialized. Keep it nullable and register after super().
@@ -1426,7 +1709,31 @@ private class BodyEditText(
     var autoIndent = false
     var indentGuard = false
     private var redirectingSelection = false
+    /** Bumped on every text or scroll change; EditorBodyBackdrop caches its
+     *  software bitmap against this instead of redrawing each frame. */
+    var renderRevision = 0L
     var lastTextLength = 0
+
+    /** Window-space top of this view, used to align the dock slice. */
+    fun windowTop(): Float {
+        val loc = IntArray(2)
+        getLocationInWindow(loc)
+        return loc[1].toFloat()
+    }
+
+    /** Renders the slice of this view that sits under the dock, in view pixels. */
+    fun renderDockSlice(topInView: Int, sliceHeight: Int): Bitmap? {
+        if (width <= 0 || height <= 0 || sliceHeight <= 0) return null
+        val top = topInView.coerceIn(0, maxOf(0, height - 1))
+        val h = min(sliceHeight, height - top)
+        if (h <= 0) return null
+        val bmp = Bitmap.createBitmap(width, h, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        canvas.translate(0f, -top.toFloat())
+        canvas.clipRect(0, top, width, top + h)
+        draw(canvas)
+        return bmp
+    }
     var pendingNewline = false
     private var cachedSelectHandle: android.graphics.drawable.Drawable? = null
     val selectHandleDrawable: android.graphics.drawable.Drawable?
@@ -1478,6 +1785,41 @@ private class BodyEditText(
         return cachedSelectHandle
     }
     private var bodyTopInWindow = 0
+    /** Character at the top of the viewport, kept across a width re-wrap. */
+    private var scrollAnchorChar = -1
+    private var scrollAnchorOffset = 0
+    /**
+     * Caret anchor. When the caret (or the selection's start) is fully visible,
+     * a re-wrap must leave that line on the same screen row instead of holding
+     * the first visible line. -1 means the caret anchor is not in use.
+     */
+    private var caretAnchorChar = -1
+    private var caretAnchorTop = 0
+    private var restoringScroll = false
+    /** Width from the previous onLayout. View.width is already the new value
+     * inside onLayout, so comparing it with right-left is always false. */
+    private var lastLaidOutWidth = 0
+    /** Re-applied after onLayout: TextView may run bring-caret-into-view
+     * after the layout pass and undo the anchor restore. */
+    private var pendingRestoreY = -1
+    /** Until this time, a scroll-to-top from TextView's bring-caret-into-view
+     * is redirected to the anchor: the caret is off screen (or was dropped to
+     * 0 by focus loss) and must not drag the page away from the re-wrap anchor. */
+    private var anchorGuardUntil = 0L
+    // Character-flow animation: where each visible glyph was before a re-wrap,
+    // where it goes, and the clock that interpolates between the two.
+    private val flowFrom = HashMap<Int, FloatArray>()
+    private val flowTarget = HashMap<Int, FloatArray>()
+    private var flowLayout: android.text.Layout? = null
+    private var flowAnimating = false
+    private var flowStartAt = -1L
+    private companion object {
+        /** Character-flow duration in ms. */
+        const val FLOW_MS = 300f
+        /** Temporary fling diagnostics (both scroll directions). */
+        const val INFO_FLING = true
+    const val INFO_CARET = false
+    }
     private var overlayTopInWindow = 0
 
     fun updateOverlayTop(y: Int) {
@@ -1555,6 +1897,9 @@ private class BodyEditText(
     }
     private var todoModel: List<Todo> = emptyList()
     var panelBottomInset = 0
+    /** Extra scroll room kept below the last line so it stops above the dock;
+     *  the view itself has no bottom padding so body text may draw under it. */
+    var dockBottomInset = 0
     private var inputLocked = false
 
     fun setInputLocked(locked: Boolean) {
@@ -1563,10 +1908,22 @@ private class BodyEditText(
 
     fun setPanelInset(px: Int) {
         panelBottomInset = px.coerceAtLeast(0)
-        setPadding(paddingLeft, 0, paddingRight, panelBottomInset)
+        setPadding(paddingLeft, 0, paddingRight, 0)
     }
     private var todoDownSpan: TodoBoxSpan? = null
     private var todoSwipeSpan: TodoBoxSpan? = null
+    /**
+     * Scroll offset a local body edit must keep, or -1.
+     *
+     * TextView brings the caret into view TWICE per text change: once inline from
+     * the text watcher and once from onPreDraw, i.e. after the edit already
+     * returned. Ticking a box or writing a reminder line is a local edit and the
+     * caret can be pages away, so the page used to leap to the caret. Re-assert
+     * the offset from scrollTo. The guard dies on the next touch and is
+     * time-boxed, so it can never brake the reader's own scrolling.
+     */
+    private var keepViewportY = -1
+    private var keepViewportAt = 0L
     private var todoSwipeConsumed = false
     private var lastTodoDeleteAt = 0L
 
@@ -1842,13 +2199,31 @@ private class BodyEditText(
         invalidate()
     }
 
+    /**
+     * Rewrite the body in place without letting the page follow the caret.
+     *
+     * Every programmatic text change makes TextView run bring-caret-into-view.
+     * Ticking a box or writing a reminder line is a local edit and the caret
+     * can be pages away from it, so the viewport used to leap to the caret the
+     * moment a box was ticked. The edited line is already on screen; keep the
+     * exact scroll offset instead.
+     */
+    fun replaceKeepingViewport(from: Int, to: Int, insert: CharSequence) {
+        val editable = editable() ?: return
+        val start = from.coerceIn(0, editable.length)
+        val end = to.coerceIn(start, editable.length)
+        keepViewportY = scrollY
+        keepViewportAt = android.os.SystemClock.uptimeMillis()
+        editable.replace(start, end, insert)
+    }
+
     private fun toggleTodoBox(box: TodoBoxSpan) {
         val editable = editable() ?: return
         val start = editable.getSpanStart(box)
         if (start < 0 || start >= editable.length) return
         val next = if (editable[start] == '☑') '☐' else '☑'
         val target = next == '☑'
-        editable.replace(start, start + 1, next.toString())
+        replaceKeepingViewport(start, start + 1, next.toString())
         box.syncDone(target)
         box.pulse()
         if (todoHaptics) box.performHaptic()
@@ -1953,10 +2328,216 @@ private class BodyEditText(
     }
 
     override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
+        // A re-wrap changes how many characters fit on a line, so "line 40" is a
+        // different piece of text before and after. Anchor on a CHARACTER
+        // instead, then put the line holding that character back where it was.
+        // Two rules share this one entry point:
+        //  - caret (or selection start) fully visible -> keep its line on the
+        //    same screen row, so the writer's eye does not follow the re-wrap;
+        //  - otherwise -> keep the first visible line's first character on the
+        //    first line, so the reader stays on the same sentence.
+        val widthChanged = lastLaidOutWidth > 0 && (right - left) != lastLaidOutWidth
+        lastLaidOutWidth = right - left
+        val heightBefore = height
+        if (widthChanged) {
+            val l = layout
+            if (l != null && l.lineCount > 0 && !restoringScroll &&
+                caretAnchorChar < 0 && scrollAnchorChar < 0
+            ) {
+                // No capture ran before this frame (direct width change): take
+                // the anchor from the current layout before super re-wraps it.
+                anchorOnTopLine(l)
+            }
+        }
         super.onLayout(changed, left, top, right, bottom)
+        if (widthChanged) {
+            val l = layout
+            if (l != null && l.lineCount > 0) {
+                var restoreY = -1
+                if (caretAnchorChar >= 0) {
+                    val target = caretAnchorChar.coerceIn(0, (text?.length ?: 0))
+                    val line = l.getLineForOffset(target).coerceIn(0, l.lineCount - 1)
+                    restoreY = l.getLineTop(line) - caretAnchorTop
+                } else if (scrollAnchorChar >= 0) {
+                    // Find the line that now holds the anchored character.
+                    val target = scrollAnchorChar.coerceIn(0, (text?.length ?: 0).coerceAtLeast(0))
+                    val line = l.getLineForOffset(target).coerceIn(0, l.lineCount - 1)
+                    restoreY = l.getLineTop(line) - paddingTop + scrollAnchorOffset
+                }
+                if (restoreY >= 0) {
+                    restoringScroll = true
+                    scrollTo(0, restoreY)
+                    restoringScroll = false
+                    // TextView runs bring-caret-into-view after the layout pass.
+                    // When the caret sits off screen (or was reset to 0 by a
+                    // focus drop) that scrolls the page away from the anchor;
+                    // re-apply once on the next message.
+                    pendingRestoreY = restoreY
+                    anchorGuardUntil = android.os.SystemClock.uptimeMillis() + 600L
+                    post {
+                        val target = pendingRestoreY
+                        if (target >= 0 && !restoringScroll) {
+                            scrollTo(0, target)
+                        }
+                    }
+                }
+            }
+            // No per-glyph flow on a re-wrap. The panel width animates over many
+            // frames, and kicking the flow off inside onLayout reset its start
+            // clock every frame: hundreds of glyphs hung around their old
+            // positions while their targets kept moving, and during the flight
+            // super.onDraw is skipped, so the page read as loose, half-misplaced
+            // characters instead of text. The anchor above already keeps the
+            // line the reader is on; the wrap itself now lands as a clean relayout.
+        }
         val loc = IntArray(2)
         getLocationInWindow(loc)
         bodyTopInWindow = loc[1]
+        if (heightBefore != height) emitGeometry()
+    }
+
+    /** First visible line's first character, aligned to the top of the viewport. */
+    private fun anchorOnTopLine(l: android.text.Layout) {
+        val topInText = scrollY + paddingTop
+        val line = l.getLineForVertical(topInText)
+        scrollAnchorChar = l.getLineStart(line)
+        // Snap the line to the viewport top instead of keeping a partial
+        // overhang: when the first line was half cut off, keeping that overhang
+        // pushes it out of view after the re-wrap and the next line becomes the
+        // first one. The requirement is that the same character stays on the
+        // first visible line, not at the same pixel.
+        scrollAnchorOffset = 0
+    }
+
+    /** Width settled: the anchor has done its job, let later scrolls be live. */
+    fun releaseScrollAnchor() {
+        scrollAnchorChar = -1
+        scrollAnchorOffset = 0
+        caretAnchorChar = -1
+        caretAnchorTop = 0
+        // Must drop the guard too: while it stays on, scrollTo pins every attempt
+        // back onto the anchor and the page cannot be scrolled at all.
+    }
+
+    /**
+     * Snapshot the re-wrap position before the panel starts animating. The first
+     * animation frame already re-wraps the text, so anchoring from inside
+     * onLayout would capture the position AFTER the change and drift.
+     *
+     * A visible caret (or the start of a selection) wins: its line must stay on
+     * the same screen row. Only when it is not fully visible — or the body has
+     * no caret at all — does the first visible line's first character anchor
+     * the page.
+     */
+    fun captureScrollAnchor() {
+        val l = layout
+        if (l == null || l.lineCount == 0) {
+            releaseScrollAnchor()
+            return
+        }
+        val caret = minOf(selectionStart, selectionEnd).coerceAtLeast(0)
+            .coerceAtMost(l.text.length)
+        val caretLine = l.getLineForOffset(caret)
+        val lineTop = l.getLineTop(caretLine) - scrollY
+        val lineBottom = l.getLineBottom(caretLine) - scrollY
+        val viewportBottom = height - paddingBottom
+        val caretVisible = caretAnchorAllowed() && lineTop >= 0 && lineBottom <= viewportBottom
+        if (caretVisible) {
+            caretAnchorChar = caret
+            caretAnchorTop = lineTop
+            scrollAnchorChar = -1
+            scrollAnchorOffset = 0
+        } else {
+            caretAnchorChar = -1
+            caretAnchorTop = 0
+            anchorOnTopLine(l)
+        }
+    }
+
+    /**
+     * The click that opens/closes the panel already took the anchor before the
+     * row re-laid out. Only fill in when nothing was captured (e.g. the panel
+     * was opened by another path), otherwise the first animation frame would
+     * overwrite it with a position TextView has already scrolled away from.
+     */
+    fun captureScrollAnchorIfNone() {
+        if (caretAnchorChar < 0 && scrollAnchorChar < 0) captureScrollAnchor()
+    }
+
+    /** The body owns a caret the writer can actually see. */
+    private fun caretAnchorAllowed(): Boolean {
+        if (!hasFocus()) return false
+        // A selection has no blinking caret, but its start is still the point
+        // the writer is looking at; a plain caret must also be visible.
+        return selectionStart != selectionEnd || isCursorVisible
+    }
+
+    /**
+     * Snapshot where every visible character sits before a re-wrap, so the flow
+     * layer can interpolate each one to its new place. Only the rows on screen
+     * take part; text above and below is off-canvas anyway.
+     */
+    private fun captureGlyphPositions() {
+        val l = layout ?: run { flowFrom.clear(); return }
+        val startLine = l.getLineForVertical(scrollY).coerceAtLeast(0)
+        val endLine = l.getLineForVertical(scrollY + height).coerceAtMost(l.lineCount - 1)
+        flowFrom.clear()
+        for (line in startLine..endLine) {
+            val lineStart = l.getLineStart(line)
+            val lineEnd = l.getLineEnd(line)
+            val baseline = l.getLineBaseline(line).toFloat() + paddingTop
+            for (i in lineStart until lineEnd) {
+                if (Character.isWhitespace(text?.getOrNull(i) ?: ' ')) continue
+                flowFrom[i] = floatArrayOf(l.getPrimaryHorizontal(i) + paddingLeft, baseline)
+            }
+        }
+        flowTarget.clear()
+        flowAnimating = false
+    }
+
+    /** New positions after the wrap, plus the start of the interpolation. */
+    private fun beginFlowIfReady() {
+        if (flowFrom.isEmpty()) return
+        val l = layout ?: return
+        flowTarget.clear()
+        var moved = false
+        for ((index, from) in flowFrom) {
+            if (index >= (text?.length ?: 0)) continue
+            val line = l.getLineForOffset(index)
+            val x = l.getPrimaryHorizontal(index) + paddingLeft
+            val y = l.getLineBaseline(line).toFloat() + paddingTop
+            flowTarget[index] = floatArrayOf(x, y)
+            if (abs(x - from[0]) > 0.5f || abs(y - from[1]) > 0.5f) moved = true
+        }
+        if (!moved) {
+            flowAnimating = false
+            return
+        }
+        flowStartAt = -1L
+        flowAnimating = true
+        flowLayout = l
+        invalidate()
+    }
+
+    private fun flowProgress(): Float {
+        if (flowStartAt < 0L) flowStartAt = android.os.SystemClock.uptimeMillis()
+        val t = ((android.os.SystemClock.uptimeMillis() - flowStartAt) / FLOW_MS).coerceIn(0f, 1f)
+        // Ease-out so characters arrive softly instead of snapping at the end.
+        return 1f - (1f - t) * (1f - t)
+    }
+
+    private fun drawFlowingText(canvas: Canvas, progress: Float) {
+        val textValue = text ?: return
+        canvas.save()
+        canvas.translate(0f, -scrollY.toFloat())
+        for ((index, from) in flowFrom) {
+            if (index >= textValue.length) continue
+            val to = flowTarget[index] ?: continue
+            val x = from[0] + (to[0] - from[0]) * progress
+            val y = from[1] + (to[1] - from[1]) * progress
+            canvas.drawText(textValue, index, index + 1, x, y, paint)
+        }
+        canvas.restore()
     }
 
     init {
@@ -1971,6 +2552,8 @@ private class BodyEditText(
 
     override fun onScrollChanged(horiz: Int, vert: Int, oldHoriz: Int, oldVert: Int) {
         super.onScrollChanged(horiz, vert, oldHoriz, oldVert)
+        renderRevision++
+        onBodyScroll?.invoke()
         emitGeometry()
     }
 
@@ -2079,10 +2662,249 @@ private class BodyEditText(
         onTextContextMenuItem(id)
     }
 
+    /** True from a tap until ~1.2 s later: height changes in that window (the
+     *  IME sliding in) re-apply the caret scroll instead of leaving the caret
+     *  where the shorter viewport put it. */
+    private var caretScrollPending = false
+    /** IME heights mirrored from Compose: used to reserve the keyboard's space
+     *  on the very first frame of a tap, so the page lands in one move instead
+     *  of following the keyboard in for 300 ms. */
+    var imeInsetPx: Int = 0
+    // Seeded with a rough keyboard estimate so the first tap after a cold
+    // start can reserve its space; the real height replaces it on first open.
+    var lastImePx: Int = (resources.displayMetrics.heightPixels * .40f).toInt()
+
+    /** Puts the caret line comfortably inside the area above the dock. Called
+     *  on a tap and while the IME resizes, never on every keystroke: the
+     *  native bring-into-view is enough for typing. */
+    private var caretAnimator: android.animation.ValueAnimator? = null
+
+    /** A tap asked for a scroll the page cannot do yet: while the keyboard is
+     *  still closed the scroll range does not include the space the keyboard is
+     *  about to take, so the target clamps to the current end and nothing
+     *  moves. Wait for the resize to finish, then scroll once. */
+    private var caretSettlePending = false
+    /** While >= 0, the page follows the shrinking viewport instead of waiting
+     *  for the keyboard to land: tapping the last line has no scroll range at
+     *  all until the IME takes its space, so the only "immediate" scroll is one
+     *  glued to the keyboard's top edge. It always ends at the same clamp, so
+     *  there is no rebound. */
+    private var caretFollowTarget = -1
+    /** True when the tap started with the keyboard closed, i.e. the page is
+     *  about to shrink and a target past the current range becomes reachable. */
+    private var caretWindowWillResize = false
+    private val caretSettle = Runnable {
+        if (!caretSettlePending) return@Runnable
+        caretSettlePending = false
+        caretFollowTarget = -1
+        if (INFO_CARET) android.util.Log.d("MOYU_CARET", "settle scrollY=$scrollY h=$height")
+        ensureCaretVisible(settled = true)
+        // Hold the native bring off until the ~190 ms scroll has landed.
+        removeCallbacks(caretFinish)
+        postDelayed(caretFinish, 260L)
+    }
+    /** Ends the tap's suppression window; the resize is over by then. */
+    private val caretFinish = Runnable { caretScrollPending = false }
+
+    /** Starts the tap window. The IME takes ~1 s to settle on this device, so
+     *  the window outlives it: ending it earlier let the native bring-into-view
+     *  jump the page before the settle scroll could run. */
+    private fun beginCaretScrollWindow() {
+        caretWindowWillResize = imeInsetPx <= 0
+        caretScrollPending = true
+        caretSettlePending = false
+        caretFollowTarget = -1
+        removeCallbacks(caretFinish)
+        removeCallbacks(caretSettle)
+        postDelayed({
+            caretScrollPending = false
+            removeCallbacks(caretSettle)
+            caretSettlePending = false
+            caretFollowTarget = -1
+        }, 1500L)
+    }
+
+    /** Scrolls to [target] over ~140 ms so a tap at the end reads as a slide
+     *  rather than a one-frame jerk ("抽一下"). */
+    private fun animateCaretScroll(target: Int) {
+        caretAnimator?.cancel()
+        val from = scrollY
+        val distance = kotlin.math.abs(target - from)
+        if (INFO_CARET) android.util.Log.d("MOYU_CARET", "anim from=$from target=$target dist=$distance h=$height maxY=${contentMaxScroll()}")
+        if (distance <= 4) return
+        val duration = (70L + distance / 6L).coerceIn(90L, 190L)
+        caretAnimator = android.animation.ValueAnimator.ofInt(from, target).apply {
+            this.duration = duration
+            interpolator = android.view.animation.DecelerateInterpolator()
+            addUpdateListener { scrollTo(scrollX, it.animatedValue as Int) }
+            start()
+        }
+    }
+
+    fun ensureCaretVisible() = ensureCaretVisible(settled = false)
+
+    private fun ensureCaretVisible(settled: Boolean) {
+        if (!hasFocus()) return
+        // Once a tap is waiting for the page to stop resizing, the intermediate
+        // calls (IME opening, first frames) must not move the page: they would
+        // scroll a little now and leave the rest for the settle pass.
+        if (!settled && caretSettlePending) return
+        // A follow already owns the scroll until the resize ends.
+        if (!settled && caretFollowTarget >= 0) return
+        val l = layout ?: return
+        val len = text?.length ?: 0
+        val caret = selectionEnd.coerceIn(0, len)
+        val line = l.getLineForOffset(caret)
+        val top = l.getLineTop(line)
+        val bottom = l.getLineBottom(line)
+        val reserved = if (caretScrollPending) {
+            (lastImePx - imeInsetPx).coerceAtLeast(0)
+        } else {
+            0
+        }
+        val visibleBottom = (height - dockBottomInset - reserved).coerceAtLeast(0)
+        if (visibleBottom <= 0) return
+        val comfortableBottom = (visibleBottom - visibleBottom * .28f).toInt()
+        val maxY = contentMaxScroll()
+        if (INFO_CARET) android.util.Log.d(
+            "MOYU_CARET",
+            "ensure focus=${hasFocus()} h=$height dock=$dockBottomInset reserved=$reserved " +
+                "ime=$imeInsetPx last=$lastImePx pending=$caretScrollPending caret=$caret " +
+                "top=$top bottom=$bottom scrollY=$scrollY visBottom=$visibleBottom " +
+                "comf=$comfortableBottom maxY=$maxY",
+        )
+        // Same content-vs-screen fix as bringPointIntoView: compare the caret's
+        // on-screen position, not its raw layout offset, or the 320 ms check
+        // scrolls again after an already-correct tap scroll.
+        if (bottom - scrollY > comfortableBottom) {
+            val wanted = (top - visibleBottom * .34f).toInt()
+            // Keyboard closed and the target is past the current end of the
+            // scroll range: the range only grows when the IME takes its space
+            // (a short chapter fits the tall page, or the tap is on the last
+            // lines). Follow the resize instead of waiting for it to land.
+            if (!settled && caretScrollPending && caretWindowWillResize && wanted > maxY) {
+                caretFollowTarget = wanted
+                return
+            }
+            animateCaretScroll(wanted.coerceIn(0, maxY))
+        } else if (top - scrollY < 0) {
+            animateCaretScroll(top.coerceIn(0, maxY))
+        }
+        caretSettlePending = false
+        caretFollowTarget = -1
+    }
+
+    /** TextView's own bring scrolls the caret to the very bottom edge, which
+     *  undid the comfortable position a tap had just set. Keep the native
+     *  behavior (minimal scroll) but leave breathing room above the dock. */
+    override fun bringPointIntoView(offset: Int): Boolean {
+        // A tap already scrolled once with the keyboard's space reserved. Any
+        // bring during the IME slide-in would move the page a second time,
+        // which is the visible "twitch" on a tap at the end of the text.
+        if (caretScrollPending) {
+            if (INFO_CARET) android.util.Log.d("MOYU_CARET", "bring suppressed offset=$offset scrollY=$scrollY h=$height")
+            return false
+        }
+        val l = layout ?: return super.bringPointIntoView(offset)
+        // Same reserved-IME arithmetic as ensureCaretVisible: while the tap's
+        // caret scroll is pending, the viewport the caret is judged against is
+        // held at its final size, so the page does not crawl in with the IME.
+        val reserved = if (caretScrollPending) {
+            (lastImePx - imeInsetPx).coerceAtLeast(0)
+        } else {
+            0
+        }
+        val visibleBottom = (height - dockBottomInset - reserved).coerceAtLeast(0)
+        if (visibleBottom <= 0) return super.bringPointIntoView(offset)
+        val o = offset.coerceIn(0, text?.length ?: 0)
+        val line = l.getLineForOffset(o)
+        val top = l.getLineTop(line)
+        val bottom = l.getLineBottom(line)
+        val margin = (visibleBottom * .16f).toInt()
+        val limit = (visibleBottom - margin).coerceAtLeast(0)
+        val maxY = contentMaxScroll()
+        // Layout coordinates are content coordinates: the caret's on-screen
+        // bottom is (bottom - scrollY). Scroll so that it sits at the limit.
+        if (bottom - scrollY > limit) {
+            val target = (bottom - limit).coerceIn(0, maxY)
+            if (target != scrollY) {
+                scrollTo(scrollX, target)
+                return true
+            }
+        } else if (top - scrollY < 0) {
+            scrollTo(scrollX, top.coerceIn(0, maxY))
+            return true
+        }
+        return false
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        // One correction after the resize stops, never one per frame: following
+        // the keyboard frame by frame is what made the page crawl for 300 ms.
+        if (caretScrollPending && h != oldh) {
+            removeCallbacks(caretSettle)
+            postDelayed(caretSettle, 70L)
+            val follow = caretFollowTarget
+            if (follow >= 0) {
+                val goal = follow.coerceAtMost(contentMaxScroll())
+                if (goal != scrollY) {
+                    if (INFO_CARET) android.util.Log.d("MOYU_CARET", "follow target=$follow goal=$goal h=$h scrollY=$scrollY")
+                    scrollTo(scrollX, goal)
+                }
+            }
+        }
+        // The keyboard's space is gone again: a short chapter fits the tall
+        // page, so do not leave it scrolled into blank space under the text.
+        // TextView does not clamp the offset on a grow by itself.
+        val maxNow = contentMaxScroll()
+        if (scrollY > maxNow) {
+            if (INFO_CARET) android.util.Log.d("MOYU_CARET", "clamp scrollY=$scrollY max=$maxNow h=$h")
+            scrollTo(scrollX, maxNow)
+        }
+        if (INFO_CARET) android.util.Log.d(
+            "MOYU_CARET",
+            "size h=$h oldh=$oldh scrollY=$scrollY pending=$caretScrollPending ime=$imeInsetPx last=$lastImePx",
+        )
+        // No per-frame re-scroll here: following the keyboard as it slides in
+        // made the page crawl for 300 ms after the tap. The tap already lands
+        // with the keyboard space reserved, and one correction runs after the
+        // inset settles.
+    }
+
     private fun contentMaxScroll(): Int =
-        (computeVerticalScrollRange() - computeVerticalScrollExtent()).coerceAtLeast(0)
+        (computeVerticalScrollRange() - computeVerticalScrollExtent() + dockBottomInset)
+            .coerceAtLeast(0)
 
     override fun scrollTo(x: Int, y: Int) {
+        // A local body edit (ticking a box, writing a reminder line) must not
+        // move the page, but TextView defers the caret bring to onPreDraw and
+        // flushes it a frame or two after the edit. Hold the offset until the
+        // next touch, with a hard time box.
+        val keepY = keepViewportY
+        if (keepY >= 0 && y != keepY &&
+            android.os.SystemClock.uptimeMillis() - keepViewportAt < 600L
+        ) {
+            super.scrollTo(x, keepY.coerceIn(0, contentMaxScroll()))
+            return
+        }
+        // No directional guard here. An earlier attempt to block TextView's
+        // bringPointIntoView re-wrap scroll lived at this exact spot and left a
+        // flag that was never reset on every path, which braked normal scrolling
+        // just short of the top. The panel's own anchor logic in onLayout is
+        // enough; the scroll position must never be gated here.
+        //
+        // The one exception is a yanked-to-0 scroll while the re-wrap anchor is
+        // live: TextView does that when the caret sat off screen, and it would
+        // undo the anchor. It is time-boxed to the layout window, never a
+        // permanent gate.
+        val anchor = pendingRestoreY
+        if (y == 0 && anchor > 0 &&
+            android.os.SystemClock.uptimeMillis() < anchorGuardUntil
+        ) {
+            super.scrollTo(x, anchor.coerceIn(0, contentMaxScroll()))
+            return
+        }
         super.scrollTo(x, y.coerceIn(0, contentMaxScroll()))
     }
 
@@ -2299,7 +3121,22 @@ private class BodyEditText(
 
     override fun onDraw(canvas: Canvas) {
         drawPaper(canvas)
-        super.onDraw(canvas)
+        if (flowAnimating) {
+            // Every glyph flies from where it was to where it now belongs, so the
+            // re-wrap reads as flowing text instead of a jump. The caret is not
+            // drawn during this window: it would otherwise sit still while its
+            // own character slides away from it.
+            val progress = flowProgress()
+            if (progress >= 1f) {
+                flowAnimating = false
+                super.onDraw(canvas)
+            } else {
+                drawFlowingText(canvas, progress)
+                postInvalidateOnAnimation()
+            }
+        } else {
+            super.onDraw(canvas)
+        }
         drawSelfCursor(canvas)
         // Selection carets/handles are drawn by SelectionOverlay, outside the
         // TextView's scroll transform.
@@ -2371,6 +3208,9 @@ private class BodyEditText(
     override fun onTouchEvent(event: MotionEvent): Boolean {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                // A new gesture owns the scroll from here on.
+                keepViewportY = -1
+                removeCallbacks(flingDriver)
                 if (selectionBarActive) {
                     val a = handleBounds(selectionStart.coerceAtLeast(0))
                     val b = handleBounds(selectionEnd.coerceAtLeast(0))
@@ -2459,6 +3299,10 @@ private class BodyEditText(
                 longPressConsumed = false
                 selectionMenuActive = false
                 removeCallbacks(longPressRunnable)
+                removeCallbacks(caretSettle)
+                caretSettlePending = false
+                caretFollowTarget = -1
+                caretAnimator?.cancel()
                 downSelectionStart = selectionStart.coerceAtLeast(0)
                 downSelectionEnd = selectionEnd.coerceAtLeast(0)
                 downCursorVisible = isCursorVisible
@@ -2508,7 +3352,12 @@ private class BodyEditText(
                 if (todoSwipeSpan != null) {
                     android.util.Log.d("TodoPull", "move dx=$todoDx dy=$todoDy consumed=$todoSwipeConsumed")
                 }
-                if (todoSwipeSpan != null && !todoSwipeConsumed &&
+                // Consume the drag only when someone actually listens. With an
+                // empty handler this branch ate the whole gesture: the body never
+                // scrolled and startFling() was never reached, then the ACTION_UP
+                // caret restore jumped the page a few lines. That is the "this
+                // direction has no inertia" report.
+                if (todoSwipeSpan != null && onTodoSwipe != null && !todoSwipeConsumed &&
                     todoDy > touchSlop * 2f &&
                     todoDy > kotlin.math.abs(todoDx) * 1.2f
                 ) {
@@ -2642,6 +3491,11 @@ private class BodyEditText(
                         val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
                         imm?.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
                     }
+                    // The caret is placed by the tap; the scroll waits for the
+                    // page to stop resizing when the keyboard's space is what
+                    // makes the scroll possible in the first place.
+                    beginCaretScrollWindow()
+                    post { ensureCaretVisible() }
                     return true
                 }
                 if (!moved) {
@@ -2663,6 +3517,15 @@ private class BodyEditText(
                     val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
                     imm?.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
                 }
+                // Typing keeps the native bring-into-view; a tap is the moment
+                // the user wants the caret brought into the viewport on purpose.
+                if (INFO_CARET) android.util.Log.d(
+                    "MOYU_CARET",
+                    "tap caret=${selectionStart} scrollY=$scrollY h=$height maxY=${contentMaxScroll()} " +
+                        "ime=$imeInsetPx last=$lastImePx dock=$dockBottomInset",
+                )
+                beginCaretScrollWindow()
+                post { ensureCaretVisible() }
                 return true
             }
             MotionEvent.ACTION_CANCEL -> {
@@ -2683,11 +3546,30 @@ private class BodyEditText(
     }
 
     private fun startFling(velocityY: Float) {
-        if (kotlin.math.abs(lastY - downY) < 150f) return
-        if (kotlin.math.abs(velocityY) < minFling) return
+        // Any gesture that actually dragged the body may fling. The old fixed
+        // 150px gate silently killed short, quick flicks: the page moved only as
+        // far as the finger did and then stopped dead, which reads as "no
+        // inertia" — worst in short notes, where a flick is only a few hundred
+        // px. The drag threshold (cancelSlop) already keeps taps out of here.
+        if (kotlin.math.abs(lastY - downY) < touchSlop * 2f) {
+            if (INFO_FLING) android.util.Log.d("MoyuFling", "fling skipped: short drag")
+            return
+        }
+        if (kotlin.math.abs(velocityY) < minFling) {
+            if (INFO_FLING) android.util.Log.d("MoyuFling", "fling skipped: v=$velocityY < $minFling")
+            return
+        }
         val range = contentMaxScroll()
         // At either edge (with a 2px tolerance), do not start any fling at all.
         // This is the hard stop: no second swipe jumping back to the top.
+        android.util.Log.d("MOYU_SCROLL", "startFling v=$velocityY scrollY=$scrollY range=$range")
+        if (INFO_FLING) {
+            android.util.Log.d(
+                "MoyuFling",
+                "start v=$velocityY dir=${if (velocityY < 0) "up" else "down"} " +
+                    "scrollY=$scrollY range=$range",
+            )
+        }
         if (scrollY <= 0 || scrollY >= (range - 2).coerceAtLeast(0)) {
             scroller.forceFinished(true)
             return
@@ -2702,15 +3584,49 @@ private class BodyEditText(
             0,
             range,
         )
-        postInvalidateOnAnimation()
+        // Compose hosts this view through AndroidView, so the parent never calls
+        // the three-argument View.draw() path that would invoke computeScroll().
+        // Left to computeScroll alone the OverScroller would never advance and
+        // every fling would die on the first frame — no inertia in either
+        // direction. Drive it from a frame callback instead.
+        removeCallbacks(flingDriver)
+        postOnAnimation(flingDriver)
     }
 
-    override fun computeScroll() {
-        if (scroller.computeScrollOffset()) {
+    /**
+     * Advances the OverScroller one frame at a time and re-posts itself until the
+     * fling finishes or hits an edge. See startFling() for why computeScroll()
+     * cannot be relied on here.
+     */
+    private val flingDriver = object : Runnable {
+        override fun run() {
+            if (!scroller.computeScrollOffset()) return
             val maxScroll = contentMaxScroll()
             if ((scrollY <= 0 && scroller.currY <= 0) ||
                 (scrollY >= (maxScroll - 2).coerceAtLeast(0) && scroller.currY >= maxScroll)
             ) {
+                scroller.forceFinished(true)
+                return
+            }
+            scrollTo(scroller.currX, scroller.currY)
+            postOnAnimation(this)
+        }
+    }
+
+    override fun computeScroll() {
+        if (INFO_FLING) android.util.Log.d("MoyuFling", "computeScroll called")
+        if (scroller.computeScrollOffset()) {
+            val maxScroll = contentMaxScroll()
+            if (INFO_FLING) {
+                android.util.Log.d(
+                    "MoyuFling",
+                    "cs scrollY=$scrollY curr=${scroller.currY} final=${scroller.finalY}",
+                )
+            }
+            if ((scrollY <= 0 && scroller.currY <= 0) ||
+                (scrollY >= (maxScroll - 2).coerceAtLeast(0) && scroller.currY >= maxScroll)
+            ) {
+                if (INFO_FLING) android.util.Log.d("MoyuFling", "cs stopped at edge scrollY=$scrollY")
                 scroller.forceFinished(true)
                 return
             }
@@ -2818,6 +3734,9 @@ private fun EditorDock(
     onType: () -> Unit,
     onTodos: (() -> Unit)?,
     todoActive: Boolean = false,
+    boundNotes: Int = 0,
+    onNotes: (() -> Unit)? = null,
+    onNotesLongPress: (() -> Unit)? = null,
     onHideKeyboard: () -> Unit,
     onCollapse: () -> Unit,
     onSymbol: (String) -> Unit,
@@ -2829,21 +3748,76 @@ private fun EditorDock(
     onSelectAll: () -> Unit,
     onDelete: () -> Unit,
     onCancelSelection: () -> Unit,
+    /** 1型玻璃 sampling source. Pass the body's software backdrop so the real
+     *  EditText text shows through the dock; null falls back to a paper bar. */
+    backdrop: Backdrop? = null,
+    /** Bumped on every body scroll / text change so the glass re-samples the
+     *  native EditText instead of freezing on its first frame. */
+    epoch: Int = 0,
+    /** Read inside the dock's draw scope; invalidates the same draw chain that
+     *  contains liquidGlassBar, so the backdrop is re-sampled on every scroll. */
+    scrollTick: androidx.compose.runtime.MutableIntState? = null,
+    bodyEditor: BodyEditText? = null,
+    /** Test branch: sample the Compose body layer instead of the solid bar. */
+    glass: Boolean = false,
 ) {
     val ui = LocalInk.current
     val p = ui.palette
+    // Solid bar: one straight full-width strip, a touch deeper than the theme
+    // paper, so the tools and symbols own their surface. No glass, no rounding.
+    // The bar is the theme paper nudged towards the accent, not the raw accent:
+    // a full-strength accent turned the dock into a separate coloured slab and
+    // read as a different app. 10% light / 14% dark keeps the accent legible as
+    // a tint while the bar still belongs to the page.
+    // One tone for the toolbar and every flat button (see dockTone).
+    val bar = dockTone(ui)
+    val onBar = p.ink
+    val onBarDim = p.muted
+    var dockTopInWindow by remember { mutableStateOf(0f) }
+    // AGSL lens for the dock: real per-pixel refraction + RGB dispersion on the
+    // sampled body slice. null below API 33, where the bar falls back to blur.
+    val dockShader = remember {
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            runCatching { android.graphics.RuntimeShader(DOCK_REFRACTION_AGSL) }.getOrNull()
+        } else null
+    }
     Box(
         Modifier
             .fillMaxWidth()
-            .padding(horizontal = 9.dp)
-            .padding(bottom = 6.dp)
+            .onGloballyPositioned { dockTopInWindow = it.positionInWindow().y }
     ) {
-        MoyuSurface(
-            SurfaceRole.BAR,
-            Modifier.fillMaxWidth(),
-            radius = 26f,
+        Box(
+            Modifier
+                .fillMaxWidth()
+                // 1型玻璃 under the dock: the body is a native EditText, so the
+                // Backdrop library cannot sample it and its draw node freezes.
+                // Drawing the real view slice here every frame is what makes the
+                // text under the bar follow the scroll.
+                // Solid bar: one straight full-width strip, a touch deeper than the
+                // theme paper (dockTone), so the tools own their surface again.
+                .let { base ->
+                    if (glass && backdrop != null) {
+                        base.liquidGlassBar(
+                            backdrop = backdrop,
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(0.dp),
+                            palette = p,
+                            epoch = epoch,
+                            blurDp = 8f,
+                            refractionDp = 18f,
+                            dispersion = false,
+                            shadowAlpha = .16f,
+                            edgeStrength = .5f,
+                        )
+                    } else {
+                        base.background(bar)
+                    }
+                }
         ) {
-            Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 7.dp)) {
+            CompositionLocalProvider(
+                LocalDockFg provides onBar,
+                LocalDockDim provides onBarDim,
+            ) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp)) {
                 AnimatedContent(
                     targetState = selectionMode,
                     transitionSpec = {
@@ -2853,17 +3827,24 @@ private fun EditorDock(
                     label = "dockSelection",
                 ) { selecting ->
                     if (selecting) {
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
                             DockTool(Glyph.Share, "复制", true, onCopy)
                             DockTool(Glyph.Check, "全选", true, onSelectAll)
                             DockTool(Glyph.Edit, "剪切", true, onCut)
                             DockTool(Glyph.Download, "粘贴", true, onPaste)
                             DockTool(Glyph.Trash, "删除", true, onDelete)
-                            Spacer(Modifier.weight(1f))
                             DockTool(Glyph.Close, "取消", true, onCancelSelection)
                         }
                     } else {
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
                             DockTool(Glyph.Undo, "撤销", canUndo, onUndo)
                             DockTool(Glyph.Redo, "重做", canRedo, onRedo)
                             DockTool(Glyph.Indent, "缩进", true, onIndent)
@@ -2896,12 +3877,20 @@ private fun EditorDock(
                                 }
                             }
                             DockTool(Glyph.Font, "排版", true, onType)
-                            Spacer(Modifier.weight(1f))
+                            if (onNotes != null) {
+                                DockTool(
+                                    Glyph.Link,
+                                    if (boundNotes > 0) "笔记·$boundNotes" else "笔记",
+                                    true,
+                                    onNotes,
+                                    onLongPress = onNotesLongPress,
+                                )
+                            }
                             DockTool(Glyph.Keyboard, "收起", true, onHideKeyboard)
                         }
                     }
                 }
-                Spacer(Modifier.height(3.dp))
+                Spacer(Modifier.height(7.dp))
                 LazyRow(
                     Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(1.dp),
@@ -2910,30 +3899,44 @@ private fun EditorDock(
                     items(symbols) { symbol ->
                         Box(
                             Modifier
-                                .size(36.dp)
-                                .clip(RoundedCornerShape(10.dp))
+                                .size(38.dp)
+                                .clip(RoundedCornerShape(11.dp))
                                 .bouncy(scale = .86f, hapticType = 1) { onSymbol(symbol) },
                             contentAlignment = Alignment.Center,
                         ) {
-                            Txt(symbol, size = 15f, color = p.ink, align = TextAlign.Center, maxLines = 1)
+                            Txt(
+                                symbol,
+                                size = 15f,
+                                color = LocalDockFg.current.takeIf { it != Color.Unspecified } ?: p.ink,
+                                align = TextAlign.Center,
+                                maxLines = 1,
+                            )
                         }
                     }
                     item {
                         Box(
                             Modifier
-                                .size(36.dp)
-                                .clip(RoundedCornerShape(10.dp))
+                                .size(38.dp)
+                                .clip(RoundedCornerShape(11.dp))
                                 .bouncy(scale = .86f) { onCollapse() },
                             contentAlignment = Alignment.Center,
                         ) {
-                            LineIcon(Glyph.ChevronDown, p.muted, 15.dp)
+                            LineIcon(
+                                Glyph.ChevronDown,
+                                LocalDockDim.current.takeIf { it != Color.Unspecified } ?: p.muted,
+                                15.dp,
+                            )
                         }
                     }
                 }
             }
+            }
         }
     }
 }
+
+private val LocalDockFg = androidx.compose.runtime.staticCompositionLocalOf { Color.Unspecified }
+private val LocalDockDim = androidx.compose.runtime.staticCompositionLocalOf { Color.Unspecified }
 
 @Composable
 private fun DockTool(
@@ -2942,19 +3945,31 @@ private fun DockTool(
     enabled: Boolean,
     onClick: () -> Unit,
     iconSize: Dp = 18.dp,
+    onLongPress: (() -> Unit)? = null,
 ) {
     val ui = LocalInk.current
+    val currentOnClick by rememberUpdatedState(onClick)
+    val currentOnLong by rememberUpdatedState(onLongPress)
     Column(
         Modifier
-            .width(44.dp)
+            .width(42.dp)
             .clip(RoundedCornerShape(12.dp))
-            .bouncy(enabled, scale = .88f) { onClick() }
-            .padding(vertical = 3.dp),
+            // One gesture owner for tap and long press (two detectors would
+            // race for the same down), and the same bounce for every tool.
+            .bouncy(
+                enabled,
+                scale = .88f,
+                overshoot = true,
+                onLongPress = currentOnLong,
+            ) { currentOnClick() }
+            .padding(vertical = 4.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        LineIcon(glyph, if (enabled) ui.palette.ink else ui.palette.muted.copy(alpha = .3f), iconSize)
-        Spacer(Modifier.height(2.dp))
-        Txt(label, size = 7.4f, color = if (enabled) ui.palette.muted else ui.palette.muted.copy(alpha = .3f), maxLines = 1)
+        val fg = LocalDockFg.current.takeIf { it != Color.Unspecified } ?: ui.palette.muted
+        val ink = LocalDockFg.current.takeIf { it != Color.Unspecified } ?: ui.palette.ink
+        LineIcon(glyph, if (enabled) ink else fg.copy(alpha = .45f), iconSize)
+        Spacer(Modifier.height(3.dp))
+        Txt(label, size = 7.6f, color = if (enabled) fg else fg.copy(alpha = .45f), maxLines = 1)
     }
 }
 
@@ -3013,7 +4028,7 @@ private fun TypographySheet(store: AppStore, onDismiss: () -> Unit) {
     ModalSheet(onDismiss) {
         DialogTitle("排版", "改动会立刻作用到编辑器和提笔的手感。", onClose = onDismiss)
         Spacer(Modifier.height(16.dp))
-        MoyuSurface(SurfaceRole.CARD, Modifier.fillMaxWidth(), radius = 20f) {
+        MoyuSurface(Modifier.fillMaxWidth(), radius = 20f, flat = true) {
             Column(Modifier.padding(16.dp)) {
                 Txt("预览", size = 8.5f, color = ui.palette.muted, letterSpacing = 1f)
                 Spacer(Modifier.height(7.dp))
@@ -3118,6 +4133,7 @@ fun BookEditorScreen(
     chapterId: String,
     onBack: () -> Unit,
     onOpenBook: () -> Unit,
+    onOpenNote: (String) -> Unit = {},
 ) {
     val book = store.book(bookId)
     val chapter = book?.chapters?.firstOrNull { it.id == chapterId } ?: book?.chapters?.firstOrNull()
@@ -3127,7 +4143,25 @@ fun BookEditorScreen(
     }
     var menuOpen by remember { mutableStateOf(false) }
     var exportOpen by remember { mutableStateOf(false) }
+    var notesOpen by remember { mutableStateOf(false) }
     var pendingMenuAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    val boundNotes = store.data.notesOfChapter(chapter)
+    val noteLinks = NoteLinkUi(
+        notes = boundNotes,
+        floatOn = store.settings.noteFloat,
+        onOpenSheet = { notesOpen = true },
+        onToggleFloat = { on -> store.updateSettings { it.copy(noteFloat = on) } },
+        onOpenNote = { note -> onOpenNote(note.id) },
+        floatX = store.settings.noteFloatX,
+        floatY = store.settings.noteFloatY,
+        floatW = store.settings.noteFloatW,
+        floatH = store.settings.noteFloatH,
+        onFloatPlacement = { x, y, w, h ->
+            store.updateSettings {
+                it.copy(noteFloatX = x, noteFloatY = y, noteFloatW = w, noteFloatH = h)
+            }
+        },
+    )
     Box(Modifier.fillMaxSize()) {
         WritingScreen(
             seedKey = chapter.id,
@@ -3136,13 +4170,23 @@ fun BookEditorScreen(
             initialTitle = chapter.title,
             initialContent = chapter.content,
             placeholder = "从这里开始。写下第一句，故事就有了方向。",
-            inputBlocked = menuOpen,
+            inputBlocked = menuOpen || notesOpen,
+            noteLinks = noteLinks,
             onSave = { title, content ->
                 store.updateChapter(book.id, chapter.id, title = title.ifBlank { "第${book.chapters.indexOf(chapter) + 1}章" }, content = content)
             },
             onBack = onBack,
             onMore = { menuOpen = true },
         )
+
+        if (notesOpen) {
+            ChapterNotesSheet(
+                store = store,
+                bookId = book.id,
+                chapterId = chapter.id,
+                onDismiss = { notesOpen = false },
+            )
+        }
 
         if (menuOpen) {
             InlineModalSheet(onDismiss = {
@@ -3154,6 +4198,11 @@ fun BookEditorScreen(
                 Spacer(Modifier.height(14.dp))
                 SettingRow("书籍详情与目录", "查看章节、封面和统计", Glyph.Book, onClick = {
                     pendingMenuAction = { onOpenBook() }
+                    close()
+                })
+                RowDivider()
+                SettingRow("章节笔记", "绑定笔记、行文时悬浮", Glyph.Link, onClick = {
+                    pendingMenuAction = { notesOpen = true }
                     close()
                 })
                 RowDivider()
@@ -3174,6 +4223,7 @@ fun NoteEditorScreen(
     store: AppStore,
     noteId: String,
     onBack: () -> Unit,
+    onOpenChapter: (String, String) -> Unit = { _, _ -> },
 ) {
     val context = LocalContext.current
     val note = store.data.notes.firstOrNull { it.id == noteId }
@@ -3184,8 +4234,10 @@ fun NoteEditorScreen(
     var menuOpen by remember { mutableStateOf(false) }
     var deleteOpen by remember { mutableStateOf(false) }
     var groupPickerOpen by remember { mutableStateOf(false) }
+    var chapterSheetOpen by remember { mutableStateOf(false) }
     var pendingMenuAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     val pending = note.todos.count { !it.done }
+    val chapterRefs = store.data.noteChapterRefs(note)
 
     Box(Modifier.fillMaxSize()) {
         WritingScreen(
@@ -3195,7 +4247,14 @@ fun NoteEditorScreen(
             initialContent = note.content,
             placeholder = "随便写。灵感、片段、今天没说完的话。",
             isNote = true,
-            inputBlocked = menuOpen,
+            inputBlocked = menuOpen || chapterSheetOpen,
+            chapterTags = if (chapterRefs.isEmpty()) null else {
+                {
+                    NoteChapterTags(refs = chapterRefs) { ref ->
+                        onOpenChapter(ref.bookId, ref.chapterId)
+                    }
+                }
+            },
             pendingTodos = pending,
             initialTodos = note.todos,
             onTodosChange = { list ->
@@ -3207,7 +4266,10 @@ fun NoteEditorScreen(
             onSave = { title, content ->
                 store.updateNote(note.id) { n ->
                     if (n.title == title && n.content == content) n else n.copy(
-                        title = title.ifBlank { "无标题笔记" },
+                        // Keep it empty when the user cleared it: an empty title
+                        // is what makes the editor show its muted placeholder.
+                        // Writing the literal string turned a hint into content.
+                        title = title.trim(),
                         content = content,
                     )
                 }
@@ -3224,6 +4286,16 @@ fun NoteEditorScreen(
             }) { close ->
                 DialogTitle("笔记选项", "${note.todos.size} 项待办 · ${formatWords(countWords(note.content))} 字", onClose = close)
                 Spacer(Modifier.height(14.dp))
+                SettingRow(
+                    "关联章节",
+                    if (chapterRefs.isEmpty()) "还没有关联章节" else "已关联 ${chapterRefs.size} 个章节",
+                    Glyph.Link,
+                    onClick = {
+                        pendingMenuAction = { chapterSheetOpen = true }
+                        close()
+                    },
+                )
+                RowDivider()
                 SettingRow("固定到顶部", if (note.pinned) "已固定" else "按更新时间排序", Glyph.Pin, trailing = {
                     InkToggle(note.pinned) { on -> store.updateNote(note.id) { it.copy(pinned = on) } }
                 })
@@ -3255,6 +4327,17 @@ fun NoteEditorScreen(
             store = store,
             onSelect = { group -> store.setNoteGroup(note.id, group) },
             onDismiss = { groupPickerOpen = false },
+        )
+    }
+    if (chapterSheetOpen) {
+        NoteChapterSheet(
+            store = store,
+            noteId = note.id,
+            onDismiss = { chapterSheetOpen = false },
+            onOpenChapter = { bookId, chapterId ->
+                chapterSheetOpen = false
+                onOpenChapter(bookId, chapterId)
+            },
         )
     }
     if (deleteOpen) {
@@ -3414,11 +4497,10 @@ private fun InlineReminderPanel(
         ).show()
     }
 
-    MoyuSurface(
-        SurfaceRole.POPUP,
-        modifier,
+    MoyuSurface(modifier,
         radius = 22f,
         shape = shape,
+        flat = true,
     ) {
     Column(
         Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
@@ -3571,8 +4653,8 @@ private fun TodoReminderDialog(
                 Stepper(String.format(Locale.US, "%02d", second), { second = (second + 59) % 60 }, { second = (second + 1) % 60 })
             }
         }
-        Spacer(Modifier.height(10.dp))
-        Txt("提醒会遵守系统的免打扰设置。", size = 9f, color = ui.palette.muted)
+        // The do-not-disturb note lives once, in the new-reminder dialog; the
+        // edit panel repeated it verbatim right above the delete button.
         if (onDelete != null) {
             Spacer(Modifier.height(12.dp))
             GlassButton("删除提醒", onDelete, Modifier.fillMaxWidth().height(44.dp))
@@ -3721,3 +4803,144 @@ private fun reminderSlots(): List<Pair<Long?, String>> {
     return slots
 }
 
+// ---------------------------------------------------------------------------
+// Preview. The dock is the surface whose material is easiest to judge wrongly by
+// eye, so it gets a tile of its own. Haze still falls back to static glass in
+// layoutlib; real blur is only visible on a device.
+// ---------------------------------------------------------------------------
+
+@Preview(name = "写作 Dock", widthDp = 412, heightDp = 210, showBackground = true)
+@Composable
+private fun EditorDockPreview() {
+    MoyuTheme(AppSettings(theme = "night", motion = "none")) {
+        CompositionLocalProvider(LocalHazeHandle provides null) {
+            Box(
+                Modifier.fillMaxSize().background(LocalInk.current.palette.bgTop),
+                contentAlignment = Alignment.BottomCenter,
+            ) {
+                EditorDock(
+                    canUndo = true,
+                    canRedo = false,
+                    isNote = true,
+                    pendingTodos = 2,
+                    onUndo = {},
+                    onRedo = {},
+                    onIndent = {},
+                    onQuote = {},
+                    onDivider = {},
+                    onType = {},
+                    onTodos = {},
+                    boundNotes = 3,
+                    onNotes = {},
+                    onNotesLongPress = {},
+                    onHideKeyboard = {},
+                    onCollapse = {},
+                    onSymbol = {},
+                    onExpand = {},
+                    selectionMode = false,
+                    onCopy = {},
+                    onCut = {},
+                    onPaste = {},
+                    onSelectAll = {},
+                    onDelete = {},
+                    onCancelSelection = {},
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Draws the native editor view into the dock's 1型玻璃 backdrop.
+ *
+ * A Compose `layerBackdrop` records Compose draw content only, so it cannot see
+ * the `AndroidView` `BodyEditText`; `View.draw` into a software bitmap can. The
+ * bitmap is cached against [BodyEditText.renderRevision] so scrolling and
+ * typing re-record it, while a still page costs one cached draw per frame.
+ */
+private class EditorBodyBackdrop(
+    private val body: () -> BodyEditText?,
+    private val paper: Color,
+) : Backdrop {
+
+    override val isCoordinatesDependent: Boolean = true
+
+    private var cache: Bitmap? = null
+    private var cacheWidth = 0
+    private var cacheHeight = 0
+    private var cacheRevision = -1L
+    private var cachePaper = 0uL
+
+    override fun DrawScope.drawBackdrop(
+        density: Density,
+        coordinates: LayoutCoordinates?,
+        layerBlock: (GraphicsLayerScope.() -> Unit)?,
+    ) {
+        val view = body() ?: return
+        val dock = coordinates ?: return
+        if (!view.isAttachedToWindow || !view.isLaidOut || view.width == 0) return
+        val viewLoc = IntArray(2)
+        view.getLocationInWindow(viewLoc)
+        val dockLoc = dock.positionInWindow()
+        // Opaque paper first, otherwise the sharp text underneath ghosts through
+        // the blurred copy.
+        drawRect(paper)
+        clipRect(0f, 0f, size.width, size.height) {
+            // Re-record the body every draw. renderRevision stayed 0 in practice
+            // (BodyEditText.onScrollChanged does not fire for this viewport), so
+            // a revision-keyed cache froze the glass on its first frame. The
+            // dock's draw is already invalidated by bodyScrollTick, so redrawing
+            // here is what makes the text follow the scroll.
+            val w = view.width
+            val h = view.height
+            var bitmap = cache
+            if (bitmap == null || bitmap.width != w || bitmap.height != h ||
+                cachePaper != paper.value
+            ) {
+                bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                cache = bitmap
+                cacheWidth = w
+                cacheHeight = h
+                cachePaper = paper.value
+            } else {
+                bitmap.eraseColor(0)
+            }
+            view.draw(Canvas(bitmap))
+            cacheRevision = view.renderRevision
+            // Crop only the slice under the dock instead of drawing the whole
+            // bitmap at a large negative offset.
+            val srcX = (dockLoc.x - viewLoc[0]).toInt().coerceAtLeast(0)
+            val srcY = (dockLoc.y - viewLoc[1]).toInt().coerceAtLeast(0)
+            val srcW = min(size.width.toInt(), bitmap.width - srcX)
+            val srcH = min(size.height.toInt(), bitmap.height - srcY)
+            if (srcW > 0 && srcH > 0) {
+                drawImage(
+                    image = bitmap.asImageBitmap(),
+                    srcOffset = androidx.compose.ui.unit.IntOffset(srcX, srcY),
+                    srcSize = androidx.compose.ui.unit.IntSize(srcW, srcH),
+                    dstOffset = androidx.compose.ui.unit.IntOffset.Zero,
+                    dstSize = androidx.compose.ui.unit.IntSize(srcW, srcH),
+                )
+            }
+        }
+    }
+}
+
+/** Dock lens: edge refraction + RGB dispersion over the sampled body slice. */
+private const val DOCK_REFRACTION_AGSL = """
+uniform shader content;
+uniform float2 size;
+uniform float amount;
+uniform float dispersion;
+uniform float edge;
+
+half4 main(float2 coord) {
+    float d = clamp(coord.y / edge, 0.0, 1.0);
+    float k = (1.0 - d) * (1.0 - d);
+    float2 base = clamp(coord, float2(0.0), size - float2(1.0));
+    float2 off = float2(0.0, -k * amount);
+    float2 cr = clamp(base + off * (1.0 + dispersion), float2(0.0), size - float2(1.0));
+    float2 cb = clamp(base + off * (1.0 - dispersion), float2(0.0), size - float2(1.0));
+    return half4(content.eval(cr).r, content.eval(base).g, content.eval(cb).b, 1.0);
+}
+"""

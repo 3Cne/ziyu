@@ -52,27 +52,48 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.withTransform
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.layer.GraphicsLayer
+import androidx.compose.ui.graphics.layer.drawLayer
+import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlin.math.roundToInt
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.findViewTreeLifecycleOwner
+import com.kyant.backdrop.backdrops.layerBackdrop
+import com.kyant.backdrop.backdrops.rememberLayerBackdrop
+
+// Stable identity of the tab-pager layer at the bottom of the depth stack.
+// It outlives every push/pop, otherwise a recreated pager would start one
+// screen to the right and slide in over the page it is supposed to reveal.
+private const val RootTabsLayer = "root-tabs"
 
 sealed class Screen(val depth: Int, val tabIndex: Int? = null) {
     data object Library : Screen(0, 0)
@@ -140,7 +161,35 @@ private fun MoyuRoot(store: AppStore, initialNote: String?, consumeInitialNote: 
     val activity = context as? Activity
     val haze = remember { HazeBridge.newHandle() }
     val hazeSupported = HazeBridge.isSupported()
+    // The page is recorded into a layer the floating tab bar samples. Backdrop
+    // owns the layer and the glass effect; the tab bar never samples the window
+    // buffer, so its own icons cannot appear inside the capsule as ghosts.
+    val tabBarBackdrop = rememberLayerBackdrop()
     var stack by remember { mutableStateOf(listOf<Screen>(Screen.Library)) }
+    // Rapid back presses used to start a second page transition before the
+    // first one had finished, so the same detail page was composed twice and
+    // both copies slid off together. One pop per transition window keeps a
+    // single outgoing page on stage.
+    var lastPopAt by remember { mutableLongStateOf(0L) }
+    // The window must be longer than the transition it guards, otherwise the
+    // second pop lands while the first page is still leaving and AnimatedContent
+    // composes the same page twice. Durations are the ones transitionSpec uses.
+    fun popWindowMs(): Long = when (store.data.settings.motion) {
+        "none" -> 80L
+        "snappy" -> 340L
+        "gentle" -> 600L
+        else -> 460L
+    }
+    // Presses inside the window are queued, not dropped: the page still leaves
+    // only after the previous transition finished, but the tap is never
+    // swallowed, so the button does not feel laggy.
+    val navHandler = remember { android.os.Handler(android.os.Looper.getMainLooper()) }
+    // Immediate, always. Any queueing here is felt as input lag; the duplicate
+    // page is prevented in the transition instead (a back transition has no
+    // outgoing content, so nothing can trail behind).
+    val pop: () -> Unit = {
+        if (stack.size > 1) stack = stack.dropLast(1)
+    }
     // Keep the settings root list state at the navigation host level. It used to
     // live inside SettingsScreen, so pushing a SettingPage destroyed the
     // composable and returning always recreated the LazyColumn at item 0.
@@ -168,7 +217,11 @@ private fun MoyuRoot(store: AppStore, initialNote: String?, consumeInitialNote: 
     }
 
     BackHandler(enabled = current.depth == 0) {
-        if (current != Screen.Library) stack = listOf(Screen.Library) else activity?.finish()
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - lastPopAt > popWindowMs()) {
+            lastPopAt = now
+            if (current != Screen.Library) stack = listOf(Screen.Library) else activity?.finish()
+        }
     }
 
     val lifecycleOwner = LocalView.current.findViewTreeLifecycleOwner()
@@ -191,41 +244,82 @@ private fun MoyuRoot(store: AppStore, initialNote: String?, consumeInitialNote: 
         }
     }
 
-    Box(Modifier.fillMaxSize().background(p.bgBottom)) {
-        AnimatedContent(
-            targetState = current,
-            transitionSpec = {
-                val motion = store.data.settings.motion
-                val duration = when (motion) {
-                    "none" -> 0
-                    "snappy" -> 210
-                    "gentle" -> 420
-                    else -> 300
-                }
-                val targetTab = targetState.tabIndex
-                val initialTab = initialState.tabIndex
-                val forward = if (targetTab != null && initialTab != null) {
-                    targetTab > initialTab
-                } else {
-                    targetState.depth > initialState.depth
-                }
-                when (store.data.settings.pageMotion) {
-                    "fade" -> fadeIn(tween(duration, easing = FastOutSlowInEasing)) togetherWith
-                        fadeOut(tween((duration * .7f).toInt()))
-                    "scale" -> (fadeIn(tween(duration)) + scaleIn(initialScale = .965f, animationSpec = tween(duration, easing = FastOutSlowInEasing))) togetherWith
-                        (fadeOut(tween((duration * .7f).toInt())) + scaleOut(targetScale = 1.012f, animationSpec = tween(duration)))
-                    else -> if (forward) {
-                        (slideInHorizontally(tween(duration, easing = FastOutSlowInEasing)) { it / 5 } + fadeIn(tween((duration * .8f).toInt()))) togetherWith
-                            (slideOutHorizontally(tween(duration)) { -it / 10 } + fadeOut(tween((duration * .6f).toInt())))
-                    } else {
-                        (slideInHorizontally(tween(duration, easing = FastOutSlowInEasing)) { -it / 6 } + fadeIn(tween((duration * .8f).toInt()))) togetherWith
-                            (slideOutHorizontally(tween(duration)) { it / 5 } + fadeOut(tween((duration * .6f).toInt())))
+    // The Haze source has to cover the TabBar too. It used to sit on the
+    // AnimatedContent only, so the TabBar — a sibling of that content — sampled
+    // a source it was not inside and its 模糊 slider did nothing at all.
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(p.bgBottom)
+            .then(if (hazeSupported) HazeBridge.source(Modifier, haze) else Modifier),
+    ) {
+        // The page is recorded into its own layer, and that layer carries the
+        // effect. Shading a live node sampled the window buffer, which already
+        // held the bar, so the bar's icons showed up inside the capsule as
+        // ghosts. A recorded layer holds page pixels only.
+        Box(
+            Modifier
+                .fillMaxSize()
+                .layerBackdrop(tabBarBackdrop),
+        ) {
+// The tab pager is the bottom layer of the depth stack and is kept alive
+// while a detail page sits on top of it: pushed pages wait one screen to the
+// right, the pager waits one screen to the left, and going back slides the
+// same pager into view. It used to be replaced by the detail itself on the
+// leaving layer (rendering `current`), so the incoming page was composed
+// twice and both copies slid over each other.
+val rootTabs: Any = RootTabsLayer
+val rootTab = stack.firstOrNull { it.depth == 0 }?.tabIndex ?: 0
+val depthScreens: List<Any> = listOf(rootTabs) + stack.filter { it.depth > 0 }
+DepthStack(
+    screens = depthScreens,
+    perPageMs = when (store.data.settings.motion) {
+        "none" -> 0
+        "snappy" -> 210
+        "gentle" -> 420
+        else -> 300
+    },
+) { screenAny, _ ->
+    if (screenAny == RootTabsLayer) {
+        // Root tabs: four pages live side by side, the whole strip
+        // slides by |Δtab| screens so 笔记 and 数据 really pass through.
+        val perPage = when (store.data.settings.motion) {
+            "none" -> 0
+            "snappy" -> 180
+            "gentle" -> 380
+            else -> 280
+        }
+        TabPager(
+            index = rootTab,
+            pageCount = 4,
+            perPageMs = perPage,
+            motion = store.data.settings.pageMotion,
+        ) { i ->
+            CompositionLocalProvider(LocalHazeHandle provides if (hazeSupported) haze else null) {
+                when (i) {
+                    0 -> LibraryScreen(
+                        store = store,
+                        onOpenBook = { stack = stack + Screen.BookDetail(it) },
+                        onContinue = { book, chapter ->
+                            stack = stack + Screen.ChapterEditor(book.id, chapter.id)
+                        },
+                        onCreateBook = { book -> stack = stack + Screen.BookDetail(book.id) },
+                    )
+                    1 -> NotesScreen(
+                        store = store,
+                        onOpenNote = { stack = stack + Screen.NoteEditor(it) },
+                        onCreateNote = { stack = stack + Screen.NoteEditor(it) },
+                    )
+                    2 -> StatsScreen(store)
+                    else -> SettingsScreen(store, settingsListState) { page ->
+                        stack = stack + Screen.SettingPage(page)
                     }
                 }
-            },
-            label = "screen",
-            modifier = if (hazeSupported) HazeBridge.source(Modifier.fillMaxSize(), haze) else Modifier.fillMaxSize(),
-        ) { screen ->
+            }
+        }
+        return@DepthStack
+    }
+    val screen = screenAny as Screen
             CompositionLocalProvider(LocalHazeHandle provides if (hazeSupported) haze else null) {
             when (screen) {
                 Screen.Library -> LibraryScreen(
@@ -246,28 +340,36 @@ private fun MoyuRoot(store: AppStore, initialNote: String?, consumeInitialNote: 
                 is Screen.BookDetail -> BookDetailScreen(
                     store = store,
                     bookId = screen.bookId,
-                    onBack = { stack = stack.dropLast(1) },
+                    onBack = { pop() },
                     onOpenChapter = { bookId, chapterId -> stack = stack + Screen.ChapterEditor(bookId, chapterId) },
                 )
                 is Screen.ChapterEditor -> BookEditorScreen(
                     store = store,
                     bookId = screen.bookId,
                     chapterId = screen.chapterId,
-                    onBack = { stack = stack.dropLast(1) },
-                    onOpenBook = { stack = stack.dropLast(1) },
+                    onBack = { pop() },
+                    onOpenBook = { pop() },
+                    onOpenNote = { noteId ->
+                        // Keep the chapter underneath so back returns to writing.
+                        stack = stack + Screen.NoteEditor(noteId)
+                    },
                 )
                 is Screen.NoteEditor -> NoteEditorScreen(
                     store = store,
                     noteId = screen.noteId,
-                    onBack = { stack = stack.dropLast(1) },
+                    onBack = { pop() },
+                    onOpenChapter = { bookId, chapterId ->
+                        stack = stack + Screen.ChapterEditor(bookId, chapterId)
+                    },
                 )
                 is Screen.SettingPage -> SettingsDetailScreen(
                     store = store,
                     page = screen.page,
-                    onBack = { stack = stack.dropLast(1) },
+                    onBack = { pop() },
                 )
             }
             }
+        }
         }
 
         Box(
@@ -299,7 +401,6 @@ private fun MoyuRoot(store: AppStore, initialNote: String?, consumeInitialNote: 
                     Screen.Settings -> 3
                     else -> 0
                 },
-                haze = if (hazeSupported) haze else null,
                 onSelect = { index ->
                     stack = listOf(
                         when (index) {
@@ -310,6 +411,7 @@ private fun MoyuRoot(store: AppStore, initialNote: String?, consumeInitialNote: 
                         }
                     )
                 },
+                backdrop = tabBarBackdrop,
             )
         }
 
@@ -333,104 +435,6 @@ private fun MoyuRoot(store: AppStore, initialNote: String?, consumeInitialNote: 
                     .navigationBarsPadding()
                     .padding(start = 17.dp, bottom = if (rootVisible) 96.dp else 112.dp)
             )
-        }
-    }
-}
-
-@Composable
-internal fun MoyuTabBar(current: Int, haze: HazeBridge.Handle? = null, onSelect: (Int) -> Unit) {
-    val ui = LocalInk.current
-    val p = ui.palette
-    val s = ui.settings
-    val names = (s.tabNames + listOf("书架", "笔记", "数据", "设置")).take(4)
-    val icons = listOf(Glyph.Book, Glyph.Note, Glyph.Chart, Glyph.Gear)
-    val height = if (s.showTabLabels) 64.dp else 54.dp
-    val barCorner = s.materialFor(s.theme, SurfaceRole.BAR).corner
-    val pillCorner = (barCorner - 6f).coerceAtLeast(0f).dp
-    var tabOrigin by remember { mutableStateOf(androidx.compose.ui.geometry.Offset.Zero) }
-    val backdrop by produceState<androidx.compose.ui.graphics.ImageBitmap?>(null, haze, current) {
-
-        if (haze == null) return@produceState
-        // Freeze a backdrop from Haze's source layer. If the layer is not ready
-        // yet, retry after the transition settles instead of showing a flash.
-        repeat(12) {
-            kotlinx.coroutines.delay(80)
-            val layer = HazeBridge.contentLayer(haze) as? androidx.compose.ui.graphics.layer.GraphicsLayer
-            if (layer != null) {
-                val image = runCatching { layer.toImageBitmap() }.getOrNull()
-                if (image != null) {
-                    value = image
-                    return@produceState
-                }
-            }
-        }
-    }
-    Box(
-        Modifier
-            .fillMaxWidth()
-            .navigationBarsPadding()
-            .padding(horizontal = 13.dp, vertical = 8.dp)
-            .onGloballyPositioned { tabOrigin = it.positionInWindow() }
-    ) {
-        MoyuSurface(
-            SurfaceRole.BAR,
-            Modifier
-                .fillMaxWidth()
-                .height(height),
-            radius = barCorner,
-        ) {
-            LiquidLensOverlay(
-                Modifier.matchParentSize(),
-                radius = barCorner.dp,
-                tint = p.paper,
-                backdrop = backdrop,
-                sourceOffset = tabOrigin,
-            )
-            BoxWithConstraints(Modifier.fillMaxSize().padding(5.dp)) {
-                val itemWidth = maxWidth / 4
-                val target = itemWidth * current
-                val x by animateDpAsState(target, motionSpecDp(s.motion), label = "tabPill")
-                Box(
-                    Modifier
-                        .offset(x = x)
-                        .width(itemWidth)
-                        .fillMaxHeight()
-                        .clip(RoundedCornerShape(pillCorner))
-                        .background(p.ink)
-                )
-                Row(Modifier.fillMaxSize()) {
-                    names.take(4).forEachIndexed { index, name ->
-                        val active = index == current
-                        val fg by animateColorAsState(
-                            if (active) p.bgTop else p.muted,
-                            animationSpec = tween(220),
-                            label = "tabFg",
-                        )
-                        Column(
-                            Modifier
-                                .weight(1f)
-                                .fillMaxHeight()
-                                .clip(RoundedCornerShape(pillCorner))
-                                .bouncy(scale = .93f, hapticType = 1) { onSelect(index) },
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.Center,
-                        ) {
-                            LineIcon(icons[index], fg, if (active) 20.dp else 19.dp)
-                            if (s.showTabLabels) {
-                                Spacer(Modifier.height(3.dp))
-                                Txt(
-                                    name.ifBlank { listOf("书架", "笔记", "数据", "设置")[index] }.take(4),
-                                    size = 8.5f,
-                                    color = fg,
-                                    weight = if (active) FontWeight.Medium else FontWeight.Normal,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Clip,
-                                )
-                            }
-                        }
-                    }
-                }
-            }
         }
     }
 }

@@ -7,9 +7,25 @@ import android.provider.Settings
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import kotlinx.coroutines.delay
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import android.os.Build
+import com.kyant.backdrop.backdrops.layerBackdrop
+import com.kyant.backdrop.backdrops.rememberLayerBackdrop
+import com.kyant.backdrop.drawBackdrop
+import com.kyant.backdrop.effects.blur
+import com.kyant.backdrop.effects.lens
+import com.kyant.backdrop.effects.vibrancy
+import com.kyant.backdrop.shadow.InnerShadow
+import com.kyant.backdrop.shadow.Shadow
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -21,6 +37,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
@@ -31,6 +48,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -40,6 +58,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -101,12 +120,6 @@ private fun motionLabel(key: String) = when (key) {
     else -> "灵动"
 }
 
-private fun pageMotionLabel(key: String) = when (key) {
-    "fade" -> "淡入"
-    "scale" -> "缩放"
-    else -> "滑动"
-}
-
 @Composable
 fun SettingsScreen(store: AppStore, listState: LazyListState, onOpenPage: (String) -> Unit) {
     val ui = LocalInk.current
@@ -130,16 +143,13 @@ fun SettingsScreen(store: AppStore, listState: LazyListState, onOpenPage: (Strin
                     .padding(top = 14.dp)
             ) {
                 Txt("设置", size = 34f, weight = FontWeight.SemiBold, letterSpacing = .4f)
-                Spacer(androidx.compose.ui.Modifier.height(5.dp))
-                Txt("把字隅调成你的样子。每一项都会立刻生效。", size = 11f, color = p.muted)
                 Spacer(androidx.compose.ui.Modifier.height(19.dp))
             }
         }
         item {
-            MoyuSurface(
-                SurfaceRole.CARD,
-                androidx.compose.ui.Modifier.fillMaxWidth(),
+            MoyuSurface(androidx.compose.ui.Modifier.fillMaxWidth(),
                 radius = 26f,
+                flat = true,
             ) {
                 Row(
                     androidx.compose.ui.Modifier
@@ -161,7 +171,7 @@ fun SettingsScreen(store: AppStore, listState: LazyListState, onOpenPage: (Strin
                     Column(androidx.compose.ui.Modifier.weight(1f)) {
                         Txt(s.appName, size = 17f, weight = FontWeight.SemiBold, letterSpacing = 1f)
                         Spacer(androidx.compose.ui.Modifier.height(3.dp))
-                        Txt(s.quote, size = 9.5f, color = p.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Txt("空间名称", size = 9.5f, color = p.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     LineIcon(Glyph.Chevron, p.muted, 16.dp)
                 }
@@ -170,32 +180,12 @@ fun SettingsScreen(store: AppStore, listState: LazyListState, onOpenPage: (Strin
         item {
             Spacer(androidx.compose.ui.Modifier.height(4.dp))
             SettingGroup("外观") {
+                // One door only: theme, accent and type all live on this page.
                 SettingRow(
-                    "配色",
-                    "${themeLabel(s.theme)} · ${accentChoices.firstOrNull { it.second == s.accent }?.first ?: "自定义"}",
-                    Glyph.Sun,
-                    onClick = { onOpenPage("appearance") },
-                )
-                RowDivider()
-                SettingRow(
-                    "字体与排版",
-                    "${fontLabel(s.font)} · ${(17f * s.fontScale).roundToInt()} sp · 行距 ${String.format(Locale.US, "%.2f", s.lineHeight)}",
-                    Glyph.Font,
-                    onClick = { onOpenPage("appearance") },
-                )
-                RowDivider()
-                SettingRow(
-                    "主题",
-                    "主题、点缀色与字体",
+                    "外观",
+                    "${themeLabel(s.theme)} · ${accentChoices.firstOrNull { it.second == s.accent }?.first ?: "自定义"} · ${fontLabel(s.font)}",
                     Glyph.Sparkles,
                     onClick = { onOpenPage("appearance") },
-                )
-                RowDivider()
-                SettingRow(
-                    "分角色材质",
-                    "栏 / 卡片 / 弹窗 / 控件分别调",
-                    Glyph.Layers,
-                    onClick = { onOpenPage("material") },
                 )
             }
         }
@@ -227,7 +217,7 @@ fun SettingsScreen(store: AppStore, listState: LazyListState, onOpenPage: (Strin
             SettingGroup("体验") {
                 SettingRow(
                     "动效",
-                    "${motionLabel(s.motion)} · ${pageMotionLabel(s.pageMotion)}转场 · ${if (s.haptics) "有触感" else "无触感"}",
+                    "${motionLabel(s.motion)} · ${if (s.haptics) "有触感" else "无触感"}",
                     Glyph.Motion,
                     onClick = { onOpenPage("motion") },
                 )
@@ -263,8 +253,6 @@ fun SettingsScreen(store: AppStore, listState: LazyListState, onOpenPage: (Strin
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Txt("字隅 ${BuildConfig.VERSION_NAME}", size = 8.5f, color = p.muted.copy(alpha = .65f), letterSpacing = 1f)
-                Spacer(androidx.compose.ui.Modifier.height(3.dp))
-                Txt("故事留在本机，也留在你手里。", size = 8f, color = p.muted.copy(alpha = .5f))
             }
         }
         }
@@ -275,7 +263,6 @@ fun SettingsScreen(store: AppStore, listState: LazyListState, onOpenPage: (Strin
 fun SettingsDetailScreen(store: AppStore, page: String, onBack: () -> Unit) {
     when (page) {
         "appearance" -> AppearancePage(store, onBack)
-        "material" -> MaterialSettingsPage(store, onBack)
         "library" -> LibrarySettingsPage(store, onBack)
         "writing" -> WritingSettingsPage(store, onBack)
         "motion" -> MotionSettingsPage(store, onBack)
@@ -291,34 +278,52 @@ private fun SettingsPage(
     title: String,
     subtitle: String,
     onBack: () -> Unit,
+    listState: LazyListState? = null,
+    pinnedBelowTitle: (@Composable () -> Unit)? = null,
+    /** Overlay drawn directly under the title row, over the scrolling list.
+     *  Unlike a pinned block it takes no layout space, so transient previews
+     *  can sit flush against the header without leaving a gap. */
+    floatingBelowHeader: (@Composable androidx.compose.foundation.layout.BoxScope.() -> Unit)? = null,
     content: LazyListScope.() -> Unit,
 ) {
     BackHandler { onBack() }
     Box(androidx.compose.ui.Modifier.fillMaxSize()) {
         AmbientBackground()
-        LazyColumn(
-            modifier = androidx.compose.ui.Modifier.fillMaxSize().imePadding(),
-            contentPadding = PaddingValues(start = 20.dp, top = 0.dp, end = 20.dp, bottom = 70.dp),
-            verticalArrangement = Arrangement.spacedBy(11.dp),
-        ) {
-            item {
-                Row(
-                    androidx.compose.ui.Modifier
-                        .fillMaxWidth()
-                        .statusBarsPadding()
-                        .padding(top = 10.dp, bottom = 5.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    GlassIconButton(Glyph.Back, onBack, size = 40.dp)
-                    Spacer(androidx.compose.ui.Modifier.width(11.dp))
-                    Column {
-                        Txt(title, size = 20f, weight = FontWeight.SemiBold)
-                        Spacer(androidx.compose.ui.Modifier.height(2.dp))
-                        Txt(subtitle, size = 9.5f, color = LocalInk.current.palette.muted)
-                    }
+        Column(androidx.compose.ui.Modifier.fillMaxSize().imePadding()) {
+            Row(
+                androidx.compose.ui.Modifier
+                    .fillMaxWidth()
+                    .statusBarsPadding()
+                    .padding(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 5.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                GlassIconButton(Glyph.Back, onBack, size = 40.dp)
+                Spacer(androidx.compose.ui.Modifier.width(11.dp))
+                Column {
+                    Txt(title, size = 20f, weight = FontWeight.SemiBold)
+                    Spacer(androidx.compose.ui.Modifier.height(2.dp))
+                    Txt(subtitle, size = 9.5f, color = LocalInk.current.palette.muted)
                 }
             }
-            content()
+            // A pinned block lives outside the scroller so tuning a lower slider
+            // never loses sight of what is being tuned. It used to be the first
+            // list item, so scrolling down pushed the preview off screen.
+            if (pinnedBelowTitle != null) {
+                Box(androidx.compose.ui.Modifier.padding(horizontal = 20.dp)) {
+                    pinnedBelowTitle()
+                }
+            }
+            Box(androidx.compose.ui.Modifier.weight(1f)) {
+                LazyColumn(
+                    modifier = androidx.compose.ui.Modifier.fillMaxSize(),
+                    state = listState ?: rememberLazyListState(),
+                    contentPadding = PaddingValues(start = 20.dp, top = 11.dp, end = 20.dp, bottom = 70.dp),
+                    verticalArrangement = Arrangement.spacedBy(11.dp),
+                ) {
+                    content()
+                }
+                floatingBelowHeader?.invoke(this)
+            }
         }
     }
 }
@@ -338,10 +343,63 @@ private fun SectionCaption(text: String) {
 private fun AppearancePage(store: AppStore, onBack: () -> Unit) {
     val ui = LocalInk.current
     val s = ui.settings
-    SettingsPage("主题", "主题、点缀色和字体。材质请到分角色材质里调。", onBack) {
-        item { AppearancePreview() }
+    // Preview cards are transient: they appear only while a related control is
+    // being changed. A pinned card stole a fixed slice of the page forever and
+    // an inline one was pushed off screen exactly when the low sliders were
+    // being tuned.
+    var preview by remember { mutableStateOf(0) } // 0 none, 1 text, 2 glass
+    LaunchedEffect(preview) {
+        if (preview != 0) {
+            delay(1700)
+            preview = 0
+        }
+    }
+    SettingsPage(
+        "外观",
+        "主题、点缀色和字体。",
+        onBack,
+        // One AnimatedVisibility per card, each with fixed content: a single
+        // container whose child depended on `preview` swapped to the text card
+        // the moment the value reset to 0, so the text card popped in while the
+        // glass card was still fading out. It sits inside the page column, right
+        // under the header, so it cannot leave a gap above it.
+        floatingBelowHeader = {
+            val floatModifier = androidx.compose.ui.Modifier
+                .align(Alignment.TopCenter)
+                .padding(horizontal = 20.dp)
+            AnimatedVisibility(
+                visible = preview == 2,
+                modifier = floatModifier,
+                enter = fadeIn(tween(120)) + slideInVertically(tween(160)) { -it / 4 },
+                exit = fadeOut(tween(180)) + slideOutVertically(tween(160)) { -it / 4 },
+            ) {
+                GlassPreview(
+                    barBlur = s.tabBlur,
+                    barRefraction = s.tabRefraction,
+                    barDispersion = s.tabDispersion,
+                    barShadow = s.tabShadow,
+                    barVeil = s.tabBarOpacity,
+                    lensBlur = s.lensBlur,
+                    lensRefraction = s.lensRefraction,
+                    lensDispersion = s.lensDispersion,
+                    lensShadow = s.lensShadow,
+                    lensVeil = s.tabLensOpacity,
+                    barEdge = s.tabEdge,
+                    lensEdge = s.lensEdge,
+                )
+            }
+            AnimatedVisibility(
+                visible = preview == 1,
+                modifier = floatModifier,
+                enter = fadeIn(tween(120)) + slideInVertically(tween(160)) { -it / 4 },
+                exit = fadeOut(tween(180)) + slideOutVertically(tween(160)) { -it / 4 },
+            ) {
+                AppearancePreview()
+            }
+        },
+    ) {
         item { SectionCaption("主题") }
-        item { ThemePicker(store) }
+        item { ThemePicker(store) { preview = 1 } }
         item { SectionCaption("点缀色") }
         item {
             LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -349,6 +407,7 @@ private fun AppearancePage(store: AppStore, onBack: () -> Unit) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         ColorDot(Color(value), s.accent == value) {
                             store.updateSettings { it.copy(accent = value) }
+                            preview = 1
                         }
                         Spacer(androidx.compose.ui.Modifier.height(5.dp))
                         Txt(name, size = 8f, color = ui.palette.muted)
@@ -371,6 +430,143 @@ private fun AppearancePage(store: AppStore, onBack: () -> Unit) {
                 HueSlider(hsv[0]) { hue ->
                     val argb = android.graphics.Color.HSVToColor(floatArrayOf(hue, .48f, .52f)).toLong() and 0xFFFFFFFFL
                     store.updateSettings { it.copy(accent = argb) }
+                    preview = 1
+                }
+            }
+        }
+        item { SectionCaption("标签栏玻璃") }
+        item {
+            SettingGroup {
+                Column {
+                    SettingRow("模糊", "${s.tabBlur.roundToInt()} dp", Glyph.Sparkles)
+                    InkSlider(
+                        s.tabBlur,
+                        { v -> store.updateSettings { it.copy(tabBlur = (v * 10).roundToInt() / 10f) }; preview = 2 },
+                        0f, 20f,
+                        modifier = androidx.compose.ui.Modifier.padding(horizontal = 16.dp),
+                    )
+                }
+                RowDivider()
+                Column {
+                    SettingRow("边缘折射", "${s.tabRefraction.roundToInt()} dp", Glyph.Sparkles)
+                    InkSlider(
+                        s.tabRefraction,
+                        { v -> store.updateSettings { it.copy(tabRefraction = (v * 10).roundToInt() / 10f) }; preview = 2 },
+                        0f, 40f,
+                        modifier = androidx.compose.ui.Modifier.padding(horizontal = 16.dp),
+                    )
+                }
+                RowDivider()
+                Column {
+                    SettingRow("内外阴影", "${(s.tabShadow * 100).roundToInt()}%", Glyph.Sparkles)
+                    InkSlider(
+                        s.tabShadow,
+                        { v -> store.updateSettings { it.copy(tabShadow = v) }; preview = 2 },
+                        0f, 1f,
+                        modifier = androidx.compose.ui.Modifier.padding(horizontal = 16.dp),
+                    )
+                }
+                RowDivider()
+                Column {
+                    SettingRow("整条不透明度", "${(s.tabBarOpacity * 100).roundToInt()}%", Glyph.Sparkles)
+                    InkSlider(
+                        s.tabBarOpacity,
+                        { v -> store.updateSettings { it.copy(tabBarOpacity = v) }; preview = 2 },
+                        0f, 1f,
+                        modifier = androidx.compose.ui.Modifier.padding(horizontal = 16.dp),
+                    )
+                }
+                RowDivider()
+                Column {
+                    SettingRow("边缘带", "${(s.tabEdge * 100).roundToInt()}%", Glyph.Sparkles)
+                    InkSlider(
+                        s.tabEdge,
+                        { v -> store.updateSettings { it.copy(tabEdge = v) }; preview = 2 },
+                        0f, 1f,
+                        modifier = androidx.compose.ui.Modifier.padding(horizontal = 16.dp),
+                    )
+                }
+                RowDivider()
+                Row(
+                    androidx.compose.ui.Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Txt("边缘色散", size = 10f, color = ui.palette.ink)
+                    Spacer(androidx.compose.ui.Modifier.weight(1f))
+                    Segmented(
+                        listOf("开", "关"),
+                        if (s.tabDispersion) 0 else 1,
+                        { i -> store.updateSettings { it.copy(tabDispersion = i == 0) }; preview = 2 },
+                        androidx.compose.ui.Modifier.width(120.dp),
+                    )
+                }
+            }
+        }
+        item { SectionCaption("选中镜片") }
+        item {
+            SettingGroup {
+                Column {
+                    SettingRow("模糊", "${s.lensBlur.roundToInt()} dp", Glyph.Sparkles)
+                    InkSlider(
+                        s.lensBlur,
+                        { v -> store.updateSettings { it.copy(lensBlur = (v * 10).roundToInt() / 10f) }; preview = 2 },
+                        0f, 20f,
+                        modifier = androidx.compose.ui.Modifier.padding(horizontal = 16.dp),
+                    )
+                }
+                RowDivider()
+                Column {
+                    SettingRow("边缘折射", "${s.lensRefraction.roundToInt()} dp", Glyph.Sparkles)
+                    InkSlider(
+                        s.lensRefraction,
+                        { v -> store.updateSettings { it.copy(lensRefraction = (v * 10).roundToInt() / 10f) }; preview = 2 },
+                        0f, 40f,
+                        modifier = androidx.compose.ui.Modifier.padding(horizontal = 16.dp),
+                    )
+                }
+                RowDivider()
+                Column {
+                    SettingRow("内外阴影", "${(s.lensShadow * 100).roundToInt()}%", Glyph.Sparkles)
+                    InkSlider(
+                        s.lensShadow,
+                        { v -> store.updateSettings { it.copy(lensShadow = v) }; preview = 2 },
+                        0f, 1f,
+                        modifier = androidx.compose.ui.Modifier.padding(horizontal = 16.dp),
+                    )
+                }
+                RowDivider()
+                Column {
+                    SettingRow("镜片不透明度", "${(s.tabLensOpacity * 100).roundToInt()}%", Glyph.Sparkles)
+                    InkSlider(
+                        s.tabLensOpacity,
+                        { v -> store.updateSettings { it.copy(tabLensOpacity = v) }; preview = 2 },
+                        0f, 1f,
+                        modifier = androidx.compose.ui.Modifier.padding(horizontal = 16.dp),
+                    )
+                }
+                RowDivider()
+                Column {
+                    SettingRow("边缘带", "${(s.lensEdge * 100).roundToInt()}%", Glyph.Sparkles)
+                    InkSlider(
+                        s.lensEdge,
+                        { v -> store.updateSettings { it.copy(lensEdge = v) }; preview = 2 },
+                        0f, 1f,
+                        modifier = androidx.compose.ui.Modifier.padding(horizontal = 16.dp),
+                    )
+                }
+                RowDivider()
+                Row(
+                    androidx.compose.ui.Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Txt("边缘色散", size = 10f, color = ui.palette.ink)
+                    Spacer(androidx.compose.ui.Modifier.weight(1f))
+                    Segmented(
+                        listOf("开", "关"),
+                        if (s.lensDispersion) 0 else 1,
+                        { i -> store.updateSettings { it.copy(lensDispersion = i == 0) }; preview = 2 },
+                        androidx.compose.ui.Modifier.width(120.dp),
+                    )
                 }
             }
         }
@@ -381,6 +577,7 @@ private fun AppearancePage(store: AppStore, onBack: () -> Unit) {
                 when (s.font) { "sans" -> 1; "mono" -> 2; else -> 0 },
                 { index ->
                     store.updateSettings { it.copy(font = when (index) { 1 -> "sans"; 2 -> "mono"; else -> "serif" }) }
+                    preview = 1
                 },
                 androidx.compose.ui.Modifier.fillMaxWidth(),
             )
@@ -392,7 +589,7 @@ private fun AppearancePage(store: AppStore, onBack: () -> Unit) {
                     SettingRow("字号", "${(17f * s.fontScale).roundToInt()} sp", Glyph.Font)
                     InkSlider(
                         s.fontScale,
-                        { v -> store.updateSettings { it.copy(fontScale = (v * 100).roundToInt() / 100f) } },
+                        { v -> store.updateSettings { it.copy(fontScale = (v * 100).roundToInt() / 100f) }; preview = 1 },
                         .70f, 1.80f,
                         modifier = androidx.compose.ui.Modifier.padding(horizontal = 16.dp),
                     )
@@ -402,7 +599,7 @@ private fun AppearancePage(store: AppStore, onBack: () -> Unit) {
                     SettingRow("行距", String.format(Locale.US, "%.2f 倍", s.lineHeight), Glyph.Rows)
                     InkSlider(
                         s.lineHeight,
-                        { v -> store.updateSettings { it.copy(lineHeight = (v * 100).roundToInt() / 100f) } },
+                        { v -> store.updateSettings { it.copy(lineHeight = (v * 100).roundToInt() / 100f) }; preview = 1 },
                         1.20f, 2.90f,
                         modifier = androidx.compose.ui.Modifier.padding(horizontal = 16.dp),
                     )
@@ -412,7 +609,7 @@ private fun AppearancePage(store: AppStore, onBack: () -> Unit) {
                     SettingRow("页边距", "${s.pageMargin.roundToInt()} dp", Glyph.Indent)
                     InkSlider(
                         s.pageMargin,
-                        { v -> store.updateSettings { it.copy(pageMargin = (v * 10).roundToInt() / 10f) } },
+                        { v -> store.updateSettings { it.copy(pageMargin = (v * 10).roundToInt() / 10f) }; preview = 1 },
                         8f, 52f,
                         modifier = androidx.compose.ui.Modifier.padding(horizontal = 16.dp),
                     )
@@ -438,6 +635,7 @@ private fun AppearancePage(store: AppStore, onBack: () -> Unit) {
                             },
                         )
                     }
+                    preview = 1
                 },
                 androidx.compose.ui.Modifier.fillMaxWidth(),
             )
@@ -453,6 +651,7 @@ private fun AppearancePage(store: AppStore, onBack: () -> Unit) {
                             grain = true, glow = true,
                         )
                     }
+                    preview = 1
                     ToastBus.show("外观已恢复默认")
                 },
                 androidx.compose.ui.Modifier.fillMaxWidth(),
@@ -465,10 +664,9 @@ private fun AppearancePage(store: AppStore, onBack: () -> Unit) {
 @Composable
 private fun AppearancePreview() {
     val ui = LocalInk.current
-    MoyuSurface(
-        SurfaceRole.CARD,
-        androidx.compose.ui.Modifier.fillMaxWidth(),
-        radius = ui.settings.materialFor(ui.settings.theme, SurfaceRole.CARD).corner,
+    MoyuSurface(androidx.compose.ui.Modifier.fillMaxWidth(),
+        radius = GlassStyle.corner,
+        flat = true,
     ) {
         Column(androidx.compose.ui.Modifier.padding(18.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -507,8 +705,122 @@ private fun AppearancePreview() {
     }
 }
 
+/**
+ * Live preview for the glass knobs: a sample page slice with the real
+ * liquidGlassBar() drawn over it, driven by the same values the TabBar reads.
+ */
 @Composable
-private fun ThemePicker(store: AppStore) {
+private fun GlassPreview(
+    barBlur: Float,
+    barRefraction: Float,
+    barDispersion: Boolean,
+    barShadow: Float,
+    barVeil: Float,
+    lensBlur: Float,
+    lensRefraction: Float,
+    lensDispersion: Boolean,
+    lensShadow: Float,
+    lensVeil: Float,
+    barEdge: Float = 1f,
+    lensEdge: Float = 1f,
+) {
+    val ui = LocalInk.current
+    val p = ui.palette
+    val backdrop = rememberLayerBackdrop()
+    val shape = RoundedCornerShape(50)
+    // Same two layers as the real bar: glass body (with its paper veil) and a
+    // lens inside it drawn with its own blur / refraction / veil. If this card
+    // lies, the settings page lies too.
+    val lensTint = if (p.isDark) Color.White.copy(alpha = .08f) else p.ink.copy(alpha = .08f)
+    val lensPaper = p.paper.copy(alpha = lensVeil.coerceIn(0f, 1f) * .94f)
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .height(80.dp)
+            .clip(RoundedCornerShape(18.dp)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            Modifier
+                .fillMaxSize()
+                .layerBackdrop(backdrop)
+                .background(p.paper)
+                .padding(horizontal = 18.dp),
+            verticalArrangement = Arrangement.Center,
+        ) {
+            repeat(3) { i ->
+                Box(
+                    Modifier
+                        .fillMaxWidth(if (i == 2) .55f else 1f)
+                        .height(6.dp)
+                        .background(p.ink.copy(alpha = .34f), RoundedCornerShape(3.dp)),
+                )
+                Spacer(androidx.compose.ui.Modifier.height(9.dp))
+            }
+        }
+        Box(
+            Modifier
+                .width(210.dp)
+                .height(44.dp)
+                .liquidGlassBar(
+                    backdrop = backdrop,
+                    shape = shape,
+                    palette = p,
+                    blurDp = barBlur,
+                    refractionDp = barRefraction,
+                    dispersion = barDispersion,
+                    shadowAlpha = barShadow,
+                    veil = barVeil,
+                    edgeStrength = barEdge,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Box(
+                Modifier
+                    .width(58.dp)
+                    .height(34.dp)
+                    .then(
+                        if (backdrop != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                            Modifier.drawBackdrop(
+                                backdrop = backdrop,
+                                shape = { shape },
+                                effects = {
+                                    vibrancy()
+                                    if (lensBlur > 0f) blur(lensBlur.dp.toPx())
+                                    if (lensRefraction > 0f) {
+                                        lens(
+                                            refractionHeight = lensRefraction.dp.toPx(),
+                                            refractionAmount = (lensRefraction * 1.2f).dp.toPx(),
+                                            depthEffect = true,
+                                            chromaticAberration = lensDispersion,
+                                        )
+                                    }
+                                },
+                                highlight = null,
+                                shadow = { Shadow(radius = 12.dp, alpha = lensShadow) },
+                                innerShadow = { InnerShadow(radius = 6.dp, alpha = lensShadow + .07f) },
+                                onDrawSurface = {
+                                    drawRect(lensTint)
+                                    if (lensVeil > 0f) drawRect(lensPaper)
+                                    glassEdgeBand(shape, p, lensEdge)
+                                },
+                            )
+                        } else {
+                            Modifier.clip(shape).background(p.paper.copy(alpha = .94f))
+                        },
+                    )
+                    .border(
+                        .5.dp,
+                        if (p.isDark) Color.White.copy(alpha = .06f) else p.ink.copy(alpha = .05f),
+                        shape,
+                    ),
+            )
+        }
+    }
+}
+
+@Composable
+private fun ThemePicker(store: AppStore, onChange: () -> Unit = {}) {
     val ui = LocalInk.current
     val s = ui.settings
     val themes = listOf("paper", "mist", "white", "sepia", "night", "system")
@@ -526,7 +838,10 @@ private fun ThemePicker(store: AppStore) {
                         if (s.theme == key) ui.accent else ui.palette.line,
                         RoundedCornerShape(18.dp),
                     )
-                    .bouncy(scale = .96f) { store.updateSettings { it.copy(theme = key) } }
+                    .bouncy(scale = .96f) {
+                        store.updateSettings { it.copy(theme = key) }
+                        onChange()
+                    }
                     .padding(8.dp)
             ) {
                 Box(
@@ -555,137 +870,6 @@ private fun ThemePicker(store: AppStore) {
 }
 
 @Composable
-private fun MaterialSettingsPage(store: AppStore, onBack: () -> Unit) {
-    val ui = LocalInk.current
-    val s = ui.settings
-    val roles = listOf(SurfaceRole.BAR, SurfaceRole.CARD, SurfaceRole.POPUP, SurfaceRole.CONTROL)
-    var roleIndex by remember { mutableStateOf(0) }
-    val role = roles[roleIndex.coerceIn(0, roles.lastIndex)]
-    val spec = s.materialFor(s.theme, role)
-
-    fun update(transform: (MaterialSpec) -> MaterialSpec) {
-        store.updateSettings {
-            it.withMaterial(it.theme, role, transform(it.materialFor(it.theme, role)))
-        }
-    }
-
-    fun pct(v: Float): String = "${(v * 100).roundToInt()}%"
-
-    SettingsPage("材质", "四类表面共用一套参数，按主题保存；只改当前主题。", onBack) {
-        item {
-            SectionCaption("当前主题 · ${themeLabel(s.theme)}")
-        }
-        item {
-            Segmented(
-                roles.map { it.label },
-                roleIndex,
-                { roleIndex = it },
-                androidx.compose.ui.Modifier.fillMaxWidth(),
-            )
-        }
-        item {
-            Spacer(androidx.compose.ui.Modifier.height(10.dp))
-            SettingGroup {
-                Column {
-                    SettingRow("填充", pct(spec.fill), Glyph.Layers)
-                    InkSlider(
-                        spec.fill,
-                        { v -> update { it.copy(fill = v) } },
-                        0f, 1f,
-                        modifier = androidx.compose.ui.Modifier.padding(horizontal = 16.dp),
-                    )
-                }
-                RowDivider()
-                Column {
-                    SettingRow("模糊", pct(spec.blur), Glyph.Sparkles)
-                    InkSlider(
-                        spec.blur,
-                        { v -> update { it.copy(blur = v) } },
-                        0f, 1f,
-                        modifier = androidx.compose.ui.Modifier.padding(horizontal = 16.dp),
-                    )
-                }
-                RowDivider()
-                Column {
-                    SettingRow("边缘厚度", "${String.format(Locale.US, "%.1f", spec.edge)} dp", Glyph.Layers)
-                    InkSlider(
-                        spec.edge,
-                        { v -> update { it.copy(edge = v) } },
-                        0f, 8f,
-                        modifier = androidx.compose.ui.Modifier.padding(horizontal = 16.dp),
-                    )
-                }
-                RowDivider()
-                Column {
-                    SettingRow("边缘对比", pct(spec.rim), Glyph.Sparkles)
-                    InkSlider(
-                        spec.rim,
-                        { v -> update { it.copy(rim = v) } },
-                        0f, 1f,
-                        modifier = androidx.compose.ui.Modifier.padding(horizontal = 16.dp),
-                    )
-                }
-                RowDivider()
-                Column {
-                    SettingRow("高光", pct(spec.specular), Glyph.Sun)
-                    InkSlider(
-                        spec.specular,
-                        { v -> update { it.copy(specular = v) } },
-                        0f, 1f,
-                        modifier = androidx.compose.ui.Modifier.padding(horizontal = 16.dp),
-                    )
-                }
-                RowDivider()
-                Column {
-                    SettingRow("折射", pct(spec.refraction), Glyph.Sparkles)
-                    InkSlider(
-                        spec.refraction,
-                        { v -> update { it.copy(refraction = v) } },
-                        0f, 1f,
-                        modifier = androidx.compose.ui.Modifier.padding(horizontal = 16.dp),
-                    )
-                }
-                RowDivider()
-                Column {
-                    SettingRow("投影", pct(spec.shadow), Glyph.Layers)
-                    InkSlider(
-                        spec.shadow,
-                        { v -> update { it.copy(shadow = v) } },
-                        0f, 1f,
-                        modifier = androidx.compose.ui.Modifier.padding(horizontal = 16.dp),
-                    )
-                }
-                RowDivider()
-                Column {
-                    SettingRow("圆角", "${spec.corner.roundToInt()} dp", Glyph.Layers)
-                    InkSlider(
-                        spec.corner,
-                        { v -> update { it.copy(corner = v) } },
-                        0f, 48f,
-                        modifier = androidx.compose.ui.Modifier.padding(horizontal = 16.dp),
-                    )
-                }
-                RowDivider()
-                SettingRow("真实模糊", "开启后使用 Haze 背景模糊", Glyph.Sparkles) {
-                    InkToggle(spec.haze) { on -> update { it.copy(haze = on) } }
-                }
-                RowDivider()
-                SettingRow("细颗粒", "表面的纸面颗粒", Glyph.Sparkles) {
-                    InkToggle(spec.grain) { on -> update { it.copy(grain = on) } }
-                }
-            }
-        }
-        item {
-            GlassButton(
-                "恢复${role.label}默认",
-                { store.updateSettings { it.withMaterial(it.theme, role, defaultMaterial(role)) } },
-                androidx.compose.ui.Modifier.fillMaxWidth(),
-            )
-        }
-    }
-}
-
-@Composable
 private fun LibrarySettingsPage(store: AppStore, onBack: () -> Unit) {
     val ui = LocalInk.current
     val s = ui.settings
@@ -693,7 +877,7 @@ private fun LibrarySettingsPage(store: AppStore, onBack: () -> Unit) {
     val sampleB = Book(title = "旧城", genre = "悬疑", coverStyle = 4)
     SettingsPage("书架陈列", "决定书在页面上的占比，以及你怎么看它们。", onBack) {
         item {
-            MoyuSurface(SurfaceRole.CARD, androidx.compose.ui.Modifier.fillMaxWidth(), radius = 24f) {
+            MoyuSurface(androidx.compose.ui.Modifier.fillMaxWidth(), radius = 24f, flat = true) {
                 Row(
                     androidx.compose.ui.Modifier.fillMaxWidth().padding(17.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -801,7 +985,7 @@ private fun WritingSettingsPage(store: AppStore, onBack: () -> Unit) {
     val context = LocalContext.current
     SettingsPage("写作习惯", "目标、保存和缩进，写的时候会按这里的设置来。", onBack) {
         item {
-            MoyuSurface(SurfaceRole.CARD, androidx.compose.ui.Modifier.fillMaxWidth(), radius = 24f) {
+            MoyuSurface(androidx.compose.ui.Modifier.fillMaxWidth(), radius = 24f, flat = true) {
                 Column(androidx.compose.ui.Modifier.padding(17.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(androidx.compose.ui.Modifier.weight(1f)) {
@@ -923,7 +1107,7 @@ private fun WritingSettingsPage(store: AppStore, onBack: () -> Unit) {
 private fun MotionSettingsPage(store: AppStore, onBack: () -> Unit) {
     val ui = LocalInk.current
     val s = ui.settings
-    SettingsPage("动效", "转场、按压、触感都从这里统一。", onBack) {
+    SettingsPage("动效", "按压力度和触感都从这里统一。", onBack) {
         item { MotionPreview() }
         item { SectionCaption("手感") }
         item {
@@ -938,28 +1122,12 @@ private fun MotionSettingsPage(store: AppStore, onBack: () -> Unit) {
                 androidx.compose.ui.Modifier.fillMaxWidth(),
             )
         }
-        item { SectionCaption("页面转场") }
-        item {
-            Segmented(
-                listOf("滑动", "淡入", "缩放"),
-                when (s.pageMotion) { "fade" -> 1; "scale" -> 2; else -> 0 },
-                { i -> store.updateSettings { it.copy(pageMotion = when (i) { 1 -> "fade"; 2 -> "scale"; else -> "slide" }) } },
-                androidx.compose.ui.Modifier.fillMaxWidth(),
-            )
-        }
         item {
             SettingGroup {
                 SettingRow("触感反馈", "按钮和选择时轻触马达", Glyph.Motion) {
                     InkToggle(s.haptics) { on -> store.updateSettings { it.copy(haptics = on) } }
                 }
-                RowDivider()
-                SettingRow("页面转场预览", pageMotionLabel(s.pageMotion), Glyph.ArrowUp)
             }
-        }
-        item {
-            GlassButton("打开设置页试试转场", {
-                onBack()
-            }, androidx.compose.ui.Modifier.fillMaxWidth(), glyph = Glyph.Back)
         }
     }
 }
@@ -968,7 +1136,7 @@ private fun MotionSettingsPage(store: AppStore, onBack: () -> Unit) {
 private fun MotionPreview() {
     val ui = LocalInk.current
     var position by remember { androidx.compose.runtime.mutableIntStateOf(0) }
-    MoyuSurface(SurfaceRole.CARD, androidx.compose.ui.Modifier.fillMaxWidth(), radius = 24f) {
+    MoyuSurface(androidx.compose.ui.Modifier.fillMaxWidth(), radius = 24f, flat = true) {
         Column(androidx.compose.ui.Modifier.padding(17.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Txt("动效预览", size = 9f, color = ui.palette.muted, letterSpacing = 1f)
@@ -998,8 +1166,6 @@ private fun MotionPreview() {
                     LineIcon(Glyph.ArrowUp, ui.palette.bgTop, 17.dp, 2f)
                 }
             }
-            Spacer(androidx.compose.ui.Modifier.height(8.dp))
-            Txt("点一下轨道，感受这个速度。", size = 8.5f, color = ui.palette.muted)
         }
     }
 }
@@ -1009,7 +1175,7 @@ private fun NavigationSettingsPage(store: AppStore, onBack: () -> Unit) {
     val ui = LocalInk.current
     val s = ui.settings
     var names by remember { mutableStateOf(s.tabNames) }
-    SettingsPage("标签栏", "四个入口的名字与材质，改完立刻出现在底部。", onBack) {
+    SettingsPage("标签栏", "四个入口的名字，改完立刻出现在底部。", onBack) {
         item { MiniTabPreview(names, s.showTabLabels) }
         item { SectionCaption("显示") }
         item {
@@ -1017,17 +1183,7 @@ private fun NavigationSettingsPage(store: AppStore, onBack: () -> Unit) {
                 SettingRow("显示文字", "图标下方显示标签名", Glyph.Layers) {
                     InkToggle(s.showTabLabels) { on -> store.updateSettings { it.copy(showTabLabels = on) } }
                 }
-                RowDivider()
-                SettingRow("材质", if (s.tabStyle == "glass") "液态玻璃" else "极简", Glyph.Sparkles)
             }
-        }
-        item {
-            Segmented(
-                listOf("液态玻璃", "极简"),
-                if (s.tabStyle == "glass") 0 else 1,
-                { i -> store.updateSettings { it.copy(tabStyle = if (i == 0) "glass" else "minimal") } },
-                androidx.compose.ui.Modifier.fillMaxWidth(),
-            )
         }
         item { SectionCaption("名称") }
         item {
@@ -1080,7 +1236,7 @@ private fun NavigationSettingsPage(store: AppStore, onBack: () -> Unit) {
 @Composable
 private fun MiniTabPreview(names: List<String>, showLabels: Boolean) {
     val ui = LocalInk.current
-    MoyuSurface(SurfaceRole.CARD, androidx.compose.ui.Modifier.fillMaxWidth(), radius = 30f) {
+    MoyuSurface(androidx.compose.ui.Modifier.fillMaxWidth(), radius = 30f, flat = true) {
         Row(androidx.compose.ui.Modifier.fillMaxWidth().padding(7.dp)) {
             val icons = listOf(Glyph.Book, Glyph.Note, Glyph.Chart, Glyph.Gear)
             names.forEachIndexed { index, name ->
@@ -1140,7 +1296,7 @@ private fun DataSettingsPage(store: AppStore, onBack: () -> Unit) {
     }
     SettingsPage("备份与恢复", "数据只在本机。导出一份，换机时带得走。", onBack) {
         item {
-            MoyuSurface(SurfaceRole.CARD, androidx.compose.ui.Modifier.fillMaxWidth(), radius = 24f) {
+            MoyuSurface(androidx.compose.ui.Modifier.fillMaxWidth(), radius = 24f, flat = true) {
                 Column(androidx.compose.ui.Modifier.padding(17.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(
@@ -1153,8 +1309,6 @@ private fun DataSettingsPage(store: AppStore, onBack: () -> Unit) {
                         Spacer(androidx.compose.ui.Modifier.width(12.dp))
                         Column(androidx.compose.ui.Modifier.weight(1f)) {
                             Txt("本地优先", size = 13.5f, weight = FontWeight.Medium)
-                            Spacer(androidx.compose.ui.Modifier.height(3.dp))
-                            Txt("没有账号，没有远程副本。备份文件由你保存。", size = 9.5f, color = ui.palette.muted, lineHeight = 15f)
                         }
                     }
                     Spacer(androidx.compose.ui.Modifier.height(15.dp))
@@ -1290,10 +1444,9 @@ private fun SpaceSettingsPage(store: AppStore, onBack: () -> Unit) {
     val ui = LocalInk.current
     val s = ui.settings
     var name by remember { mutableStateOf(s.appName) }
-    var quote by remember { mutableStateOf(s.quote) }
     SettingsPage("空间名称", "显示在书架顶部和设置里的名字。", onBack) {
         item {
-            MoyuSurface(SurfaceRole.CARD, androidx.compose.ui.Modifier.fillMaxWidth(), radius = 26f) {
+            MoyuSurface(androidx.compose.ui.Modifier.fillMaxWidth(), radius = 26f, flat = true) {
                 Column(androidx.compose.ui.Modifier.padding(20.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(
@@ -1305,7 +1458,6 @@ private fun SpaceSettingsPage(store: AppStore, onBack: () -> Unit) {
                         Spacer(androidx.compose.ui.Modifier.width(12.dp))
                         Column {
                             Txt(name.ifBlank { "未命名" }, size = 19f, weight = FontWeight.SemiBold, letterSpacing = 1f)
-                            Txt(quote.ifBlank { "写一句话作为题记" }, size = 9f, color = ui.palette.muted, maxLines = 1)
                         }
                     }
                 }
@@ -1315,13 +1467,9 @@ private fun SpaceSettingsPage(store: AppStore, onBack: () -> Unit) {
         item {
             InkField(name, { name = it.take(8) }, "字隅", textSize = 17f)
         }
-        item { SectionCaption("题记") }
-        item {
-            InkField(quote, { quote = it.take(40) }, "把故事，写进字的角落。", singleLine = false, minHeight = 78.dp, maxLines = 3)
-        }
         item {
             PrimaryButton("保存", {
-                store.updateSettings { it.copy(appName = name.trim().ifBlank { "字隅" }, quote = quote.trim().ifBlank { "把故事，写进字的角落。" }) }
+                store.updateSettings { it.copy(appName = name.trim().ifBlank { "字隅" }) }
                 ToastBus.show("空间名称已更新")
                 onBack()
             }, androidx.compose.ui.Modifier.fillMaxWidth(), glyph = Glyph.Check)
@@ -1329,8 +1477,7 @@ private fun SpaceSettingsPage(store: AppStore, onBack: () -> Unit) {
         item {
             GlassButton("恢复默认", {
                 name = "字隅"
-                quote = "把故事，写进字的角落。"
-                store.updateSettings { it.copy(appName = "字隅", quote = "把故事，写进字的角落。") }
+                store.updateSettings { it.copy(appName = "字隅") }
             }, androidx.compose.ui.Modifier.fillMaxWidth())
         }
     }
@@ -1438,8 +1585,7 @@ private fun AboutPage(store: AppStore, onBack: () -> Unit) {
         }
         item {
             Txt(
-                "字隅把书、笔记和提醒都留在你的设备上。没有账号，也不会上传正文。\n" +
-                    "写作愉快。",
+                "字隅把书、笔记和提醒都留在你的设备上。没有账号，也不会上传正文。",
                 size = 10f,
                 color = ui.palette.muted,
                 lineHeight = 17f,

@@ -22,4 +22,16 @@ class PreviewGalleryScreenshotTest {
         compose.setContent { PreviewGallery() }
         compose.onRoot().captureRoboImage("build/screens/preview-gallery.png")
     }
+
+    @Test
+    fun liquidBarPaper() {
+        compose.setContent { LiquidBarPreview("paper", 1) }
+        compose.onRoot().captureRoboImage("build/screens/liquid-bar-paper.png")
+    }
+
+    @Test
+    fun liquidBarNight() {
+        compose.setContent { LiquidBarPreview("night", 1) }
+        compose.onRoot().captureRoboImage("build/screens/liquid-bar-night.png")
+    }
 }

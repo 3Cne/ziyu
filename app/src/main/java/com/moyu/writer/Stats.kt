@@ -72,8 +72,6 @@ fun StatsScreen(store: AppStore) {
             item {
                 Column(Modifier.fillMaxWidth().statusBarsPadding().padding(top = 14.dp)) {
                     Txt("数据", size = 34f, weight = FontWeight.SemiBold, letterSpacing = .4f)
-                    Spacer(Modifier.height(5.dp))
-                    Txt("写作不是冲刺，是潮汐。", size = 11f, color = p.muted)
                     Spacer(Modifier.height(20.dp))
                 }
             }
@@ -85,7 +83,7 @@ fun StatsScreen(store: AppStore) {
                 SectionTitle("这一周", "近 7 天共 ${formatWords(weekTotal)} 字")
             }
             item {
-                MoyuSurface(SurfaceRole.CARD, Modifier.fillMaxWidth(), radius = 26f) {
+                MoyuSurface(Modifier.fillMaxWidth(), radius = 26f, flat = true) {
                     Column(Modifier.padding(17.dp)) {
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom) {
                             week.forEach { (date, words) ->
@@ -202,7 +200,7 @@ private fun GoalHero(today: Int, goal: Int, progress: Float, streak: Int, total:
     val ui = LocalInk.current
     val p = ui.palette
     val remaining = (goal - today).coerceAtLeast(0)
-    MoyuSurface(SurfaceRole.CARD, Modifier.fillMaxWidth(), radius = 30f) {
+    MoyuSurface(Modifier.fillMaxWidth(), radius = 30f, flat = true) {
         Row(Modifier.padding(19.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(104.dp), contentAlignment = Alignment.Center) {
                 Canvas(Modifier.fillMaxSize()) {
@@ -230,12 +228,13 @@ private fun GoalHero(today: Int, goal: Int, progress: Float, streak: Int, total:
                     Spacer(Modifier.width(4.dp))
                     Txt("字", size = 10f, color = p.muted, modifier = Modifier.padding(bottom = 5.dp))
                 }
-                Spacer(Modifier.height(4.dp))
-                Txt(
-                    if (remaining == 0) "今天的目标已经完成。" else "还差 ${formatWords(remaining)} 字，慢慢写。",
-                    size = 10f,
-                    color = p.muted,
-                )
+                // Only the numeric remainder is shown. The old line also had a decorative
+// sentence on both branches ("今天的目标已经完成。" / "，慢慢写。") and a
+// blank row when the goal was already met.
+                if (remaining > 0) {
+                    Spacer(Modifier.height(4.dp))
+                    Txt("还差 ${formatWords(remaining)} 字", size = 10f, color = p.muted)
+                }
                 Spacer(Modifier.height(11.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
                     HeroTag("连续 $streak 天")
@@ -263,7 +262,7 @@ private fun HeroTag(text: String) {
 @Composable
 private fun StatCard(value: String, label: String, unit: String, modifier: Modifier = Modifier, glyph: Glyph) {
     val ui = LocalInk.current
-    MoyuSurface(SurfaceRole.CARD, modifier, radius = 22f) {
+    MoyuSurface(modifier, radius = 22f, flat = true) {
         Column(Modifier.padding(15.dp)) {
             Box(
                 Modifier

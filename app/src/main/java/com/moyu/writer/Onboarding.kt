@@ -77,10 +77,10 @@ fun OnboardingOverlay(onDone: () -> Unit) {
             listOf("自定义时间", "精确闹钟", "通知直达"),
         ),
         OnboardPage(
-            "纸张和材质都能调",
-            "空白、虚线、实线三种纸面；卡片、栏、弹窗和控件各自有材质参数。",
+            "纸张和玻璃都能调",
+            "空白、虚线、实线三种纸面；所有卡片、栏、弹窗和控件共用同一份玻璃材质。",
             Glyph.Rows,
-            listOf("三种纸面", "线条深浅", "分角色材质"),
+            listOf("三种纸面", "线条深浅", "统一玻璃"),
         ),
         OnboardPage(
             "带走你的文字",
@@ -262,13 +262,6 @@ fun OnboardingOverlay(onDone: () -> Unit) {
                 },
                 Modifier.fillMaxWidth(),
                 glyph = if (page == pages.lastIndex) Glyph.Check else Glyph.Chevron,
-            )
-            Spacer(Modifier.height(8.dp))
-            Txt(
-                "所有内容只保存在这台设备上",
-                size = 8.5f,
-                color = p.muted.copy(alpha = .72f),
-                modifier = Modifier.align(Alignment.CenterHorizontally),
             )
         }
     }

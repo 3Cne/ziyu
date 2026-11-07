@@ -8,3 +8,15 @@ import androidx.compose.ui.tooling.preview.Preview
 fun GlassGalleryDarkPreview() {
     PreviewGallery()
 }
+
+@Preview(name = "LiquidBarPaper", widthDp = 412, heightDp = 320, showBackground = true)
+@Composable
+fun LiquidBarPaperPreview() {
+    LiquidBarPreview("paper", 1)
+}
+
+@Preview(name = "LiquidBarNight", widthDp = 412, heightDp = 320, showBackground = true)
+@Composable
+fun LiquidBarNightPreview() {
+    LiquidBarPreview("night", 1)
+}

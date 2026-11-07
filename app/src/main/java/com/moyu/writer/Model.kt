@@ -26,6 +26,8 @@ data class Chapter(
     val content: String = "",
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis(),
+    /** Notes bound to this chapter. The other direction lives in [Note.chapterIds]. */
+    val noteIds: List<String> = emptyList(),
 )
 
 data class Book(
@@ -60,13 +62,16 @@ data class Todo(
 
 data class Note(
     val id: String = uuid(),
-    val title: String = "无标题笔记",
+    // Empty means untitled; the UI shows a muted placeholder instead.
+    val title: String = "",
     val content: String = "",
     val todos: List<Todo> = emptyList(),
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis(),
     val pinned: Boolean = false,
     val groupId: String? = null,
+    /** Chapters this note is bound to. The other direction lives in [Chapter.noteIds]. */
+    val chapterIds: List<String> = emptyList(),
 ) {
     val words: Int get() = countWords(content)
     fun pendingTodos(): List<Todo> = todos.filter { !it.done }
@@ -100,8 +105,25 @@ data class AppSettings(
     val cardScale: Float = 1f,
     val coverRadius: Float = 18f,
     val showTabLabels: Boolean = true,
+    // Liquid-glass knobs, two independent sets: the whole tab bar and the
+    // selected lens inside it.
+    val tabBlur: Float = 8f,
+    val tabRefraction: Float = 30f,
+    val tabDispersion: Boolean = true,
+    val tabShadow: Float = .30f,
+    // Tint concentration of the glass: 1 keeps today's look, 0 leaves only the
+    // blur/refraction. Separate for the bar body and the selected lens.
+    val tabBarOpacity: Float = 0f,
+    val tabLensOpacity: Float = 0f,
+    /** 0..1 strength of the inner bevel band: the bar and the selected lens
+     *  each get their own, so the thickness can be tuned separately. */
+    val tabEdge: Float = 1f,
+    val lensEdge: Float = 1f,
+    val lensRefraction: Float = 9f,
+    val lensBlur: Float = 0f,
+    val lensDispersion: Boolean = true,
+    val lensShadow: Float = .28f,
     val tabNames: List<String> = listOf("书架", "笔记", "数据", "设置"),
-    val tabStyle: String = "glass",
     val dailyGoal: Int = 2000,
     val indent: Boolean = true,
     val sectionStyle: String = "asterisk",
@@ -111,14 +133,21 @@ data class AppSettings(
     val showStats: Boolean = true,
     val haptics: Boolean = true,
     val appName: String = "字隅",
-    val quote: String = "把故事，写进字的角落。",
     val showFps: Boolean = false,
     val autoUpdate: Boolean = true,
     val paperStyle: String = "plain",
     val paperLineAlpha: Float = .5f,
     val onboardingDone: Boolean = false,
-    val materialVersion: Int = 1,
-    val materials: Map<String, Map<String, MaterialSpec>> = emptyMap(),
+    /** Chapter editor: keep the bound notes floating beside the body. Off by default. */
+    val noteFloat: Boolean = false,
+    /** Where the floating note card is pinned: right or left of the body. */
+    /** Floating note card position, relative to the writing area (0–1 on each axis). */
+    val noteFloatX: Float = .62f,
+    val noteFloatY: Float = 0f,
+    /** Floating note card width as a share of the writing area. */
+    val noteFloatW: Float = .34f,
+    /** Floating note card maximum height as a share of the writing area. */
+    val noteFloatH: Float = .52f,
 )
 
 data class AppData(
@@ -140,7 +169,7 @@ class AppStore(context: Context) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var saveJob: kotlinx.coroutines.Job? = null
 
-    var data by mutableStateOf(normalize(load()))
+    var data by mutableStateOf(reconcileLinks(repairLinks(normalize(load()))))
         private set
 
     val settings: AppSettings get() = data.settings
@@ -159,7 +188,10 @@ class AppStore(context: Context) {
     )
 
     fun mutate(transform: (AppData) -> AppData) {
-        data = transform(data)
+        // Every write goes through here, so this is also where the chapter↔note
+        // link is kept two-sided. A link written on either end shows up on the
+        // other end without a second call site.
+        data = reconcileLinks(transform(data))
         scheduleSave()
     }
 
@@ -300,7 +332,10 @@ class AppStore(context: Context) {
                             c.copy(
                                 title = title ?: c.title,
                                 content = newContent,
-                                updatedAt = now(),
+                                updatedAt = when {
+                                    title == null && content == null -> c.updatedAt
+                                    else -> now()
+                                },
                             )
                         }
                     }
@@ -315,11 +350,146 @@ class AppStore(context: Context) {
         }
     }
 
+    /**
+     * Bind or unbind a note and a chapter. The relation is stored on both sides
+     * so either end can list the other without scanning the whole data set;
+     * [normalize] repairs any half-written link.
+     */
+    fun setNoteLinked(bookId: String, chapterId: String, noteId: String, linked: Boolean) {
+        android.util.Log.d("MOYU_LINK", "setNoteLinked linked=$linked note=$noteId book=$bookId ch=$chapterId")
+        mutate { d ->
+            // Resolve the link on both ends explicitly. An earlier version used a
+            // local extension whose lambda `it` was shadowed by the enclosing
+            // map's `it`, so only the chapter side was updated and reconcileLinks
+            // put the note side straight back — binding could be added but never
+            // removed.
+            val nextNotes = d.notes.map { n ->
+                if (n.id != noteId) n
+                else {
+                    val next = if (linked) {
+                        (n.chapterIds + chapterId).distinct()
+                    } else {
+                        n.chapterIds.filter { id -> id != chapterId }
+                    }
+                    android.util.Log.d("MOYU_LINK", "note ${n.id}: ${n.chapterIds} -> $next")
+                    n.copy(chapterIds = next)
+                }
+            }
+            val nextBooks = d.books.map { b ->
+                if (b.id != bookId) b
+                else b.copy(
+                    chapters = b.chapters.map { c ->
+                        if (c.id != chapterId) c
+                        else {
+                            val next = if (linked) {
+                                (c.noteIds + noteId).distinct()
+                            } else {
+                                c.noteIds.filter { id -> id != noteId }
+                            }
+                            android.util.Log.d("MOYU_LINK", "chapter ${c.id}: ${c.noteIds} -> $next")
+                            c.copy(noteIds = next)
+                        }
+                    },
+                )
+            }
+            d.copy(notes = nextNotes, books = nextBooks)
+        }
+    }
+
+    fun unlinkNoteEverywhere(noteId: String) {
+        mutate { d ->
+            d.copy(
+                books = d.books.map { b ->
+                    if (b.chapters.none { noteId in it.noteIds }) b else b.copy(
+                        chapters = b.chapters.map {
+                            if (noteId in it.noteIds) it.copy(noteIds = it.noteIds.filterNot { id -> id == noteId }) else it
+                        },
+                    )
+                },
+            )
+        }
+    }
+
+    fun unlinkChapterEverywhere(chapterId: String) {
+        mutate { d ->
+            d.copy(
+                notes = d.notes.map {
+                    if (chapterId in it.chapterIds) it.copy(chapterIds = it.chapterIds.filterNot { id -> id == chapterId }) else it
+                },
+            )
+        }
+    }
+
+    /** Chapter of another book can be bound to a note through the note side. */
+    fun setNoteChapterBound(noteId: String, bookId: String, chapterId: String, bound: Boolean) {
+        setNoteLinked(bookId, chapterId, noteId, bound)
+    }
+
+    /** Links pointing at a missing note or chapter are dropped instead of shown as blanks. */
+    fun repairLinks(data: AppData): AppData {
+        val noteIds = data.notes.map { it.id }.toSet()
+        val chapterIds = data.books.flatMap { b -> b.chapters.map { it.id } }.toSet()
+        val books = data.books.map { b ->
+            val chapters = b.chapters.map { c ->
+                val kept = c.noteIds.filter { it in noteIds }.distinct()
+                if (kept == c.noteIds) c else c.copy(noteIds = kept)
+            }
+            if (chapters == b.chapters) b else b.copy(chapters = chapters)
+        }
+        val notes = data.notes.map { n ->
+            val kept = n.chapterIds.filter { it in chapterIds }.distinct()
+            if (kept == n.chapterIds) n else n.copy(chapterIds = kept)
+        }
+        return data.copy(books = books, notes = notes)
+    }
+
+    /**
+     * Keep both ends of every chapter↔note link in agreement, keeping whichever
+     * side carries the link and dropping links whose target no longer exists.
+     */
+    private fun reconcileLinks(data: AppData): AppData {
+        val noteIds = data.notes.map { it.id }.toSet()
+        val chapterOf = data.books.flatMap { b -> b.chapters.map { it.id } }.toSet()
+        // An edge exists when either side names the other.
+        val chapterNotes = mutableMapOf<String, MutableSet<String>>()
+        val noteChapters = mutableMapOf<String, MutableSet<String>>()
+        fun addEdge(chapterId: String, noteId: String) {
+            if (chapterId !in chapterOf || noteId !in noteIds) return
+            chapterNotes.getOrPut(chapterId) { linkedSetOf() }.add(noteId)
+            noteChapters.getOrPut(noteId) { linkedSetOf() }.add(chapterId)
+        }
+        data.books.forEach { b ->
+            b.chapters.forEach { c -> c.noteIds.forEach { n -> addEdge(c.id, n) } }
+        }
+        data.notes.forEach { n -> n.chapterIds.forEach { c -> addEdge(c, n.id) } }
+        val books = data.books.map { b ->
+            if (b.chapters.none { (chapterNotes[it.id]?.size ?: 0) != it.noteIds.size }) b
+            else b.copy(
+                chapters = b.chapters.map { c ->
+                    val target = chapterNotes[c.id]?.toList() ?: emptyList()
+                    if (target == c.noteIds) c else c.copy(noteIds = target)
+                },
+            )
+        }
+        val notes = data.notes.map { n ->
+            val target = noteChapters[n.id]?.toList() ?: emptyList()
+            if (target == n.chapterIds) n else n.copy(chapterIds = target)
+        }
+        return data.copy(books = books, notes = notes)
+    }
+
     fun deleteChapter(bookId: String, chapterId: String) {
         mutate { d ->
-            d.copy(books = d.books.map { b ->
-                if (b.id == bookId) b.copy(chapters = b.chapters.filterNot { it.id == chapterId }) else b
-            })
+            d.copy(
+                books = d.books.map { b ->
+                    if (b.id == bookId) b.copy(chapters = b.chapters.filterNot { it.id == chapterId }) else b
+                },
+                notes = d.notes.map {
+                    if (chapterId in it.chapterIds) {
+                        it.copy(chapterIds = it.chapterIds.filterNot { id -> id == chapterId })
+                    } else it
+                },
+            )
         }
     }
 
@@ -336,7 +506,18 @@ class AppStore(context: Context) {
     }
 
     fun deleteNote(id: String) {
-        mutate { it.copy(notes = it.notes.filterNot { n -> n.id == id }) }
+        mutate { d ->
+            d.copy(
+                notes = d.notes.filterNot { n -> n.id == id },
+                books = d.books.map { b ->
+                    if (b.chapters.none { id in it.noteIds }) b else b.copy(
+                        chapters = b.chapters.map {
+                            if (id in it.noteIds) it.copy(noteIds = it.noteIds.filterNot { n -> n == id }) else it
+                        },
+                    )
+                },
+            )
+        }
     }
 
     fun markReminderDone(noteId: String, todoId: String) {
@@ -346,15 +527,21 @@ class AppStore(context: Context) {
     }
 
     fun replaceAll(replacement: AppData) {
-        data = normalize(replacement)
+        data = repairLinks(normalize(replacement))
         saveNow()
     }
 
     fun clearAll(books: Boolean = true, notes: Boolean = true) {
         mutate { d ->
-            d.copy(
-                books = if (books) emptyList() else d.books,
-                notes = if (notes) emptyList() else d.notes,
+            // Removing either side would otherwise leave notes or chapters
+            // pointing at an id that no longer exists.
+            val stripped = repairLinks(
+                d.copy(
+                    books = if (books) emptyList() else d.books,
+                    notes = if (notes) emptyList() else d.notes,
+                )
+            )
+            stripped.copy(
                 lastBookId = if (books) null else d.lastBookId,
                 lastChapterId = if (books) null else d.lastChapterId,
                 dailyWords = if (books && notes) emptyMap() else d.dailyWords,
@@ -410,9 +597,18 @@ class AppStore(context: Context) {
     }
 
     private fun normalize(data: AppData): AppData {
-        // Keep the visible fallback for notes with an empty title.
+        // An untitled note keeps an EMPTY title so the editor can draw its
+        // placeholder in the muted style, like any other hint text. Storing the
+        // literal string made it real content: the placeholder branch was dead
+        // because isBlank() was never true, and the title looked like a heading
+        // the user had typed. Notes already carrying that literal are folded
+        // back to empty here, so existing data matches the new behaviour.
         val fixedNotes = data.notes.map { note ->
-            if (note.title.isBlank()) note.copy(title = "无标题笔记") else note
+            if (note.title.isBlank() || note.title.trim() == "无标题笔记") {
+                note.copy(title = "")
+            } else {
+                note
+            }
         }
         val bookGroups = data.bookGroups.distinctBy { it.id }.sortedBy { it.order }
             .mapIndexed { i, g -> g.copy(order = i) }
@@ -424,30 +620,41 @@ class AppStore(context: Context) {
         val fixedNotesWithGroups = fixedNotes.map {
             if (it.groupId != null && it.groupId !in noteIds) it.copy(groupId = null) else it
         }
-        val oldQuote = "把故事，写成一座岛。"
         var settings = data.settings.copy(
-            // Migrate only the old defaults; a user-customized name is preserved.
-            appName = if (data.settings.appName in setOf("", "墨屿", "笔滞", "3Cne")) "字隅" else data.settings.appName,
-            quote = if (data.settings.quote == oldQuote) "把故事，写进字的角落。" else data.settings.quote,
+            // Only an empty name falls back. The old migration list here
+            // ("墨屿", "笔滞", "3Cne") was meant to rename legacy defaults once,
+            // but normalize runs on every launch, so picking any of those names
+            // silently reverted to 字隅 the next time the app started.
+            appName = data.settings.appName.ifBlank { "字隅" },
         )
         if (settings.paperStyle !in setOf("plain", "ruled", "solid")) {
             settings = settings.copy(paperStyle = "plain")
         }
-        if (settings.materialVersion < 1) {
-            val migrated = settings.materials.mapValues { (_, roles) ->
-                roles.mapValues { (role, spec) ->
-                    spec.copy(
-                        edge = when (role) {
-                            SurfaceRole.CONTROL.key -> 2.5f
-                            SurfaceRole.PAPER.key -> 0f
-                            else -> 8f
-                        },
-                    )
-                }
-            }
-            settings = settings.copy(materials = migrated, materialVersion = 1)
+        // The transition picker is gone: pages always slide. Data saved with
+        // fade/scale falls back here so the old value cannot linger forever.
+        if (settings.pageMotion != "slide") {
+            settings = settings.copy(pageMotion = "slide")
         }
-        return data.copy(
+        if (settings.tabEdge !in 0f..1f || settings.lensEdge !in 0f..1f) {
+            settings = settings.copy(
+                tabEdge = settings.tabEdge.coerceIn(0f, 1f),
+                lensEdge = settings.lensEdge.coerceIn(0f, 1f),
+            )
+        }
+        if (settings.tabBarOpacity !in 0f..1f || settings.tabLensOpacity !in 0f..1f) {
+            settings = settings.copy(
+                tabBarOpacity = settings.tabBarOpacity.coerceIn(0f, 1f),
+                tabLensOpacity = settings.tabLensOpacity.coerceIn(0f, 1f),
+            )
+        }
+        if (settings.noteFloatW >= .59f) {
+            // Widths saved while the notes were a floating card, and by the
+            // first side-panel draft, took too much of the page. The panel now
+            // opens at one third; the writer can still drag it to 0.60.
+            settings = settings.copy(noteFloatW = .34f)
+        }
+
+        return AppData(
             books = fixedBooks,
             notes = fixedNotesWithGroups,
             bookGroups = bookGroups,
@@ -557,6 +764,7 @@ private fun encodeData(data: AppData): String {
             chapters.put(JSONObject().apply {
                 put("id", c.id); put("title", c.title); put("content", c.content)
                 put("createdAt", c.createdAt); put("updatedAt", c.updatedAt)
+                put("noteIds", JSONArray(c.noteIds))
             })
         }
         books.put(JSONObject().apply {
@@ -586,6 +794,7 @@ private fun encodeData(data: AppData): String {
             put("todos", todos); put("createdAt", n.createdAt)
             put("updatedAt", n.updatedAt); put("pinned", n.pinned)
             put("groupId", n.groupId ?: JSONObject.NULL)
+            put("chapterIds", JSONArray(n.chapterIds))
         })
     }
     root.put("notes", notes)
@@ -627,18 +836,35 @@ private fun encodeSettings(s: AppSettings): JSONObject = JSONObject().apply {
     put("librarySort", s.librarySort); put("columns", s.columns)
     put("cardScale", s.cardScale.toDouble()); put("coverRadius", s.coverRadius.toDouble())
     put("showTabLabels", s.showTabLabels)
+    put("tabBlur", s.tabBlur.toDouble()); put("tabRefraction", s.tabRefraction.toDouble())
+    put("tabDispersion", s.tabDispersion); put("tabShadow", s.tabShadow.toDouble())
+    put("tabBarOpacity", s.tabBarOpacity.toDouble()); put("tabLensOpacity", s.tabLensOpacity.toDouble())
+    put("tabEdge", s.tabEdge.toDouble()); put("lensEdge", s.lensEdge.toDouble())
+    put("lensRefraction", s.lensRefraction.toDouble()); put("lensDispersion", s.lensDispersion)
+    put("lensBlur", s.lensBlur.toDouble())
+    put("lensShadow", s.lensShadow.toDouble())
     put("tabNames", JSONArray(s.tabNames))
-    put("tabStyle", s.tabStyle)
     put("dailyGoal", s.dailyGoal); put("indent", s.indent)
     put("sectionStyle", s.sectionStyle); put("sectionSymbol", s.sectionSymbol)
     put("autoSave", s.autoSave); put("showWordCount", s.showWordCount)
     put("showStats", s.showStats); put("haptics", s.haptics)
-    put("appName", s.appName); put("quote", s.quote); put("showFps", s.showFps)
+    put("appName", s.appName); put("showFps", s.showFps)
     put("autoUpdate", s.autoUpdate); put("paperStyle", s.paperStyle)
     put("paperLineAlpha", s.paperLineAlpha.toDouble())
     put("onboardingDone", s.onboardingDone)
-    put("materialVersion", s.materialVersion)
-    put("materials", encodeMaterials(s.materials))
+    put("noteFloat", s.noteFloat)
+    put("noteFloatX", s.noteFloatX.toDouble()); put("noteFloatY", s.noteFloatY.toDouble())
+    put("noteFloatW", s.noteFloatW.toDouble()); put("noteFloatH", s.noteFloatH.toDouble())
+}
+
+private fun decodeStringList(o: JSONObject?, key: String): List<String> {
+    val a = o?.optJSONArray(key) ?: return emptyList()
+    val out = mutableListOf<String>()
+    for (i in 0 until a.length()) {
+        val v = a.optString(i, "")
+        if (v.isNotBlank() && v !in out) out += v
+    }
+    return out
 }
 
 private fun decodeSettings(o: JSONObject?) = AppSettings(
@@ -659,9 +885,20 @@ private fun decodeSettings(o: JSONObject?) = AppSettings(
     cardScale = (o?.optDouble("cardScale", 1.0) ?: 1.0).toFloat(),
     coverRadius = (o?.optDouble("coverRadius", 18.0) ?: 18.0).toFloat(),
     showTabLabels = o?.optBoolean("showTabLabels", true) ?: true,
+    tabBlur = (o?.optDouble("tabBlur", 8.0) ?: 8.0).toFloat(),
+    tabRefraction = (o?.optDouble("tabRefraction", 30.0) ?: 30.0).toFloat(),
+    tabDispersion = o?.optBoolean("tabDispersion", true) ?: true,
+    tabShadow = (o?.optDouble("tabShadow", .30) ?: .30).toFloat(),
+    tabBarOpacity = (o?.optDouble("tabBarOpacity", 0.0) ?: 0.0).toFloat().coerceIn(0f, 1f),
+    tabLensOpacity = (o?.optDouble("tabLensOpacity", 0.0) ?: 0.0).toFloat().coerceIn(0f, 1f),
+    tabEdge = (o?.optDouble("tabEdge", 1.0) ?: 1.0).toFloat().coerceIn(0f, 1f),
+    lensEdge = (o?.optDouble("lensEdge", 1.0) ?: 1.0).toFloat().coerceIn(0f, 1f),
+    lensRefraction = (o?.optDouble("lensRefraction", 9.0) ?: 9.0).toFloat(),
+    lensBlur = (o?.optDouble("lensBlur", 0.0) ?: 0.0).toFloat(),
+    lensDispersion = o?.optBoolean("lensDispersion", true) ?: true,
+    lensShadow = (o?.optDouble("lensShadow", .28) ?: .28).toFloat(),
     tabNames = o?.optJSONArray("tabNames")?.let { a -> (0 until a.length()).map { a.optString(it) } }
         ?: listOf("书架", "笔记", "数据", "设置"),
-    tabStyle = o?.optString("tabStyle", "glass") ?: "glass",
     dailyGoal = o?.optInt("dailyGoal", 2000) ?: 2000,
     indent = o?.optBoolean("indent", true) ?: true,
     sectionStyle = o?.optString("sectionStyle", "asterisk") ?: "asterisk",
@@ -671,7 +908,6 @@ private fun decodeSettings(o: JSONObject?) = AppSettings(
     showStats = o?.optBoolean("showStats", true) ?: true,
     haptics = o?.optBoolean("haptics", true) ?: true,
     appName = o?.optString("appName", "字隅") ?: "字隅",
-    quote = o?.optString("quote", "把故事，写进字的角落。") ?: "把故事，写进字的角落。",
     showFps = o?.optBoolean("showFps", false) ?: false,
     autoUpdate = o?.optBoolean("autoUpdate", true) ?: true,
     paperStyle = when (o?.optString("paperStyle", "plain")) {
@@ -681,8 +917,11 @@ private fun decodeSettings(o: JSONObject?) = AppSettings(
     },
     paperLineAlpha = (o?.optDouble("paperLineAlpha", .5) ?: .5).toFloat(),
     onboardingDone = o?.optBoolean("onboardingDone", false) ?: false,
-    materialVersion = o?.optInt("materialVersion", 0) ?: 0,
-    materials = decodeMaterials(o?.optJSONObject("materials")),
+    noteFloat = o?.optBoolean("noteFloat", false) ?: false,
+    noteFloatX = (o?.optDouble("noteFloatX", .62) ?: .62).toFloat().coerceIn(0f, 1f),
+    noteFloatY = (o?.optDouble("noteFloatY", 0.0) ?: 0.0).toFloat().coerceIn(0f, 1f),
+    noteFloatW = (o?.optDouble("noteFloatW", .34) ?: .34).toFloat().coerceIn(.34f, .60f),
+    noteFloatH = (o?.optDouble("noteFloatH", .52) ?: .52).toFloat().coerceIn(.24f, .86f),
 )
 
 private fun decodeData(text: String): AppData {
@@ -702,6 +941,7 @@ private fun decodeData(text: String): AppData {
                 content = c.optString("content", ""),
                 createdAt = c.optLong("createdAt", now()),
                 updatedAt = c.optLong("updatedAt", now()),
+                noteIds = decodeStringList(c, "noteIds"),
             )
         }
         books += Book(
@@ -739,13 +979,14 @@ private fun decodeData(text: String): AppData {
         }
         notes += Note(
             id = o.optString("id", uuid()),
-            title = o.optString("title", "无标题笔记"),
+            title = o.optString("title", ""),
             content = o.optString("content", ""),
             todos = todos,
             createdAt = o.optLong("createdAt", now()),
             updatedAt = o.optLong("updatedAt", now()),
             pinned = o.optBoolean("pinned", false),
             groupId = if (o.isNull("groupId")) null else o.optString("groupId"),
+            chapterIds = decodeStringList(o, "chapterIds"),
         )
     }
     val daily = mutableMapOf<String, Int>()
@@ -765,12 +1006,16 @@ private fun decodeData(text: String): AppData {
 }
 
 fun accentFor(accent: Long, dark: Boolean): androidx.compose.ui.graphics.Color {
-    val c = androidx.compose.ui.graphics.Color(accent)
-    if (!dark) return c
+    // The accent is used on text, icons and the editor dock, so it has to sit
+    // close to the theme paper. Raw palette accents were far too loud next to
+    // paper (and each theme clashed in its own way), so every accent is pulled
+    // towards the paper's own value band: hue kept, saturation -28%, value
+    // folded 22% towards the theme's mid tone.
     val hsv = FloatArray(3)
     AndroidColor.colorToHSV(accent.toInt(), hsv)
     hsv[1] = (hsv[1] * .72f).coerceIn(0f, 1f)
-    hsv[2] = max(hsv[2], .82f)
+    val target = if (dark) .68f else .45f
+    hsv[2] = (hsv[2] * .78f + target * .22f).coerceIn(0f, 1f)
     return androidx.compose.ui.graphics.Color(AndroidColor.HSVToColor(hsv))
 }
 

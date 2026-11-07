@@ -83,7 +83,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.time.LocalDate
-import java.time.LocalDateTime
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sin
@@ -383,13 +382,13 @@ fun LibraryScreen(
         if (settings.libraryMode == "list") {
             LazyColumn(
                 Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(start = 20.dp, top = 6.dp, end = 20.dp, bottom = 130.dp),
+                contentPadding = PaddingValues(start = 20.dp, top = 0.dp, end = 20.dp, bottom = 130.dp),
                 // Match the grid/compact top rhythm exactly: same item gap, no extra
                 // list-only spacer after the header. The old 12dp + 6dp combo made
                 // the header/continue/shelf offsets jump only in list mode.
                 verticalArrangement = Arrangement.spacedBy(20.dp),
             ) {
-                item { LibraryHeader(store) }
+                item { LibraryHeader(store) { createOpen = true } }
                 if (continueBook != null && continueChapter != null) {
                     item {
                         ContinueCard(continueBook, continueChapter) {
@@ -399,10 +398,7 @@ fun LibraryScreen(
                 }
                 item {
                     ShelfHeader(
-                        store,
-                        visibleBooks,
                         summary = librarySummary(store, settings, selectedGroup),
-                        onAdd = { createOpen = true },
                         onFilters = { controlsOpen = true },
                     )
                 }
@@ -435,11 +431,11 @@ fun LibraryScreen(
             LazyVerticalGrid(
                 columns = GridCells.Fixed(columns),
                 Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(start = 20.dp, top = 6.dp, end = 20.dp, bottom = 132.dp),
+                contentPadding = PaddingValues(start = 20.dp, top = 0.dp, end = 20.dp, bottom = 132.dp),
                 horizontalArrangement = Arrangement.spacedBy(13.dp),
                 verticalArrangement = Arrangement.spacedBy(20.dp),
             ) {
-                item(span = { GridItemSpan(maxLineSpan) }) { LibraryHeader(store) }
+                item(span = { GridItemSpan(maxLineSpan) }) { LibraryHeader(store) { createOpen = true } }
                 if (continueBook != null && continueChapter != null) {
                     item(span = { GridItemSpan(maxLineSpan) }) {
                         ContinueCard(continueBook, continueChapter) {
@@ -449,10 +445,7 @@ fun LibraryScreen(
                 }
                 item(span = { GridItemSpan(maxLineSpan) }) {
                     ShelfHeader(
-                        store,
-                        visibleBooks,
                         summary = librarySummary(store, settings, selectedGroup),
-                        onAdd = { createOpen = true },
                         onFilters = { controlsOpen = true },
                     )
                 }
@@ -550,88 +543,34 @@ fun LibraryScreen(
 }
 
 @Composable
-private fun LibraryHeader(store: AppStore) {
+private fun LibraryHeader(store: AppStore, onAdd: () -> Unit) {
     val ui = LocalInk.current
-    val p = ui.palette
-    val hour = LocalDateTime.now().hour
-    val greeting = when (hour) {
-        in 5..10 -> "早上好，执笔人"
-        in 11..13 -> "中午好，执笔人"
-        in 14..18 -> "下午好，执笔人"
-        in 19..22 -> "晚上好，执笔人"
-        else -> "夜深了，执笔人"
-    }
-    Column(Modifier.fillMaxWidth().statusBarsPadding().padding(top = 12.dp)) {
+    val settings = ui.settings
+    // The shelf used to open with a time-based greeting, a tagline under it, a
+    // round monogram, a daily-word badge and a separate 「我的书架」 section
+    // title. All of that is gone: one large title on the same 20dp gutter as the
+    // other three tabs, the add button moved up to sit beside it, and the space
+    // that used to be spent on those lines now belongs to the books.
+    Column(Modifier.fillMaxWidth().statusBarsPadding().padding(top = 14.dp)) {
+        // Same type size, weight and tracking as 笔记 / 数据 / 设置: the shelf
+// was the only tab using 29f Medium, which made its title sit 13px lower
+// and 21px shorter than the other three.
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                Modifier
-                    .size(40.dp)
-                    .clip(CircleShape)
-                    .background(ui.palette.ink),
-                contentAlignment = Alignment.Center,
-            ) {
-                Txt(ui.settings.appName.take(1).ifBlank { "字" }, size = 18f, color = ui.palette.bgTop, weight = FontWeight.Medium)
-            }
-            Spacer(Modifier.width(11.dp))
-            Column(Modifier.weight(1f)) {
-                Txt(ui.settings.appName, size = 18f, weight = FontWeight.SemiBold, letterSpacing = 1.5f)
-                Txt(ui.settings.quote, size = 9.5f, color = ui.palette.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
-            if (ui.settings.showStats) {
-                TodayBadge(store.todayWords(), ui.settings.dailyGoal)
-            }
+            Txt("书架", size = 34f, weight = FontWeight.SemiBold, letterSpacing = .4f)
+            Spacer(Modifier.weight(1f))
+            GlassIconButton(Glyph.Plus, onClick = onAdd, size = 38.dp)
         }
-        Spacer(Modifier.height(18.dp))
-        Txt(greeting, size = 29f, weight = FontWeight.Medium, letterSpacing = .3f, lineHeight = 36f)
-        Spacer(Modifier.height(5.dp))
-        Txt(
-            if (store.books.isEmpty()) "一张白纸，也可以是一座岛的起点。"
-            else "今天也写一点，字隅就会亮起来。",
-            size = 11.5f,
-            color = ui.palette.muted,
-        )
         Spacer(Modifier.height(14.dp))
     }
 }
 
-@Composable
-private fun TodayBadge(words: Int, goal: Int) {
-    val ui = LocalInk.current
-    val progress = (words.toFloat() / goal.coerceAtLeast(1)).coerceIn(0f, 1f)
-    MoyuSurface(SurfaceRole.CARD, radius = 18f) {
-        Row(
-            Modifier.padding(horizontal = 11.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(Modifier.size(26.dp), contentAlignment = Alignment.Center) {
-                Canvas(Modifier.fillMaxSize()) {
-                    drawCircle(ui.palette.line, style = Stroke(2.4.dp.toPx()))
-                    drawArc(
-                        ui.accent,
-                        -90f,
-                        progress * 360f,
-                        false,
-                        style = Stroke(2.4.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round),
-                    )
-                }
-                Txt("${(progress * 100).toInt()}", size = 7.5f, color = ui.palette.ink, weight = FontWeight.Medium)
-            }
-            Spacer(Modifier.width(7.dp))
-            Column {
-                Txt(formatWords(words), size = 12f, weight = FontWeight.SemiBold)
-                Txt("今日字数", size = 7.5f, color = ui.palette.muted)
-            }
-        }
-    }
-}
 
 @Composable
 private fun ContinueCard(book: Book, chapter: Chapter, onClick: () -> Unit) {
     val ui = LocalInk.current
-    MoyuSurface(
-        SurfaceRole.CARD,
-        Modifier.fillMaxWidth(),
+    MoyuSurface(Modifier.fillMaxWidth(),
         radius = 28f,
+        flat = true,
     ) {
         Row(
             Modifier
@@ -661,16 +600,20 @@ private fun ContinueCard(book: Book, chapter: Chapter, onClick: () -> Unit) {
                     size = 10f,
                     color = ui.palette.muted,
                 )
+                // A blank chapter simply shows no preview line; the old fallback sentence
+            // was decorative filler rather than information.
+            val chapterPreview = chapter.content.trim().replace(Regex("\\s+"), " ").take(36)
+            if (chapterPreview.isNotBlank()) {
                 Spacer(Modifier.height(7.dp))
                 Txt(
-                    chapter.content.trim().replace(Regex("\\s+"), " ").take(36)
-                        .ifBlank { "从一个名字、一场雨，或者一句没说出口的话开始。" },
+                    chapterPreview,
                     size = 10f,
                     color = ui.palette.muted.copy(alpha = .88f),
                     lineHeight = 16f,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
+            }
                 Spacer(Modifier.height(10.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(
@@ -713,21 +656,13 @@ private fun librarySummary(store: AppStore, settings: AppSettings, selectedGroup
 
 @Composable
 private fun ShelfHeader(
-    store: AppStore,
-    books: List<Book>,
     summary: String,
-    onAdd: () -> Unit,
     onFilters: () -> Unit,
 ) {
+    // Only the filter row is left. Its old 「我的书架」 title duplicated the tab
+    // title directly above it and carried a second book/word count, so it was
+    // removed along with that count.
     Column(Modifier.fillMaxWidth()) {
-        SectionTitle(
-            "我的书架",
-            if (books.isEmpty()) "还没有故事" else "${books.size} 本书 · ${formatWords(books.sumOf { it.words })} 字",
-            trailing = {
-                GlassIconButton(Glyph.Plus, onClick = onAdd, size = 34.dp)
-            }
-        )
-        Spacer(Modifier.height(11.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             GlassChip("筛选", false) { onFilters() }
             Spacer(Modifier.width(9.dp))
@@ -772,7 +707,7 @@ private fun BookGridCard(book: Book, compact: Boolean, groupName: String?, onCli
 @Composable
 private fun BookListRow(book: Book, groupName: String?, onClick: () -> Unit) {
     val ui = LocalInk.current
-    MoyuSurface(SurfaceRole.CARD, Modifier.fillMaxWidth(), radius = 22f) {
+    MoyuSurface(Modifier.fillMaxWidth(), radius = 22f, flat = true) {
         Row(
             Modifier
                 .fillMaxWidth()
@@ -849,8 +784,6 @@ private fun AddBookTile(onClick: () -> Unit) {
         }
         Spacer(Modifier.height(10.dp))
         Txt("新的故事", size = 14.5f, color = ui.palette.ink, weight = FontWeight.Medium)
-        Spacer(Modifier.height(3.dp))
-        Txt("等待发生", size = 9.5f, color = ui.palette.muted)
     }
 }
 
@@ -870,8 +803,6 @@ private fun AddBookRow(onClick: () -> Unit) {
         LineIcon(Glyph.Plus, ui.palette.ink, 18.dp)
         Spacer(Modifier.width(10.dp))
         Txt("新建一本书", size = 13.5f, weight = FontWeight.Medium)
-        Spacer(Modifier.weight(1f))
-        Txt("从一个念头开始", size = 9.5f, color = ui.palette.muted)
     }
 }
 
@@ -930,7 +861,6 @@ fun BookEditorDialog(
             if (field == null) {
             DialogTitle(
                 if (existing == null) "新建一本书" else "编辑书籍",
-                "点一行，逐项填写；创建按钮一直在底部。",
                 onClose = dismiss,
             )
             Spacer(Modifier.height(8.dp))
@@ -1214,7 +1144,7 @@ fun BookDetailScreen(
             }
             if (book.synopsis.isNotBlank()) {
                 item {
-                    MoyuSurface(SurfaceRole.CARD, Modifier.fillMaxWidth(), radius = 22f) {
+                    MoyuSurface(Modifier.fillMaxWidth(), radius = 22f, flat = true) {
                         Txt(
                             book.synopsis,
                             size = 11.5f,

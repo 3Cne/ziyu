@@ -3,6 +3,7 @@ import java.util.Properties
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("com.android.compose.screenshot")
 }
 
 val keystorePropertiesFile = rootProject.file("keystore.properties")
@@ -17,13 +18,14 @@ fun signingValue(key: String, env: String): String =
 android {
     namespace = "com.moyu.writer"
     compileSdk = 37
+    experimentalProperties["android.experimental.enableScreenshotTest"] = true
 
     defaultConfig {
         applicationId = "com.moyu.writer"
         minSdk = 26
         targetSdk = 36
-        versionCode = 494
-        versionName = "3.7.111"
+        versionCode = 616
+        versionName = "3.9.36-test"
         val updateRepo = (project.findProperty("updateRepo") as String?) ?: ""
         buildConfigField("String", "UPDATE_REPO", "\"$updateRepo\"")
         vectorDrawables { useSupportLibrary = true }
@@ -77,6 +79,13 @@ dependencies {
     // Local copy of Haze 1.7.3, compiled against a newer Compose. It is used through
     // the small Java bridge below so the Kotlin compiler never has to read its metadata.
     implementation(files("libs/haze-1.7.3.aar"))
+    // Floating tab bar glass: Kyant0/AndroidLiquidGlass, Apache-2.0.
+    // 1.0.0 is the last release built against Compose 1.9.4 / Kotlin 2.2.21,
+    // which matches this project without a build-chain upgrade.
+    implementation("io.github.kyant0:backdrop:1.0.0")
+    // @Preview annotations live in main sources next to the composables they render.
+    // The library is compile-time only; release builds compile it but ship nothing extra.
+    implementation("androidx.compose.ui:ui-tooling-preview:1.9.5")
     debugImplementation("androidx.compose.ui:ui-tooling:1.9.5")
     testImplementation("junit:junit:4.13.2")
     testImplementation("androidx.test:core:1.6.1")
@@ -85,7 +94,12 @@ dependencies {
     testImplementation("org.robolectric:robolectric:4.16")
     testImplementation("io.github.takahirom.roborazzi:roborazzi:1.74.0")
     testImplementation("io.github.takahirom.roborazzi:roborazzi-compose:1.74.0")
+    // Layoutlib renderer for `updateDebugScreenshotTest`: renders the @Preview
+    // functions in src/screenshotTest without a device or an IDE window.
+    screenshotTestImplementation("androidx.compose.ui:ui-tooling:1.9.5")
+    screenshotTestImplementation("androidx.compose.ui:ui-tooling-preview:1.9.5")
 }
+
 
 
 
