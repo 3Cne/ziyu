@@ -93,6 +93,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -392,7 +393,7 @@ fun WritingScreen(
     // may be shown, not whether it is already open.
     var floatNotePanel by remember(seedKey) { mutableStateOf(false) }
     // 能力栏（工具 + 符号栏）的展开态：左下角的球收起/展开整块能力栏。
-    var abilityOpen by remember { mutableStateOf(true) }
+    var abilityOpen by remember { mutableStateOf(false) }
     val abilityT = remember { Animatable(1f) }
     LaunchedEffect(abilityOpen) {
         abilityT.animateTo(
@@ -872,7 +873,6 @@ fun WritingScreen(
     val density = LocalDensity.current
     val popupLifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     val imePx = WindowInsets.ime.getBottom(density)
-    val navPx = WindowInsets.navigationBars.getBottom(density)
     val imeNowState = rememberUpdatedState(imePx)
     // Tapping the body opens the IME and shortens the page. Feed the view both
     // the current and the last full IME height so the tap can reserve the
@@ -925,11 +925,9 @@ fun WritingScreen(
         Column(
             Modifier
                 .fillMaxSize()
-                // Consume IME and navigation insets directly instead of a manual
-                // latched height. The latched path could leave the dock behind the
-                // IME on a real keyboard transition (the dock disappeared in the
-                // user's recording while text ran under the keyboard).
-                .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars))
+                // 正文铺满到屏幕底（含手势条区域）：只让 IME 顶起页面。
+                // dock 内容自己吃 navigationBars，所以工具行不会压到小白条。
+                .windowInsetsPadding(WindowInsets.ime)
         ) {
             EditorTopBar(
                 heading = heading,
@@ -1563,10 +1561,14 @@ fun WritingScreen(
                 )
                 }
                 // 常驻球：展开时在左下显示收起箭头，收起时显示键盘图标，点击切换。
+                // 球和符号行共用同一个 navigationBars inset：键盘弹起时 nav
+                // 会变，不能再拿一次性 navPx 算，否则球会比符号行高出一截。
                 Box(
                     Modifier
                         .align(Alignment.BottomStart)
-                        .padding(start = 16.dp, bottom = 12.dp)
+                        .padding(start = 12.dp)
+                        .navigationBarsPadding()
+                        .padding(bottom = 9.dp)
                         .size(40.dp)
                         .clip(CircleShape)
                         .background(dockTone(ui))
@@ -1584,6 +1586,9 @@ fun WritingScreen(
             }
             }
         }
+
+        // 正文已经铺到手势条下面，dock 自身背景负责盖住它；不再需要
+        // 独立的一条 nav 背景，否则收起时会变成一条横带。
 
 
         AnimatedVisibility(
@@ -4088,10 +4093,8 @@ private fun EditorDock(
             Modifier
                 .fillMaxWidth()
                 .clip(
-                    androidx.compose.foundation.shape.RoundedCornerShape(
-                        topStart = 22.dp,
-                        topEnd = 22.dp,
-                    ),
+                    // 连续曲率：上缘提前起弯，不做「直边→圆弧」的曲率跳变。
+                    SmoothCorner(topStart = 22.dp, topEnd = 22.dp),
                 )
                 // 1型玻璃 under the dock: the body is a native EditText, so the
                 // Backdrop library cannot sample it and its draw node freezes.
@@ -4105,7 +4108,13 @@ private fun EditorDock(
                 LocalDockFg provides onBar,
                 LocalDockDim provides onBarDim,
             ) {
-            Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp)) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 10.dp)
+                    // 正文已经铺到手势条下面；工具行/符号栏要抬到小白条上方。
+                    .navigationBarsPadding()
+            ) {
                 // 三种工具栏形态共用同一行高：普通工具 / 框选工具 / 校核。
                 // 框选后行高不变，dock 不会因为换了一行内容而跳一下。
                 Box(

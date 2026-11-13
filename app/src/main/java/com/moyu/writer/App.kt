@@ -458,12 +458,16 @@ DepthStack(
             )
         }
 
-        ToastLayer(
-            Modifier
-                .align(Alignment.BottomCenter)
-                .padding(bottom = if (rootVisible) 112.dp else 104.dp)
-                .navigationBarsPadding()
-        )
+        androidx.compose.runtime.CompositionLocalProvider(
+            LocalGlassBackdrop provides tabBarBackdrop
+        ) {
+            ToastLayer(
+                Modifier
+                    .align(Alignment.TopCenter)
+                    .statusBarsPadding()
+                    .padding(top = 8.dp, start = 20.dp, end = 20.dp)
+            )
+        }
 
         if (!ui.settings.onboardingDone) {
             OnboardingOverlay {

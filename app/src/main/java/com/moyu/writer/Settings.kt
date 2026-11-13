@@ -1757,6 +1757,48 @@ private fun AiSettingsPage(store: AppStore, onBack: () -> Unit, onOpen: (String)
                 }
             }
         }
+        item {
+            SettingGroup("整理笔记") {
+                SettingRow("带上几条对话", glyph = Glyph.Note) {
+                    val idx = when (settings.noteContextCount) {
+                        0 -> 3
+                        2 -> 0
+                        4 -> 1
+                        else -> 2
+                    }
+                    Segmented(
+                        listOf("2", "4", "8", "全部"),
+                        idx,
+                        { i ->
+                            store.updateSettings {
+                                it.copy(
+                                    noteContextCount = when (i) {
+                                        0 -> 2
+                                        1 -> 4
+                                        2 -> 8
+                                        else -> 0
+                                    },
+                                )
+                            }
+                        },
+                        androidx.compose.ui.Modifier.width(176.dp),
+                    )
+                }
+                RowDivider()
+                SettingRow("输出长度", glyph = Glyph.Font) {
+                    androidx.compose.foundation.layout.Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        GlassChip("标准", settings.noteMaxTokens == 4000) {
+                            store.updateSettings { it.copy(noteMaxTokens = 4000) }
+                        }
+                        GlassChip("长", settings.noteMaxTokens == 8000) {
+                            store.updateSettings { it.copy(noteMaxTokens = 8000) }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 /** A named slider with its live value and a one-line explanation. Used by the
@@ -1821,7 +1863,7 @@ private fun GlassSettingsPage(store: AppStore, onBack: () -> Unit) {
     SettingsPage("玻璃", "", onBack) {
         item {
             Segmented(
-                listOf("标签栏", "镜片", "输入框", "按钮"),
+                listOf("标签栏", "镜片", "输入框", "按钮", "通知"),
                 group,
                 { group = it },
                 androidx.compose.ui.Modifier.fillMaxWidth(),
@@ -1881,7 +1923,7 @@ private fun GlassSettingsPage(store: AppStore, onBack: () -> Unit) {
                             dispersion = s.fieldGlassDispersion, onDispersion = { v -> store.updateSettings { it.copy(fieldGlassDispersion = v) } },
                             opacityLabel = "输入框不透明度",
                         )
-                        else -> GlassKnobs(
+                        3 -> GlassKnobs(
                             blur = s.btnGlassBlur, onBlur = { v -> store.updateSettings { it.copy(btnGlassBlur = v) } },
                             refraction = s.btnGlassRefraction, onRefraction = { v -> store.updateSettings { it.copy(btnGlassRefraction = v) } },
                             shadow = s.btnGlassShadow, onShadow = { v -> store.updateSettings { it.copy(btnGlassShadow = v) } },
@@ -1889,6 +1931,15 @@ private fun GlassSettingsPage(store: AppStore, onBack: () -> Unit) {
                             edge = s.btnGlassEdge, onEdge = { v -> store.updateSettings { it.copy(btnGlassEdge = v) } },
                             dispersion = s.btnGlassDispersion, onDispersion = { v -> store.updateSettings { it.copy(btnGlassDispersion = v) } },
                             opacityLabel = "按钮不透明度",
+                        )
+                        else -> GlassKnobs(
+                            blur = s.bubbleGlassBlur, onBlur = { v -> store.updateSettings { it.copy(bubbleGlassBlur = v) } },
+                            refraction = s.bubbleGlassRefraction, onRefraction = { v -> store.updateSettings { it.copy(bubbleGlassRefraction = v) } },
+                            shadow = s.bubbleGlassShadow, onShadow = { v -> store.updateSettings { it.copy(bubbleGlassShadow = v) } },
+                            opacity = s.bubbleGlassOpacity, onOpacity = { v -> store.updateSettings { it.copy(bubbleGlassOpacity = v) } },
+                            edge = s.bubbleGlassEdge, onEdge = { v -> store.updateSettings { it.copy(bubbleGlassEdge = v) } },
+                            dispersion = s.bubbleGlassDispersion, onDispersion = { v -> store.updateSettings { it.copy(bubbleGlassDispersion = v) } },
+                            opacityLabel = "通知不透明度",
                         )
                     }
                 }
@@ -1934,7 +1985,7 @@ private fun GlassKnobs(
  * the only way "tune it here, see it there" can be true.
  */
 @Composable
-private fun GlassLivePreview(group: Int, s: AppSettings) {
+private fun LegacyGlassLivePreview(group: Int, s: AppSettings) {
     val p = LocalInk.current.palette
     if (group <= 1) {
         GlassPreview(
@@ -1963,10 +2014,10 @@ private fun GlassLivePreview(group: Int, s: AppSettings) {
     val veil = if (button) s.btnGlassOpacity else s.fieldGlassOpacity
     val edge = if (button) s.btnGlassEdge else s.fieldGlassEdge
     val shadow = if (button) s.btnGlassShadow else s.fieldGlassShadow
-    // Backdrop's lens walks a CornerBasedShape only; SmoothCorner would silently
-    // drop refraction (and used to throw at draw time). The real input row uses
-    // the same rounded shape, so preview and device stay identical.
-    val shape = if (button) CircleShape else androidx.compose.foundation.shape.RoundedCornerShape(22.dp)
+    // 玻璃现在也走连续曲率：SmoothCornerShape 继承 CornerBasedShape，
+    // lens 的类型检查能过；四角按圆弧半径算折射，与裁切路径最多差 1–3dp，
+    // 由边缘带盖住。
+    val shape = if (button) CircleShape else SmoothCorner(22.dp)
     Box(
         androidx.compose.ui.Modifier
             .fillMaxWidth()

@@ -194,28 +194,53 @@ val LocalGlassBackdrop = compositionLocalOf<Backdrop?> { null }
 @Composable
 fun GlassField(
     modifier: Modifier = Modifier,
-    shape: Shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp),
+    shape: Shape = SmoothCorner(20.dp),
     shadowAlpha: Float = .16f,
     press: Float = 0f,
     /** Paper veil for this surface; null = the shared 问书 setting. Buttons sit
      *  on top of scrolling text, so they need to be denser than the input. */
     veil: Float? = null,
-    /** "field" = the 问书 input, "button" = the link / send pills. Each has its
-     *  own five knobs in 设置 → 问书玻璃. */
+    /** "field" = the 问书 input, "button" = the link / send pills and the tool
+     *  bubble, "notice" = the motion notification. */
     kind: String = "field",
     content: @Composable BoxScope.() -> Unit,
 ) {
     val ui = LocalInk.current
     val s = ui.settings
+    val notice = kind == "notice"
     val button = kind == "button"
-    val blur = if (button) s.btnGlassBlur else s.fieldGlassBlur
-    val refraction = if (button) s.btnGlassRefraction else s.fieldGlassRefraction
-    val dispersion = if (button) s.btnGlassDispersion else s.fieldGlassDispersion
-    val edge = if (button) s.btnGlassEdge else s.fieldGlassEdge
-    val baseVeil = if (button) s.btnGlassOpacity else s.fieldGlassOpacity
+    val blur = when {
+        notice -> s.bubbleGlassBlur
+        button -> s.btnGlassBlur
+        else -> s.fieldGlassBlur
+    }
+    val refraction = when {
+        notice -> s.bubbleGlassRefraction
+        button -> s.btnGlassRefraction
+        else -> s.fieldGlassRefraction
+    }
+    val dispersion = when {
+        notice -> s.bubbleGlassDispersion
+        button -> s.btnGlassDispersion
+        else -> s.fieldGlassDispersion
+    }
+    val edge = when {
+        notice -> s.bubbleGlassEdge
+        button -> s.btnGlassEdge
+        else -> s.fieldGlassEdge
+    }
+    val baseVeil = when {
+        notice -> s.bubbleGlassOpacity
+        button -> s.btnGlassOpacity
+        else -> s.fieldGlassOpacity
+    }
     // Callers still pass a shadow for emphasis (idle vs ready); the setting is
     // the base, .16 being the neutral the old call sites were written against.
-    val baseShadow = if (button) s.btnGlassShadow else s.fieldGlassShadow
+    val baseShadow = when {
+        notice -> s.bubbleGlassShadow
+        button -> s.btnGlassShadow
+        else -> s.fieldGlassShadow
+    }
     val shadow = baseShadow * (shadowAlpha / .16f)
     // Real 1型玻璃: the page records its scrolling list into a layer, this node
     // sits OUTSIDE that layer and samples it — the same relationship the tab bar

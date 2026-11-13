@@ -177,6 +177,10 @@ data class AppSettings(
     val aiToolTrace: Boolean = true,
     /** 问书 · 深度思考：先拆问题、逐条核对原文再答，回答可以更长。 */
     val aiDeepThink: Boolean = false,
+    /** 整理笔记：带上按下这条之前几条对话；0 = 全部。 */
+    val noteContextCount: Int = 8,
+    /** 整理笔记：输出预算（token）。4000 标准 / 8000 长。 */
+    val noteMaxTokens: Int = 8000,
     /** Glass on the AI input row: veil, blur, edge band, refraction, shadow. */
     val fieldGlassOpacity: Float = .18f,
     val fieldGlassBlur: Float = 10f,
@@ -192,6 +196,13 @@ data class AppSettings(
     val btnGlassRefraction: Float = 18f,
     val btnGlassShadow: Float = .16f,
     val btnGlassDispersion: Boolean = true,
+    /** Glass on the motion notification, tuned on its own. */
+    val bubbleGlassOpacity: Float = .18f,
+    val bubbleGlassBlur: Float = 12f,
+    val bubbleGlassEdge: Float = 1f,
+    val bubbleGlassRefraction: Float = 18f,
+    val bubbleGlassShadow: Float = .16f,
+    val bubbleGlassDispersion: Boolean = true,
 )
 
 data class AppData(
@@ -725,6 +736,11 @@ class AppStore(context: Context) {
             btnGlassEdge = settings.btnGlassEdge.coerceIn(0f, 2f),
             btnGlassRefraction = settings.btnGlassRefraction.coerceIn(0f, 40f),
             btnGlassShadow = settings.btnGlassShadow.coerceIn(0f, 1f),
+            bubbleGlassOpacity = settings.bubbleGlassOpacity.coerceIn(0f, 1f),
+            bubbleGlassBlur = settings.bubbleGlassBlur.coerceIn(0f, 40f),
+            bubbleGlassEdge = settings.bubbleGlassEdge.coerceIn(0f, 2f),
+            bubbleGlassRefraction = settings.bubbleGlassRefraction.coerceIn(0f, 40f),
+            bubbleGlassShadow = settings.bubbleGlassShadow.coerceIn(0f, 1f),
         )
 
         return AppData(
@@ -940,6 +956,8 @@ private fun encodeSettings(s: AppSettings): JSONObject = JSONObject().apply {
     put("aiWebMax", s.aiWebMax)
     put("aiToolTrace", s.aiToolTrace)
     put("aiDeepThink", s.aiDeepThink)
+    put("noteContextCount", s.noteContextCount)
+    put("noteMaxTokens", s.noteMaxTokens)
     put("fieldGlassOpacity", s.fieldGlassOpacity.toDouble())
     put("fieldGlassBlur", s.fieldGlassBlur.toDouble())
     put("fieldGlassEdge", s.fieldGlassEdge.toDouble())
@@ -952,6 +970,12 @@ private fun encodeSettings(s: AppSettings): JSONObject = JSONObject().apply {
     put("btnGlassRefraction", s.btnGlassRefraction.toDouble())
     put("btnGlassShadow", s.btnGlassShadow.toDouble())
     put("btnGlassDispersion", s.btnGlassDispersion)
+    put("bubbleGlassOpacity", s.bubbleGlassOpacity.toDouble())
+    put("bubbleGlassBlur", s.bubbleGlassBlur.toDouble())
+    put("bubbleGlassEdge", s.bubbleGlassEdge.toDouble())
+    put("bubbleGlassRefraction", s.bubbleGlassRefraction.toDouble())
+    put("bubbleGlassShadow", s.bubbleGlassShadow.toDouble())
+    put("bubbleGlassDispersion", s.bubbleGlassDispersion)
 }
 
 private fun decodeStringList(o: JSONObject?, key: String): List<String> {
@@ -1036,6 +1060,10 @@ private fun decodeSettings(o: JSONObject?) = AppSettings(
     aiWebMax = (o?.optInt("aiWebMax", 3) ?: 3).coerceIn(1, 5),
     aiToolTrace = o?.optBoolean("aiToolTrace", true) ?: true,
     aiDeepThink = o?.optBoolean("aiDeepThink", false) ?: false,
+    noteContextCount = (o?.optInt("noteContextCount", 8) ?: 8)
+        .let { if (it == 0) 0 else it.coerceIn(2, 40) },
+    noteMaxTokens = (o?.optInt("noteMaxTokens", 8000) ?: 8000)
+        .let { if (it >= 8000) 8000 else 4000 },
     fieldGlassOpacity = (o?.optDouble("fieldGlassOpacity", .18) ?: .18).toFloat().coerceIn(0f, 1f),
     fieldGlassBlur = (o?.optDouble("fieldGlassBlur", 10.0) ?: 10.0).toFloat().coerceIn(0f, 40f),
     fieldGlassEdge = (o?.optDouble("fieldGlassEdge", 1.0) ?: 1.0).toFloat().coerceIn(0f, 2f),
@@ -1048,6 +1076,12 @@ private fun decodeSettings(o: JSONObject?) = AppSettings(
     btnGlassRefraction = (o?.optDouble("btnGlassRefraction", 18.0) ?: 18.0).toFloat().coerceIn(0f, 40f),
     btnGlassShadow = (o?.optDouble("btnGlassShadow", .16) ?: .16).toFloat().coerceIn(0f, 1f),
     btnGlassDispersion = o?.optBoolean("btnGlassDispersion", true) ?: true,
+    bubbleGlassOpacity = (o?.optDouble("bubbleGlassOpacity", .18) ?: .18).toFloat().coerceIn(0f, 1f),
+    bubbleGlassBlur = (o?.optDouble("bubbleGlassBlur", 12.0) ?: 12.0).toFloat().coerceIn(0f, 40f),
+    bubbleGlassEdge = (o?.optDouble("bubbleGlassEdge", 1.0) ?: 1.0).toFloat().coerceIn(0f, 2f),
+    bubbleGlassRefraction = (o?.optDouble("bubbleGlassRefraction", 18.0) ?: 18.0).toFloat().coerceIn(0f, 40f),
+    bubbleGlassShadow = (o?.optDouble("bubbleGlassShadow", .16) ?: .16).toFloat().coerceIn(0f, 1f),
+    bubbleGlassDispersion = o?.optBoolean("bubbleGlassDispersion", true) ?: true,
 )
 
 private fun decodeData(text: String): AppData {

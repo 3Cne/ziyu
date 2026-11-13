@@ -28,6 +28,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -42,6 +43,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlin.math.abs
+import kotlin.math.pow
 import com.kyant.backdrop.Backdrop
 import com.kyant.backdrop.drawBackdrop
 import com.kyant.backdrop.effects.blur
@@ -148,6 +150,11 @@ internal fun MoyuTabBar(
                     .padding(5.dp)
             ) {
                 val itemWidth = maxWidth / names.size
+                // 形变要按「这一帧真的走了多少像素」算，不能按 tab 数：
+                // 同样 0.01 tab，在 72dp 一格的条上是 0.72dp，乘 36 直接
+                // 顶到上限，于是远近快慢看起来全一样。这里用一格的像素宽
+                // 归一，慢移只有 0.1 左右，快甩才吃满 0.38。
+                val itemPx = with(LocalDensity.current) { itemWidth.toPx() }
                 // Lens travel is an Animatable instead of animateDpAsState so the
                 // stretch can be scheduled around the trip: grow along the
                 // direction of travel, then settle back to its own width.
@@ -157,9 +164,11 @@ internal fun MoyuTabBar(
                 var lensImpact by remember { mutableFloatStateOf(0f) }
                 var lensRightward by remember { mutableStateOf(true) }
                 var lensLast by remember { mutableFloatStateOf(current.toFloat()) }
+                var lensLastNs by remember { mutableLongStateOf(0L) }
                 LaunchedEffect(current) {
                     lensRightward = current >= lensPos.value
                     lensLast = lensPos.value
+                    lensLastNs = 0L
                     lensPos.animateTo(
                         targetValue = current.toFloat(),
                         animationSpec = spring(
@@ -169,22 +178,40 @@ internal fun MoyuTabBar(
                             visibilityThreshold = 1e-3f,
                         ),
                     ) {
-                        // 拉长只看「这一帧走了多远」，但做一次平滑：直接按
-                        // 帧位移换算会让第一帧就拉到最长，读起来是「先变形
-                        // 再移动」。平滑后是快则长、慢则短、停下即原长。
+                        // 用真实帧间隔折算回 60Hz：120Hz 上每帧位移只有一半，
+                        // 折算后形变强度与 60Hz 一致；掉帧时也不会突然变长。
                         val step = abs(value - lensLast)
                         lensLast = value
-                        val target = (step * 36f).coerceIn(0f, .38f)
-                        // 跟随更慢（0.32）：形变要「慢慢鼓起来」，
-                        // 每帧贴着速度变会变成高频抖动。
-                        lensStretch += (target - lensStretch) * .32f
-                        // 压扁只看「冲过了目标多少」：没冲过就是 0，
-                        // 冲过头才被挡住，这是撞击本身，不是额外动画。
-                        lensImpact = (abs(value - current) * 5f).coerceIn(0f, .55f)
+                        val now = System.nanoTime()
+                        val dt = if (lensLastNs == 0L) {
+                            1f / 60f
+                        } else {
+                            ((now - lensLastNs) / 1_000_000_000f).coerceIn(.002f, .05f)
+                        }
+                        lensLastNs = now
+                        val step60 = step * (1f / 60f) / dt
+                        // 像素/帧 ÷ 40、上限 .62：比 3.14.11 再放大约 55%，
+                        // 普通切换中段就接近满格，慢滑仍有 0.12 左右。
+                        val target = (step60 * itemPx / 40f).coerceIn(0f, .62f)
+                        // 与 3.12.4 定稿同一条曲线：60Hz 时 .32，120Hz 按时间
+                        // 折算成 .175；不再额外乘收尾系数，形变随步长自然归零，
+                        // 避免最后几帧「退一下」造成的一顿一顿。
+                        val follow = 1f - (1f - .32f).pow(dt * 60f)
+                        // 收尾不再单独做一段 120ms。形变本身按剩余距离退零：
+                        // 最后 0.12 tab 用 smoothstep 从 1 收到 0，位置走到
+                        // 终点时形变同步就是 0——「放松」属于同一段动作，
+                        // 不会在停住之后再收一下。
+                        val settle = (abs(value - current) / .12f).coerceIn(0f, 1f)
+                            .let { it * it * (3f - 2f * it) }
+                        lensStretch = (lensStretch + (target - lensStretch) * follow) * settle
+                        lensImpact = (abs(value - current) * 5f).coerceIn(0f, .55f) * settle
+                        if (abs(value - current) < .0008f && abs(lensStretch) < .002f) {
+                            lensStretch = 0f
+                            lensImpact = 0f
+                        }
                     }
                     lensStretch = 0f
                     lensImpact = 0f
-                    lensLast = current.toFloat()
                 }
 
                 // The selection is a liquid lens, not a painted pill: it

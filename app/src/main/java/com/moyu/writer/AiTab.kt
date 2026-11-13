@@ -7,8 +7,7 @@ import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.foundation.background
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.blur
-import androidx.compose.ui.window.Popup
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.layout.boundsInRoot
@@ -45,6 +44,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.graphics.Color
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
@@ -76,6 +76,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.gestures.scrollBy
@@ -118,6 +119,7 @@ import androidx.compose.ui.unit.dp
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 /**
@@ -323,26 +325,30 @@ private fun ToolsBubble(
     onWeb: () -> Unit,
     onMemory: () -> Unit,
 ) {
-    // 只在「从无到有」那一刻重组一次；之后缩放/透明度都在 draw 阶段读，
-    // 不会每帧重组这颗玻璃。
+    // 只在「从无到有」那一刻重组一次；之后宽度/透明度都在组合里读，
+    // 每帧重新布局这块玻璃——这是关键：玻璃必须按最终尺寸栅格化，
+    // 不能再被 graphicsLayer 缩放，否则最后几十毫秒边缘会重新采样。
     val visible by remember(open) { derivedStateOf { open.value > .001f } }
     if (!visible) return
+    // 5 颗 42dp 图标 + 4 个 2dp 间隔 + 左右各 7dp 内边距。
+    val bubbleWidth = 42.dp * 5f + 2.dp * 4f + 7.dp * 2f
+    val t = open.value.coerceIn(0f, 1f)
     Box(
-        modifier.graphicsLayer {
-            val t = open.value
-            scaleX = t.coerceAtLeast(.001f)
-            scaleY = .86f + .14f * t
-            alpha = t.coerceIn(0f, 1f)
-            transformOrigin = TransformOrigin(0f, 1f)
-        }
+        modifier
+            .width(bubbleWidth * t.coerceAtLeast(.02f))
+            .clipToBounds()
+            .graphicsLayer { alpha = t }
     ) {
         GlassField(
-            shape = RoundedCornerShape(20.dp),
+            Modifier.fillMaxWidth(),
+            shape = SmoothCorner(20.dp),
             shadowAlpha = .16f,
             kind = "button",
         ) {
             Row(
-                Modifier.padding(7.dp),
+                // requiredWidth：气泡宽度在长，但这行图标必须保持 232dp
+                // 原尺寸被左边缘裁出来，不能被窄约束挤扁。
+                Modifier.requiredWidth(bubbleWidth).padding(7.dp),
                 horizontalArrangement = Arrangement.spacedBy(2.dp),
             ) {
                 ToolIcon(Glyph.File, 0, open, onClick = onFile)
@@ -366,6 +372,22 @@ private fun ToolIcon(
 ) {
     val ui = LocalInk.current
     val p = ui.palette
+    // 选中底从左侧长出：开关打开时图标自己先动一下，提示才接着落下。
+    val fill = remember { Animatable(if (selected) 1f else 0f) }
+    LaunchedEffect(selected) {
+        if (ui.settings.motion == "none") {
+            fill.snapTo(if (selected) 1f else 0f)
+            return@LaunchedEffect
+        }
+        fill.animateTo(
+            targetValue = if (selected) 1f else 0f,
+            animationSpec = spring(
+                dampingRatio = .62f,
+                stiffness = 420f,
+                visibilityThreshold = .001f,
+            ),
+        )
+    }
     Box(
         Modifier
             .size(42.dp)
@@ -375,10 +397,18 @@ private fun ToolIcon(
                 translationX = (1f - t) * 14.dp.toPx()
             }
             .clip(CircleShape)
-            .background(if (selected) accentTint(p, ui.accent) else Color.Transparent)
             .bouncy(scale = .90f) { onClick() },
         contentAlignment = Alignment.Center,
     ) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    scaleX = fill.value
+                    transformOrigin = TransformOrigin(0f, .5f)
+                }
+                .background(accentTint(p, ui.accent))
+        )
         LineIcon(glyph, p.ink, 18.dp, 1.7f)
     }
 }
@@ -1292,91 +1322,103 @@ fun AiScreen(
                         val msg = chat.messages.firstOrNull { it.id == id }
                         if (msg != null) {
                             val clipboard = LocalClipboardManager.current
-                            Column(
-                                Modifier
-                                    .background(p.paper, SmoothCorner(18.dp))
-                                    .padding(vertical = 6.dp),
+                            GlassField(
+                                Modifier.width(300.dp),
+                                shape = SmoothCorner(22.dp),
+                                shadowAlpha = .20f,
+                                kind = "button",
                             ) {
-                                MessageAction("复制") {
-                                    clipboard.setText(AnnotatedString(msg.text))
-                                    close()
-                                }
-                                MessageAction("引用这段") {
-                                    // A transcript message joins the same quote
-                                    // system the picker feeds, so it shows up as a
-                                    // chip and rides along on the next send.
-                                    if (quotes.none { it.id == msg.id }) {
-                                        quotes = quotes + QuoteRef(
-                                            type = "text",
-                                            id = msg.id,
-                                            label = "这段对话",
-                                            bookId = book.id,
-                                            text = msg.text,
-                                        )
+                                Row(
+                                    Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 6.dp),
+                                    horizontalArrangement = Arrangement.SpaceEvenly,
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    MessageChip(Glyph.Share, "复制") {
+                                        clipboard.setText(AnnotatedString(msg.text))
+                                        close()
                                     }
-                                    close()
-                                }
-                                MessageAction("做成笔记") {
-                                    close()
-                                    val idx = chat.messages.indexOfFirst { it.id == msg.id }
-                                    val thread = chat.messages
-                                        .take(if (idx >= 0) idx + 1 else chat.messages.size)
-                                        .takeLast(8)
-                                        .joinToString("\n") { m ->
+                                    MessageChip(Glyph.Link, "引用") {
+                                        // A transcript message joins the same quote
+                                        // system the picker feeds, so it shows up as a
+                                        // chip and rides along on the next send.
+                                        if (quotes.none { it.id == msg.id }) {
+                                            quotes = quotes + QuoteRef(
+                                                type = "text",
+                                                id = msg.id,
+                                                label = "这段对话",
+                                                bookId = book.id,
+                                                text = msg.text,
+                                            )
+                                        }
+                                        close()
+                                    }
+                                    MessageChip(Glyph.Note, "笔记") {
+                                        close()
+                                        val idx = chat.messages.indexOfFirst { it.id == msg.id }
+                                        val upto = chat.messages
+                                            .take(if (idx >= 0) idx + 1 else chat.messages.size)
+                                        val picked = if (settings.noteContextCount <= 0) upto
+                                        else upto.takeLast(settings.noteContextCount)
+                                        val thread = picked.joinToString("\n") { m ->
                                             (if (m.role == "user") "作者：" else "AI：") + m.text
                                         }
-                                    val key = AiKey.load(ctx)
-                                    if (key.isNullOrBlank()) {
-                                        store.addNote(Note(title = msg.text.trim().take(24), content = msg.text))
-                                        ToastBus.show("还没有 Key，先原样存了一份")
-                                    } else {
-                                        ToastBus.show("正在整理…")
-                                        scope.launch {
-                                            val r = AiClient.chat(
-                                                settings.aiBaseUrl, settings.aiModel, key,
-                                                settings.aiTemperature,
-                                                "你在帮一位中文小说作者整理笔记。把给出的对话整理成一篇可复用的笔记：" +
-                                                    "去掉寒暄、复读和废话，保留结论、设定、待办和问题。" +
-                                                    "只输出：第一行「标题：…」，之后是笔记正文；不要解释你在做什么。",
-                                                thread,
-                                                maxTokens = 1200,
-                                            )
-                                            val body = r.text.trim()
-                                            if (r.ok && body.isNotBlank()) {
-                                                val first = body.lineSequence().first().trim()
-                                                val title = first.removePrefix("标题：").removePrefix("标题:")
-                                                    .trim().ifBlank { msg.text.trim().take(12) }
-                                                val rest = body.lineSequence().drop(1)
-                                                    .joinToString("\n").trim().ifBlank { body }
-                                                store.addNote(Note(title = title.take(40), content = rest))
-                                                ToastBus.show("已存成笔记")
-                                            } else {
-                                                store.addNote(Note(title = msg.text.trim().take(24), content = msg.text))
-                                                ToastBus.show("整理没成功，先原样存了一份")
+                                        val key = AiKey.load(ctx)
+                                        if (key.isNullOrBlank()) {
+                                            store.addNote(Note(title = msg.text.trim().take(24), content = msg.text))
+                                            ToastBus.show("还没有 Key，先原样存了一份")
+                                        } else {
+                                            ToastBus.show("正在整理…")
+                                            scope.launch {
+                                                val r = AiClient.chat(
+                                                    settings.aiBaseUrl, settings.aiModel, key,
+                                                    settings.aiTemperature,
+                                                    "你在帮一位中文小说作者整理笔记。把给出的对话整理成一篇可复用的笔记：" +
+                                                        "去掉寒暄、复读和废话，保留结论、设定、待办和问题。" +
+                                                        "只输出：第一行「标题：…」，之后是笔记正文；不要解释你在做什么。",
+                                                    thread,
+                                                    maxTokens = settings.noteMaxTokens,
+                                                    // 笔记是机械整理，不需要先想一遍；思考会把
+                                                    // 预算吃光，最后 content 为空，反而落到
+                                                    // 「整理没成功，先原样存了一份」。
+                                                    disableThinking = true,
+                                                )
+                                                val body = r.text.trim()
+                                                if (r.ok && body.isNotBlank()) {
+                                                    val first = body.lineSequence().first().trim()
+                                                    val title = first.removePrefix("标题：").removePrefix("标题:")
+                                                        .trim().ifBlank { msg.text.trim().take(12) }
+                                                    val rest = body.lineSequence().drop(1)
+                                                        .joinToString("\n").trim().ifBlank { body }
+                                                    store.addNote(Note(title = title.take(40), content = rest))
+                                                    ToastBus.show("已存成笔记")
+                                                } else {
+                                                    store.addNote(Note(title = msg.text.trim().take(24), content = msg.text))
+                                                    ToastBus.show("整理没成功，先原样存了一份")
+                                                }
                                             }
                                         }
                                     }
-                                }
-                                if (msg.role != "user") {
-                                    MessageAction("重新回答") {
-                                        close()
-                                        // Replace the answer: drop it, then ask the
-                                        // question that produced it again, without
-                                        // echoing a second user bubble.
-                                        val idx = chat.messages.indexOfFirst { it.id == msg.id }
-                                        val prev = chat.messages.take(if (idx >= 0) idx else chat.messages.size)
-                                            .lastOrNull { it.role == "user" }
-                                        if (prev != null) {
-                                            chat.drop(msg.id)
-                                            persist(memo.copy(turns = chat.toTurns()))
-                                            send(prev.text, echo = false)
+                                    if (msg.role != "user") {
+                                        MessageChip(Glyph.Sparkles, "重答") {
+                                            close()
+                                            // Replace the answer: drop it, then ask the
+                                            // question that produced it again, without
+                                            // echoing a second user bubble.
+                                            val idx = chat.messages.indexOfFirst { it.id == msg.id }
+                                            val prev = chat.messages.take(if (idx >= 0) idx else chat.messages.size)
+                                                .lastOrNull { it.role == "user" }
+                                            if (prev != null) {
+                                                chat.drop(msg.id)
+                                                persist(memo.copy(turns = chat.toTurns()))
+                                                send(prev.text, echo = false)
+                                            }
                                         }
                                     }
-                                }
-                                MessageAction("删除", last = true) {
-                                    chat.drop(msg.id)
-                                    persist(memo.copy(turns = chat.toTurns()))
-                                    close()
+                                    MessageChip(Glyph.Trash, "删除", muted = true) {
+                                        chat.drop(msg.id)
+                                        persist(memo.copy(turns = chat.toTurns()))
+                                        close()
+                                    }
                                 }
                             }
                         }
@@ -1486,6 +1528,9 @@ fun AiScreen(
     }
 }
 
+/** 长消息判定：气泡超过列表可视高度的这个比例就不做 1.02 缩放。 */
+private const val LongBubbleFraction = .40f
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ChatPane(
@@ -1552,6 +1597,41 @@ private fun ChatPane(
 
     // 输入框左边的工具气泡：开合只存本次页面内存，不写 moyu.json。
     var toolsOpen by remember { mutableStateOf(false) }
+    // 长按强调的唯一时间源：菜单真正出现（arm delay 之后）才从 0 走到 1。
+    // 气泡延展、其余消息压暗/后退三者读同一个值，所以开启和取消都同一帧起步。
+    var menuOpen by remember { mutableStateOf(false) }
+    val menuEmphasis = remember { Animatable(0f) }
+    // 气泡/背景的锚点比菜单多活一段：菜单 380ms 就拆掉锚点，但弹簧还在收尾，
+    // 若这里跟着清空，气泡会在最后一小段直接跳到 0。等动画自己停再清。
+    var emphasisAnchor by remember { mutableStateOf<String?>(null) }
+    var anchorId by remember { mutableStateOf<String?>(null) }
+    var menuClosing by remember { mutableStateOf(false) }
+    var retractJob by remember { mutableStateOf<Job?>(null) }
+    var teardownJob by remember { mutableStateOf<Job?>(null) }
+    fun closeMenu() {
+        if (anchorId == null || menuClosing) return
+        menuClosing = true
+        menuOpen = false
+        val closingId = anchorId
+        retractJob?.cancel()
+        teardownJob?.cancel()
+        retractJob = scope.launch {
+            menuEmphasis.animateTo(
+                0f,
+                spring(dampingRatio = .52f, stiffness = 300f, visibilityThreshold = .0002f),
+            )
+            menuEmphasis.snapTo(0f)
+            if (emphasisAnchor == closingId) emphasisAnchor = null
+        }
+        teardownJob = scope.launch {
+            delay(380)
+            if (anchorId == closingId) {
+                anchorId = null
+                menuClosing = false
+                onDismissMenu()
+            }
+        }
+    }
     val toolsT = remember { Animatable(0f) }
     val plusTurn by animateFloatAsState(
         targetValue = if (toolsOpen) 45f else 0f,
@@ -1565,11 +1645,17 @@ private fun ChatPane(
             toolsT.animateTo(
                 targetValue = if (toolsOpen) 1f else 0f,
                 animationSpec = spring(
-                    dampingRatio = .62f,
-                    stiffness = 380f,
-                    visibilityThreshold = .001f,
+                    // 临界阻尼：气泡只向外长、不过 1。以前 .62 会冲过 1 再
+                    // 退回来，玻璃边缘带被放大又缩回，最后就「边缘变一下」。
+                    dampingRatio = 1f,
+                    stiffness = 420f,
+                    visibilityThreshold = .0002f,
                 ),
             )
+            // 弹簧是渐近的，最后 0.0002 的无尽尾巴会让两端玻璃边缘一直
+            // 有亚像素级的缩放。落到精确值只差 0.02%（<0.1dp），直接收口，
+            // 把「还在动」的那一帧去掉。
+            toolsT.snapTo(if (toolsOpen) 1f else 0f)
         }
     }
     BackHandler(enabled = toolsOpen) { toolsOpen = false }
@@ -1652,6 +1738,11 @@ private fun ChatPane(
     var paneSize by remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
     var fieldRect by remember { mutableStateOf(Rect.Zero) }
     val rowRects = remember { mutableStateMapOf<String, Rect>() }
+    // 整条消息（含引用 chip）的布局范围：背景后退时的焦点换算用。
+    val itemRects = remember { mutableStateMapOf<String, Rect>() }
+    // 长按按下的位置（气泡内 0..1）：气泡放大和背景后退都以它为焦点，
+    // 长文本按住的那一行不会跑。
+    val pressOrigins = remember { mutableStateMapOf<String, Offset>() }
     var flyId by remember { mutableStateOf<String?>(null) }
     var flyFrom by remember { mutableStateOf(Rect.Zero) }
     var flyTo by remember { mutableStateOf(Rect.Zero) }
@@ -1710,7 +1801,36 @@ private fun ChatPane(
     ) {
         LazyColumn(
             state = listState,
-            modifier = Modifier.fillMaxSize().layerBackdrop(listBackdrop),
+            modifier = Modifier
+                .fillMaxSize()
+                .layerBackdrop(listBackdrop)
+                // 景深：整块对话围绕按下那条的中心缩 3%，读作一起后退；
+                // 被按下的那一条在自己的 item 层里反向缩回，保持原尺寸。
+                // 没有模糊，多长的消息都不会被单条图层尺寸吃掉。
+                .graphicsLayer {
+                    val pressed = emphasisAnchor?.let { rowRects[it] }
+                    val press = emphasisAnchor?.let { pressOrigins[it] }
+                    val focus = if (pressed != null) {
+                        if (press != null) {
+                            Offset(
+                                pressed.left + pressed.width * press.x,
+                                pressed.top + pressed.height * press.y,
+                            )
+                        } else {
+                            pressed.center
+                        }
+                    } else null
+                    if (focus != null && paneSize.width > 0 && paneSize.height > 0) {
+                        transformOrigin = TransformOrigin(
+                            (focus.x - paneOrigin.x) / paneSize.width,
+                            (focus.y - paneOrigin.y) / paneSize.height,
+                        )
+                    }
+                    val e = if (pressed != null) menuEmphasis.value else 0f
+                    val s = 1f - .03f * e
+                    scaleX = s
+                    scaleY = s
+                },
             // Room for the chips + input row, which now float over the list.
             // The list must end above the floating input row, and that row moves
             // with the keyboard: a fixed 176 dp left the newest message hidden
@@ -1758,24 +1878,16 @@ private fun ChatPane(
             items(messages, key = { it.id }) { msg ->
                 val mine = msg.role == "user"
                 val running = msg.status == ChatStatus.Running
-                // Long-press emphasis: the pressed bubble lifts 4% and stays
-                // sharp while every other row blurs back and dims.
-                val lifted = msg.id == menuId
-                val lift by animateFloatAsState(
-                    if (lifted) 1f else 0f,
-                    spring(dampingRatio = .52f, stiffness = 300f),
-                )
-                val dimmed = menuId != null && !lifted
-                // 180 ms instead of a hard switch: the room dims and blurs rather
-                // than blinking, which was the "not smooth" complaint.
-                val dim by animateFloatAsState(
-                    if (dimmed) 1f else 0f,
-                    tween(durationMillis = 360, easing = FastOutSlowInEasing),
-                )
+                // 长按强调由 ChatPane 的 menuEmphasis 统一驱动：气泡延展、
+                // 其余消息压暗、整块列表后退三者读同一个值，所以开启和取消
+                // 都在同一帧起步。这里只留气泡自身的落地 pop。
                 // 同柔 pop: the whole answer lands in one piece and the bubble
                 // springs in with the same low-damping squash the send flight
                 // uses. Only the row that just landed plays it.
                 val pop = remember { Animatable(1f) }
+                // 长按不再走 bouncy：按下时气泡不能先缩一下。只有菜单真的
+                // 打开之后，menuEmphasis 才让它放大弹一下。
+                val bubbleInteraction = remember { MutableInteractionSource() }
                 LaunchedEffect(popId) {
                     if (msg.id == popId) {
                         pop.snapTo(0f)
@@ -1783,7 +1895,44 @@ private fun ChatPane(
                     }
                 }
                 Column(
-                    Modifier.fillMaxWidth(),
+                    Modifier
+                        .fillMaxWidth()
+                        .onGloballyPositioned { itemRects[msg.id] = it.boundsInRoot() }
+                        .graphicsLayer {
+                            val pressedId = emphasisAnchor
+                            if (pressedId == msg.id) {
+                                // 列表整体已经围绕按下气泡的中心缩了 3%；
+                                // 被按下的这一条按同一屏幕焦点反向缩回去，
+                                // 所以它保持原尺寸，只由气泡自己延展 8dp。
+                                val pressed = rowRects[msg.id]
+                                val item = itemRects[msg.id]
+                                val press = pressOrigins[msg.id]
+                                if (pressed != null && item != null &&
+                                    item.width > 0f && item.height > 0f
+                                ) {
+                                    val focus = if (press != null) {
+                                        Offset(
+                                            pressed.left + pressed.width * press.x,
+                                            pressed.top + pressed.height * press.y,
+                                        )
+                                    } else {
+                                        pressed.center
+                                    }
+                                    transformOrigin = TransformOrigin(
+                                        (focus.x - item.left) / item.width,
+                                        (focus.y - item.top) / item.height,
+                                    )
+                                }
+                                val s = 1f - .03f * menuEmphasis.value
+                                if (s > 0f) {
+                                    scaleX = 1f / s
+                                    scaleY = 1f / s
+                                }
+                            } else {
+                                // 其余消息只压暗，位置由列表父层统一后退。
+                                alpha = 1f - .55f * menuEmphasis.value
+                            }
+                        },
                     horizontalAlignment = if (mine) Alignment.End else Alignment.Start,
                 ) {
                     // References sit ABOVE the bubble: a long answer pushed the
@@ -1807,16 +1956,9 @@ private fun ChatPane(
                         val pt = pop.value
                         val psy = 1f - .10f * (1f - pt) * kotlin.math.sin(pt * Math.PI).toFloat()
                         val pgrow = .92f + .08f * pt
-                        val lscale = 1f + .04f * lift
-                        MoyuSurface(
+                        Box(
                             Modifier
                                 .fillMaxWidth(.88f)
-                                .graphicsLayer {
-                                    scaleY = psy * pgrow * lscale
-                                    scaleX = (2f - psy) * pgrow * lscale
-                                    alpha = (1f - .55f * dim) * pt.coerceIn(0f, 1f)
-                                }
-                                .blur(6.dp * dim)
                                 // No height animation at all. A spring here lags
                                 // the text, clips the newest line and reads as the
                                 // box twitching; the height now tracks the text
@@ -1824,19 +1966,73 @@ private fun ChatPane(
                                 // Measured on the BUBBLE, not on the row: the row is
                                 // full width, so its rect would end the flight at the
                                 // wrong place. Hidden while its own copy is airborne.
+                                // 量在气泡自己的 zoom 之前：rowRects 是布局矩形，
+                                // 菜单按 2% 的视觉放大算偏移时不能再量一次。
                                 .onGloballyPositioned { rowRects[msg.id] = it.boundsInRoot() }
+                                .graphicsLayer {
+                                    // 被按下的那条：短消息固定 1.02，原点在手指
+                                    // 按住的位置；长消息不缩放——长气泡的顶边
+                                    // 离手指太远，2% 会把第一行推出可视区，
+                                    // 取消时还要再弹一次。长文本只靠背景后退
+                                    // 和压暗表达长按。
+                                    val pressedId = emphasisAnchor
+                                    val e = if (msg.id == pressedId) menuEmphasis.value else 0f
+                                    val long = (rowRects[msg.id]?.height ?: 0f) >
+                                        paneSize.height * LongBubbleFraction
+                                    val zoom = if (e > 0f && !long) 1f + .02f * e else 1f
+                                    val press = pressOrigins[msg.id]
+                                    transformOrigin =
+                                        if (e > 0f && !long && press != null) {
+                                            TransformOrigin(press.x, press.y)
+                                        } else {
+                                            TransformOrigin(.5f, .5f)
+                                        }
+                                    scaleY = psy * pgrow * zoom
+                                    scaleX = (2f - psy) * pgrow * zoom
+                                    alpha = pt.coerceIn(0f, 1f)
+                                }
                                 .alpha(if (msg.id == flyId) 0f else 1f)
+                                // 只记录按下点，不消费事件；长按仍由下面的
+                                // combinedClickable 负责。比例坐标给 1.02 放大
+                                // 和背景后退当同一个焦点。
+                                .pointerInput(msg.id) {
+                                    awaitEachGesture {
+                                        val down = awaitFirstDown(requireUnconsumed = false)
+                                        if (size.width > 0 && size.height > 0) {
+                                            pressOrigins[msg.id] = Offset(
+                                                (down.position.x / size.width.toFloat())
+                                                    .coerceIn(0f, 1f),
+                                                (down.position.y / size.height.toFloat())
+                                                    .coerceIn(0f, 1f),
+                                            )
+                                        }
+                                        waitForUpOrCancellation()
+                                    }
+                                }
                                 // Deleting is offered per row; a running row is
                                 // exempt because its text is still arriving.
                                 .then(
                                     if (!running) {
-                                        Modifier.bouncy(onClick = {}, onLongPress = { onLongPressMessage(msg.id) })
+                                        Modifier.combinedClickable(
+                                            interactionSource = bubbleInteraction,
+                                            indication = null,
+                                            onClick = {},
+                                            onLongClick = { onLongPressMessage(msg.id) },
+                                        )
                                     } else Modifier
                                 ),
-                            radius = 20f,
-                            flat = true,
-                            tone = if (mine) dockTone(ui) else null,
                         ) {
+                            // The pop lives on this outer Box, not on MoyuSurface:
+                            // the paper fill, its rim and the text must share one
+                            // layer, otherwise the border samples a different
+                            // frame than the text and reads as "only the text
+                            // bounces".
+                            MoyuSurface(
+                                Modifier.fillMaxWidth(),
+                                radius = 20f,
+                                flat = true,
+                                tone = if (mine) dockTone(ui) else null,
+                            ) {
                             if (running && msg.text.isEmpty()) {
                                 Column {
                                     Row(
@@ -1954,6 +2150,7 @@ private fun ChatPane(
                                 }
                             }
                         }
+                        }
                     }
                     if (msg.status == ChatStatus.Interrupted && msg.error != null) {
                         Txt(
@@ -2025,8 +2222,20 @@ private fun ChatPane(
                 webOn = webOn,
                 onFile = { toolsOpen = false; onAddAttachment() },
                 onQuote = { toolsOpen = false; onAddQuote() },
-                onDeep = onToggleDeep,
-                onWeb = onToggleWeb,
+                onDeep = {
+                    onToggleDeep()
+                    ToastBus.show(
+                        if (deepThink) "深度思考已关闭" else "深度思考已开启",
+                        glyph = Glyph.Sparkles,
+                    )
+                },
+                onWeb = {
+                    onToggleWeb()
+                    ToastBus.show(
+                        if (webOn) "联网搜索已关闭" else "联网搜索已开启",
+                        glyph = Glyph.Search,
+                    )
+                },
                 onMemory = { toolsOpen = false; onOpenMemory() },
             )
         }
@@ -2168,7 +2377,7 @@ private fun ChatPane(
                             waitForUpOrCancellation()
                         }
                     },
-                shape = RoundedCornerShape(22.dp),
+                shape = SmoothCorner(22.dp),
                 shadowAlpha = .14f,
                 veil = .44f,
             ) {
@@ -2263,38 +2472,51 @@ private fun ChatPane(
         // entrance was animated. Two states now: [anchorId] keeps the Popup
         // alive, [menuOpen] runs the spring both ways, and the anchor is cleared
         // only after the exit has finished.
-        var anchorId by remember { mutableStateOf<String?>(null) }
-        var menuOpen by remember { mutableStateOf(false) }
-        var menuClosing by remember { mutableStateOf(false) }
-        val menuScope = rememberCoroutineScope()
-        fun closeMenu() {
-            // `menuOpen` can still be false when the writer dismisses during the
-            // 160 ms arm delay; the anchor must be cleared then too, or an
-            // invisible Popup keeps eating taps.
-            if (anchorId == null || menuClosing) return
-            menuClosing = true
-            menuOpen = false
-            menuScope.launch {
-                delay(190)
-                anchorId = null
-                menuClosing = false
-                onDismissMenu()
-            }
-        }
-        // The menu opens a beat after the long-press fires: otherwise the finger
-        // that triggered it lifts straight onto the first row and picks an
-        // action by accident.
+        //
+        // 新手势在旧收尾还没走完时到来：先取消旧的 380ms 拆锚点任务，
+        // 把旧强调用 140ms 收完，再按新消息走 arm delay；这样不会出现
+        // 旧 job 把新菜单拆掉，也不会让新气泡没有锚点。
         LaunchedEffect(menuId) {
-            if (menuId != null) {
-                anchorId = menuId
-                menuClosing = false
-                menuOpen = false
-                delay(160)
-                menuOpen = true
-            } else if (anchorId != null) {
-                // Dismissed from outside (scroll, selection, send).
-                closeMenu()
+            val id = menuId
+            if (id == null) {
+                if (anchorId != null) {
+                    closeMenu()
+                } else if (retractJob?.isActive != true &&
+                    (emphasisAnchor != null || menuEmphasis.value > 0f)
+                ) {
+                    // 新按下的会话在加速收尾途中被取消（页面切走/发送）：
+                    // 没有菜单锚点也要把强调收干净，否则背景会停在半路。
+                    // 正常关闭的 retractJob 还在跑时不要插手，否则会在
+                    // 380ms 处把剩下的弹簧再加速一次。
+                    menuEmphasis.animateTo(0f, tween(140))
+                    menuEmphasis.snapTo(0f)
+                    emphasisAnchor = null
+                }
+                return@LaunchedEffect
             }
+            retractJob?.cancel()
+            teardownJob?.cancel()
+            retractJob = null
+            teardownJob = null
+            menuClosing = false
+            menuOpen = false
+            anchorId = null
+            // 旧强调还在收：先快速收完（旧锚点保留，背景不会跳回 1），
+            // 再换成新消息。
+            if (menuEmphasis.value > .002f || menuEmphasis.isRunning) {
+                menuEmphasis.animateTo(0f, tween(140))
+            }
+            menuEmphasis.snapTo(0f)
+            emphasisAnchor = null
+            emphasisAnchor = id
+            anchorId = id
+            delay(160)
+            if (menuClosing || menuId != id) return@LaunchedEffect
+            menuOpen = true
+            menuEmphasis.animateTo(
+                1f,
+                spring(dampingRatio = .52f, stiffness = 300f, visibilityThreshold = .0002f),
+            )
         }
         // Scrolling the transcript drops the menu: the anchor would drift away
         // from the finger's target anyway.
@@ -2305,34 +2527,76 @@ private fun ChatPane(
         val menuRect = menuAnchor?.let { rowRects[it] }
         if (menuAnchor != null && menuRect != null && menuRect.height > 0f) {
             val gap = with(density) { 8.dp.toPx() }
-            val menuH = with(density) { 250.dp.toPx() }
-            val below = menuRect.bottom - paneOrigin.y + gap
-            val above = menuRect.top - paneOrigin.y - gap - menuH
+            val menuH = with(density) { 76.dp.toPx() }
+            val menuW = with(density) { 300.dp.toPx() }
+            // 短气泡以手指点为原点放大 1.02：菜单要贴着放大后的气泡边缘。
+            // 长气泡不缩放，用原布局矩形；否则菜单会跟着一个不存在的
+            // 放大再往外让 2%。
+            val longMenu = menuRect.height > paneSize.height * LongBubbleFraction
+            val grow = if (longMenu) 0f else .02f * menuEmphasis.value
+            val press = pressOrigins[menuAnchor]
+            val focus = if (press != null) {
+                Offset(
+                    menuRect.left + menuRect.width * press.x,
+                    menuRect.top + menuRect.height * press.y,
+                )
+            } else {
+                menuRect.center
+            }
+            val visualBottom = focus.y + (menuRect.bottom - focus.y) * (1f + grow)
+            val visualTop = focus.y + (menuRect.top - focus.y) * (1f + grow)
+            val visualCenterX = focus.x + (menuRect.center.x - focus.x) * (1f + grow)
+            val below = visualBottom - paneOrigin.y + gap
+            val above = visualTop - paneOrigin.y - gap - menuH
             val y = if (paneSize.height > 0 && below + menuH > paneSize.height) above.coerceAtLeast(0f) else below
-            val x = (menuRect.left - paneOrigin.x).coerceAtLeast(0f)
-            Popup(
-                offset = IntOffset(x.roundToInt(), y.roundToInt()),
-                onDismissRequest = { closeMenu() },
-            ) {
-                // The same spring both ways: grows out of the bubble and folds
-                // back into it, instead of vanishing on one frame.
+            // 横向菜单以气泡中心为准，再夹在面板内。
+            val x = (visualCenterX - paneOrigin.x - menuW / 2f)
+                .coerceIn(0f, (paneSize.width - menuW).coerceAtLeast(0f))
+            // 不用 Popup：Popup 是独立窗口，采不到列表的 layer backdrop，
+            // GlassField 会静默退回纸片。放进同一个 Box，1型玻璃才连得上。
+            //
+            // 遮罩只在菜单真正打开时吃掉外点；一旦开始收回就撤掉，
+            // 否则紧接着的长按会被这层遮罩吞掉，看起来像「没动画」。
+            if (menuOpen || !menuClosing) {
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .zIndex(19f)
+                        .pointerInput(Unit) { detectTapGestures { closeMenu() } }
+                )
+            }
+            CompositionLocalProvider(LocalGlassBackdrop provides listBackdrop) {
+                // 同柔：菜单从气泡里长出来、收回时缩回去，进出同一条曲线。
                 val menuIn = remember { Animatable(0f) }
                 LaunchedEffect(menuOpen) {
                     menuIn.animateTo(
                         if (menuOpen) 1f else 0f,
-                        spring(dampingRatio = if (menuOpen) .6f else .9f, stiffness = 420f),
+                        spring(dampingRatio = .52f, stiffness = 300f),
                     )
                 }
                 Box(
                     Modifier
-                        .widthIn(max = 260.dp)
+                        .offset { IntOffset(x.roundToInt(), y.roundToInt()) }
+                        .width(300.dp)
+                        .zIndex(20f)
                         .graphicsLayer {
-                            alpha = menuIn.value
-                            val s = .94f + .06f * menuIn.value
+                            alpha = menuIn.value.coerceIn(0f, 1f)
+                            val s = .90f + .10f * menuIn.value
                             scaleX = s
                             scaleY = s
                         },
-                ) { menuActions(menuAnchor) { closeMenu() } }
+                ) {
+                    menuActions(menuAnchor) { closeMenu() }
+                    // 收回中的菜单只剩视觉：盖一层透明拦截，别让
+                    // 300×76 的旧按钮在淡出时还能点。
+                    if (!menuOpen) {
+                        Box(
+                            Modifier
+                                .matchParentSize()
+                                .pointerInput(Unit) { detectTapGestures { } }
+                        )
+                    }
+                }
             }
         }
     }
@@ -3262,30 +3526,25 @@ private fun FactDialog(
  * and an icon per verb is decoration.
  */
 @Composable
-private fun MessageAction(
+private fun MessageChip(
+    glyph: Glyph,
     label: String,
-    last: Boolean = false,
+    muted: Boolean = false,
     onClick: () -> Unit,
 ) {
     val ui = LocalInk.current
     val p = ui.palette
-    Box(
+    Column(
         Modifier
-            .fillMaxWidth()
-            .clip(SmoothCorner(12.dp))
-            .bouncy(scale = .98f) { onClick() }
-            .padding(horizontal = 18.dp, vertical = 15.dp),
+            .width(56.dp)
+            .clip(SmoothCorner(14.dp))
+            .bouncy(scale = .92f) { onClick() }
+            .padding(vertical = 7.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Txt(label, size = 14.5f, color = p.ink)
-    }
-    if (!last) {
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .padding(start = 18.dp)
-                .height(1.dp)
-                .background(p.line.copy(alpha = .45f))
-        )
+        LineIcon(glyph, if (muted) p.muted else p.ink, 20.dp)
+        Spacer(Modifier.height(4.dp))
+        Txt(label, size = 10.5f, color = if (muted) p.muted else p.ink)
     }
 }
 

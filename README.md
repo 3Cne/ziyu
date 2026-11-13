@@ -6,10 +6,10 @@
 <p align="center">
   <img src="docs/screenshots/01-library.webp" width="29%">
   <img src="docs/screenshots/02-appearance.webp" width="29%">
-  <img src="docs/screenshots/06-write.webp" width="29%">
+  <img src="docs/screenshots/06-newbook.webp" width="29%">
 </p>
 <p align="center">
-  <img src="docs/screenshots/03-dark.webp" width="29%">
+  <img src="docs/screenshots/03-glass.webp" width="29%">
   <img src="docs/screenshots/04-backup.webp" width="29%">
   <img src="docs/screenshots/05-settings.webp" width="29%">
 </p>

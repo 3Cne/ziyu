@@ -1,12 +1,13 @@
 package com.moyu.writer
 
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.CornerBasedShape
+import androidx.compose.foundation.shape.CornerSize
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Outline
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Shape
-import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
@@ -29,7 +30,7 @@ import kotlin.math.tan
  * Ported from MartinRGB/Figma_Squircles_Approximation via the figma_squircle
  * Rust crate (docs.rs/figma_squircle/0.1.0); no dependency is added.
  */
-private const val SMOOTHING = .6f
+private const val SMOOTHING = .8f
 
 private class Corner(
     val radius: Float,
@@ -63,8 +64,12 @@ private fun cornerFor(radiusPx: Float, budget: Float): Corner {
     return Corner(r, p, a, b, c, d, arc, length)
 }
 
-fun SmoothCorner(radius: Dp): Shape =
-    SmoothCornerShape(radius, radius, radius, radius)
+fun SmoothCorner(radius: Dp): Shape = SmoothCornerShape(
+    CornerSize(radius),
+    CornerSize(radius),
+    CornerSize(radius),
+    CornerSize(radius),
+)
 
 fun SmoothCorner(percent: Int): Shape = CircleShape
 
@@ -73,29 +78,44 @@ fun SmoothCorner(
     topEnd: Dp = 0.dp,
     bottomEnd: Dp = 0.dp,
     bottomStart: Dp = 0.dp,
-): Shape = SmoothCornerShape(topStart, topEnd, bottomEnd, bottomStart)
+): Shape = SmoothCornerShape(
+    CornerSize(topStart),
+    CornerSize(topEnd),
+    CornerSize(bottomEnd),
+    CornerSize(bottomStart),
+)
 
-/** Drop-in [Shape] with continuous-curvature corners. */
+/** Drop-in [Shape] with continuous-curvature corners.
+ *
+ *  It extends [CornerBasedShape] on purpose: Backdrop's lens effect refuses
+ *  anything else (`Only CornerBasedShape is supported in lens effects`), so a
+ *  plain custom Shape could not be used by the glass surfaces. The lens still
+ *  reads the four corner radii as circular, while the clip below is the
+ *  squircle path — the only place they can disagree is the last 1–3dp of each
+ *  glass corner, which the edge band usually covers.
+ */
 class SmoothCornerShape(
-    private val topStart: Dp = 0.dp,
-    private val topEnd: Dp = 0.dp,
-    private val bottomEnd: Dp = 0.dp,
-    private val bottomStart: Dp = 0.dp,
-) : Shape {
+    topStart: CornerSize = CornerSize(0.dp),
+    topEnd: CornerSize = CornerSize(0.dp),
+    bottomEnd: CornerSize = CornerSize(0.dp),
+    bottomStart: CornerSize = CornerSize(0.dp),
+) : CornerBasedShape(topStart, topEnd, bottomEnd, bottomStart) {
     override fun createOutline(
         size: Size,
+        topStart: Float,
+        topEnd: Float,
+        bottomEnd: Float,
+        bottomStart: Float,
         layoutDirection: LayoutDirection,
-        density: Density,
     ): Outline {
         val w = size.width
         val h = size.height
         if (w <= 0f || h <= 0f) return Outline.Rectangle(Rect(0f, 0f, w, h))
         val budget = min(w, h) / 2f
-        fun px(dp: Dp) = with(density) { dp.toPx() }
-        val tl = cornerFor(px(topStart), budget)
-        val tr = cornerFor(px(topEnd), budget)
-        val br = cornerFor(px(bottomEnd), budget)
-        val bl = cornerFor(px(bottomStart), budget)
+        val tl = cornerFor(topStart, budget)
+        val tr = cornerFor(topEnd, budget)
+        val br = cornerFor(bottomEnd, budget)
+        val bl = cornerFor(bottomStart, budget)
         if (tl.empty && tr.empty && br.empty && bl.empty) {
             return Outline.Rectangle(Rect(0f, 0f, w, h))
         }
@@ -131,6 +151,13 @@ class SmoothCornerShape(
         path.close()
         return Outline.Generic(path)
     }
+
+    override fun copy(
+        topStart: CornerSize,
+        topEnd: CornerSize,
+        bottomEnd: CornerSize,
+        bottomStart: CornerSize,
+    ): CornerBasedShape = SmoothCornerShape(topStart, topEnd, bottomEnd, bottomStart)
 }
 
 private fun Path.arcSection(cx: Float, cy: Float, startX: Float, startY: Float, c: Corner) {

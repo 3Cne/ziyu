@@ -197,13 +197,16 @@ private val toastId = AtomicLong(0)
 object ToastBus {
     var message by mutableStateOf<String?>(null)
         private set
+    var glyph by mutableStateOf<Glyph?>(null)
+        private set
     var id by mutableStateOf(0L)
         private set
     private val handler = Handler(Looper.getMainLooper())
-    fun show(text: String, long: Boolean = false) {
+    fun show(text: String, long: Boolean = false, glyph: Glyph? = null) {
         val token = toastId.incrementAndGet()
         id = token
         message = text
+        this.glyph = glyph
         handler.postDelayed({
             if (id == token) message = null
         }, if (long) 3400L else 2100L)
@@ -682,7 +685,7 @@ fun GlassSurface(
 @Composable
 fun Modifier.bouncy(
     enabled: Boolean = true,
-    scale: Float = .97f,
+    scale: Float = .95f,
     hapticType: Int = 0,
     /** Release with a small overshoot so even a quick tap reads as a bounce. */
     overshoot: Boolean = false,
@@ -753,8 +756,12 @@ fun Modifier.bouncy(
             }
         }
         .graphicsLayer {
-            scaleX = anim.value + stretch
-            scaleY = anim.value - stretch * .6f
+            // 形变按像素封顶：小按钮按比例甩，整行/大卡片最多 3.5dp，
+            // 否则 300dp 的卡片按 6% 算会横甩 18dp。
+            val px = (stretch * size.width).coerceAtMost(3.5.dp.toPx())
+            val sx = if (size.width > 0f) px / size.width else 0f
+            scaleX = anim.value + sx
+            scaleY = anim.value - sx * .6f
             transformOrigin = androidx.compose.ui.graphics.TransformOrigin(originX, .5f)
         }
         .then(clicks)
@@ -824,7 +831,11 @@ fun GlassButton(
     val ui = LocalInk.current
     MoyuSurface(modifier
             .heightIn(min = 50.dp)
-            .clip(CircleShape),
+            .clip(CircleShape)
+            // Press lives on the SURFACE, not on the label row: the paper
+            // fill must squish together with the text, otherwise only the
+            // glyph moves and the button reads as "no water-drop".
+            .bouncy { onClick() },
         radius = 999f,
         shape = CircleShape,
         flat = true,
@@ -833,7 +844,6 @@ fun GlassButton(
         Row(
             Modifier
                 .fillMaxSize()
-                .bouncy { onClick() }
                 .padding(horizontal = 18.dp, vertical = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.Center,
@@ -858,13 +868,14 @@ fun GlassIconButton(
     val ui = LocalInk.current
     MoyuSurface(modifier
             .size(size)
-            .clip(CircleShape),
+            .clip(CircleShape)
+            .bouncy { onClick() },
         radius = size.value / 2f,
         shape = CircleShape,
         flat = true,
         tone = dockTone(ui),
     ) {
-        Box(Modifier.fillMaxSize().bouncy { onClick() }, contentAlignment = Alignment.Center) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             LineIcon(glyph, tint, 21.dp)
         }
     }
@@ -902,14 +913,14 @@ fun GlassChip(
             Txt(label, size = 11.5f, color = fg, weight = FontWeight.Medium)
         }
     } else {
-        MoyuSurface(Modifier.clip(CircleShape),
+        MoyuSurface(Modifier.clip(CircleShape).bouncy { onClick() },
             radius = 20f,
             shape = CircleShape,
             flat = true,
             tone = dockTone(ui),
         ) {
             Row(
-                Modifier.bouncy { onClick() }.padding(horizontal = 13.dp, vertical = 8.dp),
+                Modifier.padding(horizontal = 13.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 if (leading != null) Txt(leading, size = 10f, color = fg, modifier = Modifier.padding(end = 5.dp))
@@ -1947,41 +1958,97 @@ fun AmbientBackground(modifier: Modifier = Modifier, overlayOnly: Boolean = fals
 @Composable
 fun ToastLayer(modifier: Modifier = Modifier) {
     val ui = LocalInk.current
-    val message = ToastBus.message
-    // Keep the last text alive while AnimatedVisibility plays its exit. Reading
-    // ToastBus.message directly inside the content made the row disappear the
-    // instant the bus was cleared, so only an empty container faded out.
+    val p = ui.palette
+    val haptic = LocalHaptic.current
+    val motion = ui.settings.motion != "none"
+    // Keep the last text alive while the capsule retracts; the bus clears the
+    // message first, and rendering straight from it would blank the row.
     var display by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(message) {
-        if (message != null) display = message
+    var glyph by remember { mutableStateOf<Glyph?>(null) }
+    val t = remember { Animatable(0f) }
+    val ring = remember { Animatable(0f) }
+    LaunchedEffect(ToastBus.id) {
+        val incoming = ToastBus.message ?: return@LaunchedEffect
+        display = incoming
+        glyph = ToastBus.glyph
+        haptic(1)
+        ring.snapTo(0f)
+        if (!motion) {
+            t.snapTo(1f)
+            ring.snapTo(1f)
+            return@LaunchedEffect
+        }
+        t.animateTo(1f, spring(dampingRatio = .62f, stiffness = 360f))
+        ring.animateTo(1f, tween(560, easing = FastOutSlowInEasing))
     }
-    AnimatedVisibility(
-        visible = message != null,
-        enter = fadeIn(spring(MOYU_DAMPING, 500f)) + slideInVertically(initialOffsetY = { it / 2 }, animationSpec = spring(MOYU_DAMPING, 420f)),
-        exit = fadeOut(spring(MOYU_DAMPING, 520f)) + slideOutVertically(
-            targetOffsetY = { it / 3 },
-            animationSpec = spring(MOYU_DAMPING, 460f),
-        ),
-        modifier = modifier.imePadding(),
+    LaunchedEffect(ToastBus.message) {
+        if (ToastBus.message == null && display != null) {
+            if (motion) {
+                t.animateTo(0f, spring(dampingRatio = .9f, stiffness = 320f))
+            } else {
+                t.snapTo(0f)
+            }
+            display = null
+        }
+    }
+    val text = display ?: return
+    val icon = glyph ?: noticeGlyph(text)
+    Box(
+        modifier.graphicsLayer {
+            val v = t.value
+            translationY = (v - 1f) * 24.dp.toPx()
+            scaleX = .94f + .06f * v
+            scaleY = .82f + .18f * v
+            alpha = v.coerceIn(0f, 1f)
+            transformOrigin = androidx.compose.ui.graphics.TransformOrigin(.5f, 0f)
+        },
+        contentAlignment = Alignment.Center,
     ) {
-        val text = display
-        if (text != null) {
-            MoyuSurface(Modifier.padding(horizontal = 28.dp),
-                radius = 999f,
-                flat = true,
-                tone = dockTone(ui),
+        GlassField(
+            Modifier.widthIn(max = 340.dp),
+            shape = SmoothCorner(20.dp),
+            shadowAlpha = .18f,
+            kind = "notice",
+        ) {
+            Row(
+                Modifier.padding(start = 10.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Row(
-                    Modifier.padding(horizontal = 17.dp, vertical = 11.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Box(Modifier.size(5.dp).clip(CircleShape).background(ui.accent))
-                    Spacer(Modifier.width(9.dp))
-                    Txt(text, size = 11.5f, color = ui.palette.ink, maxLines = 2)
+                Box(Modifier.size(26.dp), contentAlignment = Alignment.Center) {
+                    Box(
+                        Modifier
+                            .size(24.dp)
+                            .graphicsLayer {
+                                val r = ring.value
+                                scaleX = .7f + .9f * r
+                                scaleY = .7f + .9f * r
+                                alpha = (1f - r).coerceIn(0f, 1f) * .45f
+                            }
+                            .border(1.2.dp, ui.accent, CircleShape)
+                    )
+                    Box(
+                        Modifier
+                            .size(24.dp)
+                            .clip(CircleShape)
+                            .background(accentTint(p, ui.accent)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        LineIcon(icon, ui.accent, 13.dp, 1.8f)
+                    }
                 }
+                Spacer(Modifier.width(9.dp))
+                Txt(text, size = 12.5f, color = p.ink, maxLines = 2)
             }
         }
     }
+}
+
+/** 小通知没有逐个传图标；按文案挑一个，失败用叉、成功用勾、其余用 sparkles。 */
+private fun noticeGlyph(text: String): Glyph = when {
+    text.contains("失败") || text.contains("错误") || text.contains("无法") ||
+        text.contains("不了") || text.contains("不在") || text.contains("没") -> Glyph.Close
+    text.startsWith("已") || text.contains("成功") || text.contains("完成") -> Glyph.Check
+    else -> Glyph.Sparkles
 }
 
 @Composable

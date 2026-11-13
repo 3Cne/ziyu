@@ -1060,7 +1060,7 @@ private fun BookFormRow(
         Modifier
             .fillMaxWidth()
             .clip(SmoothCorner(12.dp))
-            .clickable(onClick = onClick)
+            .bouncy(scale = .96f, onClick = onClick)
             .padding(horizontal = 8.dp, vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
