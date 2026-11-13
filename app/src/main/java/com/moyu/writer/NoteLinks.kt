@@ -1,5 +1,6 @@
 package com.moyu.writer
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.spring
@@ -12,6 +13,7 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
@@ -22,6 +24,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -35,7 +38,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicText
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -51,12 +55,15 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -68,6 +75,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 
 /** A chapter a note is bound to, resolved with its book for display and navigation. */
 data class NoteChapterRef(
@@ -95,7 +103,7 @@ fun AppData.noteChapterRefs(note: Note): List<NoteChapterRef> {
                     bookId = book.id,
                     bookTitle = book.title,
                     chapterId = chapter.id,
-                    chapterTitle = chapter.title.ifBlank { "第${index + 1}章" },
+                    chapterTitle = chapter.title.ifBlank { chapterFallbackTitle(index) },
                     chapterIndex = index,
                 )
                 break
@@ -260,7 +268,7 @@ private fun NotePickRow(note: Note, checked: Boolean, onToggle: (Boolean) -> Uni
         Box(
             Modifier
                 .size(30.dp)
-                .clip(RoundedCornerShape(10.dp))
+                .clip(SmoothCorner(10.dp))
                 .background(if (checked) ui.accent.copy(alpha = .12f) else p.faint),
             contentAlignment = Alignment.Center,
         ) {
@@ -310,7 +318,7 @@ private fun NoteTitleField(value: String, onChange: (String) -> Unit, onConfirm:
     Row(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
+            .clip(SmoothCorner(14.dp))
             .background(p.faint)
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -447,6 +455,11 @@ fun NoteSidePanel(
     // Which note is expanded inside the panel. Null shows the list, so tapping a
     // row browses here and only the 「打开笔记」 button leaves the page.
     var selectedNoteId by remember { mutableStateOf<String?>(null) }
+    // Inline editing: the panel keeps its own drafts so a half-typed note never
+    // touches the store until 保存 (or the writer leaves the note/panel).
+    var editingNoteId by remember { mutableStateOf<String?>(null) }
+    var panelTitle by remember { mutableStateOf("") }
+    var panelBody by remember { mutableStateOf("") }
     // Seeded once per screen: keying on the stored share would let every
     // persisted value snap the width back in the middle of a drag.
     var widthPx by remember {
@@ -466,8 +479,9 @@ fun NoteSidePanel(
     // that much narrower, instead of jumping once when a slide animation ends.
     val animatedWidthPx by animateFloatAsState(
         targetValue = if (visible) widthPx else 0f,
-        animationSpec = if (visible) spring(dampingRatio = .9f, stiffness = 380f)
+        animationSpec = if (visible) spring(dampingRatio = .78f, stiffness = 340f, visibilityThreshold = .5f)
         else tween(200, easing = FastOutSlowInEasing),
+        visibilityThreshold = .5f,
         label = "notePanelWidth",
     )
     // The body holds a scroll anchor while the width is still moving; release
@@ -486,13 +500,37 @@ fun NoteSidePanel(
         // suppression has to outlive the width tween itself.
         kotlinx.coroutines.delay(if (visible) 620 else 460)
     }
+    // Closing the panel while a draft is open keeps the writing instead of
+    // dropping it. Same rule as the 保存 button, without the extra tap.
+    LaunchedEffect(visible) {
+        if (visible) return@LaunchedEffect
+        val id = editingNoteId ?: return@LaunchedEffect
+        val note = links.notes.firstOrNull { it.id == id }
+        if (note != null) {
+            links.onSaveNote(id, panelTitle.trim(), panelBody, rebuildNoteTodos(panelBody, note.todos))
+        }
+        editingNoteId = null
+    }
     AnimatedVisibility(
         visible = visible || animatedWidthPx > 1f,
         modifier = modifier,
         enter = fadeIn(tween(120)),
         exit = fadeOut(tween(140)),
     ) {
-        Row(Modifier.fillMaxHeight()) {
+        // 内容和宽度一起长出来：开头 14dp 的位移把「从右边进来」说清楚，
+        // 收起时反向缩回去，内容不会在宽度还很小的时候先整块闪出来。
+        val reveal = (animatedWidthPx / widthPx.coerceAtLeast(1f)).coerceIn(0f, 1f)
+        Row(
+            Modifier
+                .fillMaxHeight()
+                .graphicsLayer {
+                    // 抽出 / 收回：从右侧滑入，左缘横向轻拉 3%；收起反向。
+                    alpha = reveal
+                    translationX = (1f - reveal) * 22.dp.toPx()
+                    scaleX = 1f + .03f * (1f - reveal)
+                    transformOrigin = androidx.compose.ui.graphics.TransformOrigin(1f, .5f)
+                },
+        ) {
             // Gap between text and panel. It owns the drag rail, so the rail is
             // never drawn on top of the panel's own edge.
             Box(
@@ -569,13 +607,28 @@ fun NoteSidePanel(
                     // Two states in one panel: the note list, and the text of
                     // the note the writer tapped. Opening the note editor from
                     // here is an explicit button, so browsing never navigates
-                    // the page away by accident.
-                    val selected = links.notes.firstOrNull { it.id == selectedNoteId }
+                    // the page away by accident. 列表和正文左右滑过去，返回反向。
+                    AnimatedContent(
+                        targetState = selectedNoteId,
+                        transitionSpec = {
+                            val opening = targetState != null
+                            val dir = if (opening) 1 else -1
+                            (
+                                slideInHorizontally(spring(MOYU_DAMPING, 420f)) { dir * it / 3 } +
+                                    fadeIn(tween(160))
+                            ).togetherWith(
+                                slideOutHorizontally(tween(150)) { -dir * it / 3 } +
+                                    fadeOut(tween(120)),
+                            )
+                        },
+                        modifier = Modifier.weight(1f),
+                        label = "notePanelPage",
+                    ) { openId ->
+                    val selected = links.notes.firstOrNull { it.id == openId }
                     if (selected == null) {
                         Column(
                             Modifier
-                                .fillMaxWidth()
-                                .weight(1f)
+                                .fillMaxSize()
                                 .verticalScroll(rememberScrollState())
                                 .padding(horizontal = 11.dp, vertical = 9.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -585,10 +638,34 @@ fun NoteSidePanel(
                             }
                         }
                     } else {
+                        val editing = editingNoteId == selected.id
+
+                        fun persistDraft() {
+                            val note = links.notes.firstOrNull { it.id == selected.id } ?: return
+                            val body = panelBody
+                            links.onSaveNote(note.id, panelTitle.trim(), body, rebuildNoteTodos(body, note.todos))
+                        }
+
+                        // Ticking a ☐/☑ in the read-only view saves that box
+                        // immediately: it is a one-tap action, not an edit.
+                        fun toggleTodo(todo: Todo) {
+                            val source = selected.content
+                            if (todo.start !in source.indices) return
+                            val mark = source[todo.start]
+                            if (mark != '☐' && mark != '☑') return
+                            val next = if (mark == '☑') '☐' else '☑'
+                            val body = source.substring(0, todo.start) + next + source.substring(todo.start + 1)
+                            links.onSaveNote(
+                                selected.id,
+                                selected.title,
+                                body,
+                                selected.todos.map { if (it.id == todo.id) it.copy(done = next == '☑') else it },
+                            )
+                        }
+
                         Column(
                             Modifier
-                                .fillMaxWidth()
-                                .weight(1f)
+                                .fillMaxSize()
                                 .padding(horizontal = 12.dp, vertical = 9.dp),
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -596,7 +673,11 @@ fun NoteSidePanel(
                                     Modifier
                                         .size(24.dp)
                                         .clip(CircleShape)
-                                        .bouncy(scale = .88f) { selectedNoteId = null },
+                                        .bouncy(scale = .88f) {
+                                            if (editing) persistDraft()
+                                            editingNoteId = null
+                                            selectedNoteId = null
+                                        },
                                     contentAlignment = Alignment.Center,
                                 ) {
                                     Box(Modifier.graphicsLayer { scaleX = -1f }) {
@@ -604,48 +685,127 @@ fun NoteSidePanel(
                                     }
                                 }
                                 Spacer(Modifier.width(4.dp))
-                                Txt(
-                                    selected.title.ifBlank { "无标题笔记" },
-                                    size = 11.5f,
-                                    color = p.ink,
-                                    weight = FontWeight.Medium,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.weight(1f),
-                                )
+                                if (editing) {
+                                    BasicTextField(
+                                        value = panelTitle,
+                                        onValueChange = { if (it.length <= 80) panelTitle = it },
+                                        singleLine = true,
+                                        textStyle = TextStyle(
+                                            color = p.ink,
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            fontFamily = fontFamilyFor(ui.settings.font),
+                                        ),
+                                        cursorBrush = SolidColor(ui.accent),
+                                        decorationBox = { inner ->
+                                            Box(Modifier.fillMaxWidth()) {
+                                                if (panelTitle.isBlank()) {
+                                                    Txt("无标题笔记", size = 11.5f, color = p.muted.copy(alpha = .55f))
+                                                }
+                                                inner()
+                                            }
+                                        },
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                } else {
+                                    Txt(
+                                        selected.title.ifBlank { "无标题笔记" },
+                                        size = 11.5f,
+                                        color = p.ink,
+                                        weight = FontWeight.Medium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                }
                             }
                             Spacer(Modifier.height(6.dp))
-                            Column(
-                                Modifier
-                                    .fillMaxWidth()
-                                    .weight(1f)
-                                    .verticalScroll(rememberScrollState()),
-                            ) {
-                                Txt(
-                                    selected.content.ifBlank { "这条笔记还是空的。" },
-                                    size = 11f,
-                                    color = p.ink,
-                                    lineHeight = 19f,
+                            if (editing) {
+                                BasicTextField(
+                                    value = panelBody,
+                                    onValueChange = { panelBody = it },
+                                    textStyle = TextStyle(
+                                        color = p.ink,
+                                        fontSize = 11.sp,
+                                        lineHeight = 19.sp,
+                                        fontFamily = fontFamilyFor(ui.settings.font),
+                                    ),
+                                    cursorBrush = SolidColor(ui.accent),
+                                    decorationBox = { inner ->
+                                        Box(Modifier.fillMaxSize()) {
+                                            if (panelBody.isBlank()) {
+                                                Txt("这条笔记还是空的。", size = 11f, color = p.muted.copy(alpha = .5f))
+                                            }
+                                            inner()
+                                        }
+                                    },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .weight(1f),
                                 )
+                            } else {
+                                var textLayout by remember(selected.id, selected.content) {
+                                    mutableStateOf<TextLayoutResult?>(null)
+                                }
+                                Box(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .weight(1f)
+                                        .verticalScroll(rememberScrollState()),
+                                ) {
+                                    if (selected.content.isBlank()) {
+                                        Txt("这条笔记还是空的。", size = 11f, color = p.muted.copy(alpha = .7f))
+                                    } else {
+                                        BasicText(
+                                            text = selected.content,
+                                            style = TextStyle(
+                                                color = p.ink,
+                                                fontSize = 11.sp,
+                                                lineHeight = 19.sp,
+                                                fontFamily = fontFamilyFor(ui.settings.font),
+                                            ),
+                                            onTextLayout = { textLayout = it },
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .pointerInput(selected.id, selected.content) {
+                                                    detectTapGestures { pos ->
+                                                        val layout = textLayout ?: return@detectTapGestures
+                                                        val offset = layout.getOffsetForPosition(pos)
+                                                        val todo = selected.todos.firstOrNull {
+                                                            offset >= it.start && offset < it.end
+                                                        }
+                                                        if (todo != null) toggleTodo(todo)
+                                                    }
+                                                },
+                                        )
+                                    }
+                                }
                             }
                             Spacer(Modifier.height(8.dp))
-                            Box(
-                                Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(ui.accent)
-                                    .bouncy(scale = .97f) { onOpenNote(selected) }
-                                    .padding(vertical = 9.dp),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                Txt(
-                                    "打开笔记",
-                                    size = 11f,
-                                    color = if (p.isDark) p.paper else Color.White,
-                                    weight = FontWeight.Medium,
-                                )
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                if (editing) {
+                                    PanelAction("取消", primary = false) {
+                                        editingNoteId = null
+                                    }
+                                    PanelAction("保存", primary = true) {
+                                        persistDraft()
+                                        editingNoteId = null
+                                    }
+                                } else {
+                                    PanelAction("编辑", primary = true) {
+                                        clearEditorFocus?.invoke()
+                                        panelTitle = selected.title
+                                        panelBody = selected.content
+                                        editingNoteId = selected.id
+                                    }
+                                    PanelAction("打开笔记", primary = false) {
+                                        editingNoteId = null
+                                        onOpenNote(selected)
+                                    }
+                                }
                             }
                         }
+                    }
                     }
                 }
             }
@@ -661,7 +821,7 @@ private fun NoteFloatItem(note: Note, onClick: () -> Unit) {
     Column(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
+            .clip(SmoothCorner(14.dp))
             .background(p.faint)
             .bouncy(scale = .985f) { onClick() }
             .padding(horizontal = 11.dp, vertical = 9.dp),
@@ -715,7 +875,7 @@ fun NoteChapterSheet(
     InlineModalSheet(onDismiss = onDismiss) { close ->
         DialogTitle(
             "关联章节",
-            "已关联 ${note.chapterIds.size} 个章节。点章节名直接去那一章写作。",
+            "已关联 ${note.chapterIds.size} 个章节。点章节名去那一章写作，右侧开关切换关联。",
             onClose = close,
         )
         Spacer(Modifier.height(12.dp))
@@ -735,13 +895,18 @@ fun NoteChapterSheet(
                         .padding(vertical = 11.dp, horizontal = 2.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    // Tapping the name opens that chapter, exactly as the
+                    // subtitle promises. It used to toggle the binding: the
+                    // writer checked two chapters, tapped a name to go write,
+                    // and silently unlinked the chapter they just added.
                     Column(
                         Modifier.weight(1f).bouncy(scale = .99f) {
-                            store.setNoteLinked(book.id, chapter.id, note.id, !bound)
+                            close()
+                            onOpenChapter(book.id, chapter.id)
                         },
                     ) {
                         Txt(
-                            chapter.title.ifBlank { "第${index + 1}章" },
+                            chapter.title.ifBlank { chapterFallbackTitle(index) },
                             size = 13.5f,
                             weight = if (bound) FontWeight.Medium else FontWeight.Normal,
                             color = if (bound) ui.accent else p.ink,
@@ -750,8 +915,8 @@ fun NoteChapterSheet(
                         )
                         Spacer(Modifier.height(2.dp))
                         Txt(
-                            if (chapter.noteIds.contains(note.id)) "已关联 · 点名字取消"
-                            else "第 ${index + 1} 章 · 点名字关联",
+                            if (chapter.noteIds.contains(note.id)) "已关联 · 点名字去写作"
+                            else "未关联 · 右侧开关添加",
                             size = 9f,
                             color = p.muted,
                         )
@@ -797,11 +962,67 @@ fun noteChapterBadge(store: AppStore, note: Note): String? {
         for (book in data.books) {
             val index = book.chapters.indexOfFirst { it.id == chapterId }
             if (index >= 0) {
-                val title = book.chapters[index].title.ifBlank { "第${index + 1}章" }
+                val title = book.chapters[index].title.ifBlank { chapterFallbackTitle(index) }
                 return if (note.chapterIds.size > 1) "$title 等 ${note.chapterIds.size} 章" else title
             }
         }
     }
     return null
+}
+
+/**
+ * Rebuild the todo spans after an edit inside the floating panel.
+ *
+ * The panel edits plain text, so offsets cannot be patched one by one: every
+ * line that starts with ☐/☑ becomes a todo again, and the old ids/reminders are
+ * kept by order so a ticked box keeps its reminder.
+ */
+fun rebuildNoteTodos(content: String, previous: List<Todo>): List<Todo> {
+    val out = mutableListOf<Todo>()
+    var lineStart = 0
+    var order = 0
+    while (lineStart <= content.length) {
+        val lineEnd = content.indexOf('\n', lineStart).let { if (it < 0) content.length else it }
+        val mark = content.getOrNull(lineStart)
+        if (mark == '☐' || mark == '☑') {
+            val old = previous.getOrNull(order)
+            out += Todo(
+                id = old?.id ?: uuid(),
+                text = content.substring((lineStart + 1).coerceAtMost(lineEnd), lineEnd).trim(),
+                done = mark == '☑',
+                remindAt = old?.remindAt,
+                notified = old?.notified ?: false,
+                start = lineStart,
+                end = lineEnd,
+            )
+            order++
+        }
+        if (lineEnd >= content.length) break
+        lineStart = lineEnd + 1
+    }
+    return out
+}
+
+/** One of the two bottom actions inside the floating note panel. */
+@Composable
+private fun RowScope.PanelAction(label: String, primary: Boolean, onClick: () -> Unit) {
+    val ui = LocalInk.current
+    val p = ui.palette
+    Box(
+        Modifier
+            .weight(1f)
+            .clip(SmoothCorner(12.dp))
+            .background(if (primary) ui.accent else p.faint)
+            .bouncy(scale = .97f) { onClick() }
+            .padding(vertical = 9.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Txt(
+            label,
+            size = 11f,
+            color = if (primary) (if (p.isDark) p.paper else Color.White) else p.ink,
+            weight = FontWeight.Medium,
+        )
+    }
 }
 

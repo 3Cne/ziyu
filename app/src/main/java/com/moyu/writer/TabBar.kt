@@ -2,6 +2,8 @@ package com.moyu.writer
 
 import android.os.Build
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
@@ -22,9 +24,10 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -32,14 +35,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlin.math.abs
 import com.kyant.backdrop.Backdrop
 import com.kyant.backdrop.drawBackdrop
 import com.kyant.backdrop.effects.blur
-import com.kyant.backdrop.effects.colorControls
 import com.kyant.backdrop.effects.lens
 import com.kyant.backdrop.effects.vibrancy
 import com.kyant.backdrop.shadow.InnerShadow
@@ -72,20 +77,33 @@ internal fun MoyuTabBar(
     current: Int,
     onSelect: (Int) -> Unit,
     backdrop: Backdrop? = null,
+    /** 显示哪些页（0 书架 / 1 笔记 / 2 数据 / 3 问书 / 4 设置），顺序固定；默认全显示。 */
+    visible: List<Int> = listOf(0, 1, 2, 3, 4),
 ) {
     val ui = LocalInk.current
     val p = ui.palette
     val s = ui.settings
-    val names = (s.tabNames + listOf("书架", "笔记", "数据", "设置")).take(4)
-    val icons = listOf(Glyph.Book, Glyph.Note, Glyph.Chart, Glyph.Gear)
+    val defaults = listOf("书架", "笔记", "数据", "问书", "设置")
+    // Five tabs since 3.10.0: 问书 sits between 数据 and 设置. The name list is
+    // read through `defaults` so a data file written by an older build (four
+    // names) still lines up after normalize() inserts the fifth slot.
+    val allNames = List(defaults.size) { i ->
+        s.tabNames.getOrNull(i)?.ifBlank { defaults[i] } ?: defaults[i]
+    }
+    val allIcons = listOf(Glyph.Book, Glyph.Note, Glyph.Chart, Glyph.Sparkles, Glyph.Gear)
+    // 关掉某些页后只画可见项，`current` 是可见序列里的位置。
+    val shown = visible.ifEmpty { listOf(4) }
+    val names = shown.map { allNames.getOrElse(it) { defaults[it] } }
+    val icons = shown.map { allIcons[it] }
     val height = if (s.showTabLabels) 64.dp else 56.dp
-    val capsule = RoundedCornerShape(50)
+    val capsule = SmoothCorner(50)
     val glassEnabled = backdrop != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
 
     var pressed by remember { mutableStateOf(false) }
     val press by animateFloatAsState(
         targetValue = if (pressed) 1f else 0f,
-        animationSpec = spring(stiffness = 720f, dampingRatio = .72f),
+        animationSpec = spring(stiffness = 720f, dampingRatio = MOYU_DAMPING, visibilityThreshold = PRESS_THRESHOLD),
+        visibilityThreshold = PRESS_THRESHOLD,
         label = "tabPress",
     )
 
@@ -122,7 +140,6 @@ internal fun MoyuTabBar(
                     shadowAlpha = s.tabShadow,
                     veil = s.tabBarOpacity,
                     edgeStrength = s.tabEdge,
-                    light = s.tabBarLight,
                 )
         ) {
             BoxWithConstraints(
@@ -130,18 +147,65 @@ internal fun MoyuTabBar(
                     .fillMaxSize()
                     .padding(5.dp)
             ) {
-                val itemWidth = maxWidth / 4
-                val x by animateDpAsState(
-                    targetValue = itemWidth * current,
-                    animationSpec = motionSpecDp(s.motion),
-                    label = "tabLens",
-                )
+                val itemWidth = maxWidth / names.size
+                // Lens travel is an Animatable instead of animateDpAsState so the
+                // stretch can be scheduled around the trip: grow along the
+                // direction of travel, then settle back to its own width.
+                val lensPos = remember { Animatable(current.toFloat()) }
+                var lensStretch by remember { mutableFloatStateOf(0f) }
+                // 0 = 静止，1 = 刚撞到底：横向压扁、纵向鼓起，随即弹回。
+                var lensImpact by remember { mutableFloatStateOf(0f) }
+                var lensRightward by remember { mutableStateOf(true) }
+                var lensLast by remember { mutableFloatStateOf(current.toFloat()) }
+                LaunchedEffect(current) {
+                    lensRightward = current >= lensPos.value
+                    lensLast = lensPos.value
+                    lensPos.animateTo(
+                        targetValue = current.toFloat(),
+                        animationSpec = spring(
+                            // 0.78：冲过一次就停，不再左右回荡（水滴落地一下就稳）。
+                            dampingRatio = if (s.motion == "none") 1f else .78f,
+                            stiffness = if (s.motion == "none") 2000f else 250f,
+                            visibilityThreshold = 1e-3f,
+                        ),
+                    ) {
+                        // 拉长只看「这一帧走了多远」，但做一次平滑：直接按
+                        // 帧位移换算会让第一帧就拉到最长，读起来是「先变形
+                        // 再移动」。平滑后是快则长、慢则短、停下即原长。
+                        val step = abs(value - lensLast)
+                        lensLast = value
+                        val target = (step * 36f).coerceIn(0f, .38f)
+                        // 跟随更慢（0.32）：形变要「慢慢鼓起来」，
+                        // 每帧贴着速度变会变成高频抖动。
+                        lensStretch += (target - lensStretch) * .32f
+                        // 压扁只看「冲过了目标多少」：没冲过就是 0，
+                        // 冲过头才被挡住，这是撞击本身，不是额外动画。
+                        lensImpact = (abs(value - current) * 5f).coerceIn(0f, .55f)
+                    }
+                    lensStretch = 0f
+                    lensImpact = 0f
+                    lensLast = current.toFloat()
+                }
 
                 // The selection is a liquid lens, not a painted pill: it
                 // refracts the page and disperses colour at its rim.
                 Box(
                     Modifier
-                        .offset(x = x)
+                        // Float translation: a Dp offset is rounded by layout and
+                        // the lens stepped 1px at the end of every tab switch.
+                        // The stretch grows toward the direction of travel
+                        // (origin on the trailing edge), so the lens is pulled
+                        // forward instead of ballooning on both sides.
+                        .graphicsLayer {
+                            translationX = lensPos.value * itemWidth.toPx()
+                            // 形变原点放在运动方向的**前端**：向右时右缘钉住、
+                            // 左缘被拖着往后拉，才是「前端先到、后端拖尾」。
+                            // 之前反过来（后端固定），所以像前端自己冲出去。
+                            transformOrigin = TransformOrigin(if (lensRightward) 1f else 0f, .5f)
+                            // 速度拉伸 + 过冲挤压，两者都来自位移本身。
+                            scaleX = (1f + lensStretch) * (1f - lensImpact * .24f)
+                            scaleY = (1f - lensStretch * .32f) * (1f + lensImpact * .28f)
+                        }
                         .width(itemWidth)
                         .fillMaxHeight()
                         .padding(horizontal = 2.dp)
@@ -151,25 +215,15 @@ internal fun MoyuTabBar(
                             if (p.isDark) Color.White.copy(alpha = .06f) else p.ink.copy(alpha = .05f),
                             capsule,
                         )
-                        // No layer scale on the lens: scaling a surface that
-                        // samples the page dragged its blurred sample past the
-                        // rim and left a halo around the pill. Press feedback
-                        // lives in the tint and the icon scale instead.
-                        .graphicsLayer {
-                            scaleX = 1f
-                            scaleY = 1f
-                        }
+                        // The lens is scaled in X only while travelling (see the
+                        // graphicsLayer above); at rest scaleX is exactly 1, so
+                        // the blurred sample never drifts past the rim.
                         .then(
                             if (glassEnabled) {
                                 Modifier.drawBackdrop(
                                     backdrop = backdrop!!,
                                     shape = { capsule },
                                     effects = {
-                                        if (s.tabLensLight > 0f) {
-                                            colorControls(
-                                                brightness = 1f + s.tabLensLight.coerceIn(0f, 1f) * .7f,
-                                            )
-                                        }
                                         vibrancy()
                                         if (s.lensBlur > 0f) blur(s.lensBlur.dp.toPx())
                                         if (s.lensRefraction > 0f) {
@@ -218,7 +272,8 @@ internal fun MoyuTabBar(
                         )
                         val iconScale by animateFloatAsState(
                             targetValue = if (active) 1f + .06f * press else 1f,
-                            animationSpec = spring(stiffness = 700f, dampingRatio = .7f),
+                            animationSpec = spring(stiffness = 700f, dampingRatio = MOYU_DAMPING, visibilityThreshold = PRESS_THRESHOLD),
+                            visibilityThreshold = PRESS_THRESHOLD,
                             label = "tabIconScale",
                         )
                         Column(
@@ -249,7 +304,7 @@ internal fun MoyuTabBar(
                             if (s.showTabLabels) {
                                 Spacer(Modifier.height(3.dp))
                                 Txt(
-                                    name.ifBlank { listOf("书架", "笔记", "数据", "设置")[index] }.take(4),
+                                    name.take(4),
                                     size = 8.5f,
                                     color = fg,
                                     weight = if (active) FontWeight.Medium else FontWeight.Normal,

@@ -22,7 +22,7 @@ import kotlin.math.max
 
 data class Chapter(
     val id: String = uuid(),
-    val title: String = "第一章",
+    val title: String = chapterFallbackTitle(0),
     val content: String = "",
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis(),
@@ -123,19 +123,9 @@ data class AppSettings(
     val lensBlur: Float = 0f,
     val lensDispersion: Boolean = true,
     val lensShadow: Float = .28f,
-    // Dock glass: its own six knobs, independent from the tab bar.
-    val dockBlur: Float = 8f,
-    val dockRefraction: Float = 30f,
-    val dockDispersion: Boolean = true,
-    val dockShadow: Float = .30f,
-    val dockBarOpacity: Float = 0f,
-    val dockEdge: Float = 1f,
-    /** Projected-content brightness for the three glass surfaces: boosts the
-     *  sampled layer itself (vibrancy), never a white overlay. 0 = today. */
-    val tabBarLight: Float = 0f,
-    val tabLensLight: Float = 0f,
-    val dockLight: Float = 0f,
     val tabNames: List<String> = listOf("书架", "笔记", "数据", "设置"),
+    /** 被关掉的底部页面 key：library / notes / stats / ai。设置页永远显示。 */
+    val hiddenTabs: List<String> = emptyList(),
     val dailyGoal: Int = 2000,
     val indent: Boolean = true,
     val sectionStyle: String = "asterisk",
@@ -160,6 +150,48 @@ data class AppSettings(
     val noteFloatW: Float = .34f,
     /** Floating note card maximum height as a share of the writing area. */
     val noteFloatH: Float = .52f,
+    /**
+     * AI brain. Off until the writer fills a service URL and a key; the key is
+     * never stored here (an exported backup is a plain JSON file in the Download
+     * folder, so a key in it would leak with the first share). It lives in an
+     * AndroidKeyStore-wrapped file instead — see AiKey in Ai.kt.
+     */
+    val aiEnabled: Boolean = false,
+    val aiBaseUrl: String = AiDefaults.BASE_URL,
+    val aiModel: String = AiDefaults.MODEL,
+    /** How many retrieved fragments ride along with a question. */
+    val aiTopK: Int = 5,
+    /** Budget for the question's context, in characters of body text. */
+    val aiContextChars: Int = 3000,
+    val aiTemperature: Float = .7f,
+    /** Doubao-style: pull 0–3 facts out of each exchange, editable later. */
+    val aiAutoMemory: Boolean = true,
+    /** How much pinned text (whole book / chapters / notes) may be sent. */
+    val aiQuoteMaxChars: Int = 20_000,
+    val aiMemoryLimit: Int = 200,
+    /** Web search / fetch. Off by default: every call is billed per request. */
+    val aiWeb: Boolean = false,
+    /** Searches allowed inside one answer (1–5). */
+    val aiWebMax: Int = 3,
+    /** Show the per-step tool strip under an answer. */
+    val aiToolTrace: Boolean = true,
+    /** 问书 · 深度思考：先拆问题、逐条核对原文再答，回答可以更长。 */
+    val aiDeepThink: Boolean = false,
+    /** Glass on the AI input row: veil, blur, edge band, refraction, shadow. */
+    val fieldGlassOpacity: Float = .18f,
+    val fieldGlassBlur: Float = 10f,
+    val fieldGlassEdge: Float = 1f,
+    val fieldGlassRefraction: Float = 16f,
+    val fieldGlassShadow: Float = .14f,
+    val fieldGlassDispersion: Boolean = true,
+    /** Glass on the AI buttons (link / send), tuned on their own because they
+     *  are small round pills over moving text. */
+    val btnGlassOpacity: Float = .18f,
+    val btnGlassBlur: Float = 12f,
+    val btnGlassEdge: Float = 1f,
+    val btnGlassRefraction: Float = 18f,
+    val btnGlassShadow: Float = .16f,
+    val btnGlassDispersion: Boolean = true,
 )
 
 data class AppData(
@@ -659,27 +691,41 @@ class AppStore(context: Context) {
                 tabLensOpacity = settings.tabLensOpacity.coerceIn(0f, 1f),
             )
         }
-        if (settings.dockEdge !in 0f..1f || settings.dockBarOpacity !in 0f..1f) {
-            settings = settings.copy(
-                dockEdge = settings.dockEdge.coerceIn(0f, 1f),
-                dockBarOpacity = settings.dockBarOpacity.coerceIn(0f, 1f),
-            )
-        }
-        if (settings.tabBarLight !in 0f..1f || settings.tabLensLight !in 0f..1f ||
-            settings.dockLight !in 0f..1f
-        ) {
-            settings = settings.copy(
-                tabBarLight = settings.tabBarLight.coerceIn(0f, 1f),
-                tabLensLight = settings.tabLensLight.coerceIn(0f, 1f),
-                dockLight = settings.dockLight.coerceIn(0f, 1f),
-            )
-        }
         if (settings.noteFloatW >= .59f) {
             // Widths saved while the notes were a floating card, and by the
             // first side-panel draft, took too much of the page. The panel now
             // opens at one third; the writer can still drag it to 0.60.
             settings = settings.copy(noteFloatW = .34f)
         }
+
+        // Five tabs now: 问书 sits between 数据 and 设置. Data saved by earlier
+        // builds carries four names in the old order, so the fifth slot is
+        // inserted rather than appended — appending would put 设置 before it.
+        val tabDefaults = listOf("书架", "笔记", "数据", "问书", "设置")
+        if (settings.tabNames.size != 5) {
+            val four = (settings.tabNames.take(4) + tabDefaults).distinct().take(4)
+            settings = settings.copy(tabNames = four.take(3) + tabDefaults[3] + four.drop(3))
+        }
+        settings = settings.copy(
+            aiBaseUrl = settings.aiBaseUrl.trim().ifBlank { "https://api.deepseek.com" },
+            aiModel = settings.aiModel.trim().ifBlank { "deepseek-chat" },
+            aiTopK = settings.aiTopK.coerceIn(1, 8),
+            aiContextChars = settings.aiContextChars.coerceIn(400, 8000),
+            aiTemperature = settings.aiTemperature.coerceIn(0f, 1.4f),
+            aiQuoteMaxChars = settings.aiQuoteMaxChars.coerceIn(2_000, 60_000),
+            aiMemoryLimit = settings.aiMemoryLimit.coerceIn(20, 500),
+            aiWebMax = settings.aiWebMax.coerceIn(1, 5),
+            fieldGlassOpacity = settings.fieldGlassOpacity.coerceIn(0f, 1f),
+            fieldGlassBlur = settings.fieldGlassBlur.coerceIn(0f, 40f),
+            fieldGlassEdge = settings.fieldGlassEdge.coerceIn(0f, 2f),
+            fieldGlassRefraction = settings.fieldGlassRefraction.coerceIn(0f, 40f),
+            fieldGlassShadow = settings.fieldGlassShadow.coerceIn(0f, 1f),
+            btnGlassOpacity = settings.btnGlassOpacity.coerceIn(0f, 1f),
+            btnGlassBlur = settings.btnGlassBlur.coerceIn(0f, 40f),
+            btnGlassEdge = settings.btnGlassEdge.coerceIn(0f, 2f),
+            btnGlassRefraction = settings.btnGlassRefraction.coerceIn(0f, 40f),
+            btnGlassShadow = settings.btnGlassShadow.coerceIn(0f, 1f),
+        )
 
         return AppData(
             books = fixedBooks,
@@ -870,12 +916,8 @@ private fun encodeSettings(s: AppSettings): JSONObject = JSONObject().apply {
     put("lensRefraction", s.lensRefraction.toDouble()); put("lensDispersion", s.lensDispersion)
     put("lensBlur", s.lensBlur.toDouble())
     put("lensShadow", s.lensShadow.toDouble())
-    put("dockBlur", s.dockBlur.toDouble()); put("dockRefraction", s.dockRefraction.toDouble())
-    put("dockDispersion", s.dockDispersion); put("dockShadow", s.dockShadow.toDouble())
-    put("dockBarOpacity", s.dockBarOpacity.toDouble()); put("dockEdge", s.dockEdge.toDouble())
-    put("tabBarLight", s.tabBarLight.toDouble()); put("tabLensLight", s.tabLensLight.toDouble())
-    put("dockLight", s.dockLight.toDouble())
     put("tabNames", JSONArray(s.tabNames))
+    put("hiddenTabs", JSONArray(s.hiddenTabs))
     put("dailyGoal", s.dailyGoal); put("indent", s.indent)
     put("sectionStyle", s.sectionStyle); put("sectionSymbol", s.sectionSymbol)
     put("autoSave", s.autoSave); put("showWordCount", s.showWordCount)
@@ -887,6 +929,29 @@ private fun encodeSettings(s: AppSettings): JSONObject = JSONObject().apply {
     put("noteFloat", s.noteFloat)
     put("noteFloatX", s.noteFloatX.toDouble()); put("noteFloatY", s.noteFloatY.toDouble())
     put("noteFloatW", s.noteFloatW.toDouble()); put("noteFloatH", s.noteFloatH.toDouble())
+    put("aiEnabled", s.aiEnabled)
+    put("aiBaseUrl", s.aiBaseUrl); put("aiModel", s.aiModel)
+    put("aiTopK", s.aiTopK); put("aiContextChars", s.aiContextChars)
+    put("aiTemperature", s.aiTemperature.toDouble())
+    put("aiAutoMemory", s.aiAutoMemory)
+    put("aiQuoteMaxChars", s.aiQuoteMaxChars)
+    put("aiMemoryLimit", s.aiMemoryLimit)
+    put("aiWeb", s.aiWeb)
+    put("aiWebMax", s.aiWebMax)
+    put("aiToolTrace", s.aiToolTrace)
+    put("aiDeepThink", s.aiDeepThink)
+    put("fieldGlassOpacity", s.fieldGlassOpacity.toDouble())
+    put("fieldGlassBlur", s.fieldGlassBlur.toDouble())
+    put("fieldGlassEdge", s.fieldGlassEdge.toDouble())
+    put("fieldGlassRefraction", s.fieldGlassRefraction.toDouble())
+    put("fieldGlassShadow", s.fieldGlassShadow.toDouble())
+    put("fieldGlassDispersion", s.fieldGlassDispersion)
+    put("btnGlassOpacity", s.btnGlassOpacity.toDouble())
+    put("btnGlassBlur", s.btnGlassBlur.toDouble())
+    put("btnGlassEdge", s.btnGlassEdge.toDouble())
+    put("btnGlassRefraction", s.btnGlassRefraction.toDouble())
+    put("btnGlassShadow", s.btnGlassShadow.toDouble())
+    put("btnGlassDispersion", s.btnGlassDispersion)
 }
 
 private fun decodeStringList(o: JSONObject?, key: String): List<String> {
@@ -929,17 +994,12 @@ private fun decodeSettings(o: JSONObject?) = AppSettings(
     lensBlur = (o?.optDouble("lensBlur", 0.0) ?: 0.0).toFloat(),
     lensDispersion = o?.optBoolean("lensDispersion", true) ?: true,
     lensShadow = (o?.optDouble("lensShadow", .28) ?: .28).toFloat(),
-    dockBlur = (o?.optDouble("dockBlur", 8.0) ?: 8.0).toFloat(),
-    dockRefraction = (o?.optDouble("dockRefraction", 30.0) ?: 30.0).toFloat(),
-    dockDispersion = o?.optBoolean("dockDispersion", true) ?: true,
-    dockShadow = (o?.optDouble("dockShadow", .30) ?: .30).toFloat(),
-    dockBarOpacity = (o?.optDouble("dockBarOpacity", 0.0) ?: 0.0).toFloat().coerceIn(0f, 1f),
-    dockEdge = (o?.optDouble("dockEdge", 1.0) ?: 1.0).toFloat().coerceIn(0f, 1f),
-    tabBarLight = (o?.optDouble("tabBarLight", 0.0) ?: 0.0).toFloat().coerceIn(0f, 1f),
-    tabLensLight = (o?.optDouble("tabLensLight", 0.0) ?: 0.0).toFloat().coerceIn(0f, 1f),
-    dockLight = (o?.optDouble("dockLight", 0.0) ?: 0.0).toFloat().coerceIn(0f, 1f),
     tabNames = o?.optJSONArray("tabNames")?.let { a -> (0 until a.length()).map { a.optString(it) } }
         ?: listOf("书架", "笔记", "数据", "设置"),
+    hiddenTabs = o?.optJSONArray("hiddenTabs")
+        ?.let { a -> (0 until a.length()).map { a.optString(it) } }
+        ?.filter { it in setOf("library", "notes", "stats", "ai") }
+        ?: emptyList(),
     dailyGoal = o?.optInt("dailyGoal", 2000) ?: 2000,
     indent = o?.optBoolean("indent", true) ?: true,
     sectionStyle = o?.optString("sectionStyle", "asterisk") ?: "asterisk",
@@ -963,6 +1023,31 @@ private fun decodeSettings(o: JSONObject?) = AppSettings(
     noteFloatY = (o?.optDouble("noteFloatY", 0.0) ?: 0.0).toFloat().coerceIn(0f, 1f),
     noteFloatW = (o?.optDouble("noteFloatW", .34) ?: .34).toFloat().coerceIn(.34f, .60f),
     noteFloatH = (o?.optDouble("noteFloatH", .52) ?: .52).toFloat().coerceIn(.24f, .86f),
+    aiEnabled = o?.optBoolean("aiEnabled", false) ?: false,
+    aiBaseUrl = o?.optString("aiBaseUrl", AiDefaults.BASE_URL) ?: AiDefaults.BASE_URL,
+    aiModel = o?.optString("aiModel", AiDefaults.MODEL) ?: AiDefaults.MODEL,
+    aiTopK = (o?.optInt("aiTopK", 5) ?: 5).coerceIn(1, 8),
+    aiContextChars = (o?.optInt("aiContextChars", 3000) ?: 3000).coerceIn(400, 8000),
+    aiTemperature = (o?.optDouble("aiTemperature", .7) ?: .7).toFloat().coerceIn(0f, 1.4f),
+    aiAutoMemory = o?.optBoolean("aiAutoMemory", true) ?: true,
+    aiQuoteMaxChars = (o?.optInt("aiQuoteMaxChars", 20_000) ?: 20_000).coerceIn(2_000, 60_000),
+    aiMemoryLimit = (o?.optInt("aiMemoryLimit", 200) ?: 200).coerceIn(20, 500),
+    aiWeb = o?.optBoolean("aiWeb", false) ?: false,
+    aiWebMax = (o?.optInt("aiWebMax", 3) ?: 3).coerceIn(1, 5),
+    aiToolTrace = o?.optBoolean("aiToolTrace", true) ?: true,
+    aiDeepThink = o?.optBoolean("aiDeepThink", false) ?: false,
+    fieldGlassOpacity = (o?.optDouble("fieldGlassOpacity", .18) ?: .18).toFloat().coerceIn(0f, 1f),
+    fieldGlassBlur = (o?.optDouble("fieldGlassBlur", 10.0) ?: 10.0).toFloat().coerceIn(0f, 40f),
+    fieldGlassEdge = (o?.optDouble("fieldGlassEdge", 1.0) ?: 1.0).toFloat().coerceIn(0f, 2f),
+    fieldGlassRefraction = (o?.optDouble("fieldGlassRefraction", 16.0) ?: 16.0).toFloat().coerceIn(0f, 40f),
+    fieldGlassShadow = (o?.optDouble("fieldGlassShadow", .14) ?: .14).toFloat().coerceIn(0f, 1f),
+    fieldGlassDispersion = o?.optBoolean("fieldGlassDispersion", true) ?: true,
+    btnGlassOpacity = (o?.optDouble("btnGlassOpacity", .18) ?: .18).toFloat().coerceIn(0f, 1f),
+    btnGlassBlur = (o?.optDouble("btnGlassBlur", 12.0) ?: 12.0).toFloat().coerceIn(0f, 40f),
+    btnGlassEdge = (o?.optDouble("btnGlassEdge", 1.0) ?: 1.0).toFloat().coerceIn(0f, 2f),
+    btnGlassRefraction = (o?.optDouble("btnGlassRefraction", 18.0) ?: 18.0).toFloat().coerceIn(0f, 40f),
+    btnGlassShadow = (o?.optDouble("btnGlassShadow", .16) ?: .16).toFloat().coerceIn(0f, 1f),
+    btnGlassDispersion = o?.optBoolean("btnGlassDispersion", true) ?: true,
 )
 
 private fun decodeData(text: String): AppData {
@@ -978,7 +1063,7 @@ private fun decodeData(text: String): AppData {
             val c = ca.optJSONObject(j) ?: continue
             chapters += Chapter(
                 id = c.optString("id", uuid()),
-                title = c.optString("title", "第${j + 1}章"),
+                title = c.optString("title", chapterFallbackTitle(j)),
                 content = c.optString("content", ""),
                 createdAt = c.optLong("createdAt", now()),
                 updatedAt = c.optLong("updatedAt", now()),

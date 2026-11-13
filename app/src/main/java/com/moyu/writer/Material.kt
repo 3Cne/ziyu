@@ -2,21 +2,22 @@ package com.moyu.writer
 
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.addOutline
+import androidx.compose.ui.graphics.asAndroidPath
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
-import kotlin.math.min
 
 /**
  * The one fixed glass material.
@@ -68,7 +69,7 @@ fun MoyuSurface(
     val ui = LocalInk.current
     val lite = LocalGlassLite.current
     val resolvedRadius = radius ?: GlassStyle.corner
-    val resolvedShape = shape ?: RoundedCornerShape(resolvedRadius.dp)
+    val resolvedShape = shape ?: SmoothCorner(resolvedRadius.dp)
     val density = LocalDensity.current
     val shadowBlurDp = GlassStyle.shadowBlur
     val shadowYDp = GlassStyle.shadowY
@@ -82,15 +83,16 @@ fun MoyuSurface(
             // The readable paper floor belongs in the same draw chain as the
             // glass. A child background would paint above the RenderEffect and
             // let page text bleed through.
-            drawRoundRect(
-                color = tone.copy(alpha = alpha),
-                cornerRadius = androidx.compose.ui.geometry.CornerRadius(
-                    resolvedRadius.dp.toPx(),
-                    resolvedRadius.dp.toPx(),
-                ),
-            )
+            //
+            // Draw the *actual* shape, never a radius-rounded rectangle: a
+            // sheet with only its top corners rounded used to get a fill with
+            // four round corners, so the bottom edge stayed round even though
+            // the content was clipped square (the 3.9.36 menu bug).
+            val outlinePath = Path().apply {
+                addOutline(resolvedShape.createOutline(size, layoutDirection, this@drawBehind))
+            }
+            drawPath(outlinePath, tone.copy(alpha = alpha))
             if (withShadow && GlassStyle.shadow > 0f) {
-                val r = resolvedRadius.dp.toPx().coerceAtMost(min(size.width, size.height) / 2f)
                 val elevation = with(density) { shadowBlurDp.dp.toPx() }.coerceAtLeast(1f)
                 val dy = with(density) { shadowYDp.dp.toPx() }
                 val shadowColor = ui.palette.ink
@@ -103,15 +105,7 @@ fun MoyuSurface(
                         color = android.graphics.Color.TRANSPARENT
                         setShadowLayer(elevation, 0f, dy, shadowColor)
                     }
-                    canvas.nativeCanvas.drawRoundRect(
-                        0f,
-                        dy,
-                        size.width,
-                        size.height + dy,
-                        r,
-                        r,
-                        paint,
-                    )
+                    canvas.nativeCanvas.drawPath(outlinePath.asAndroidPath(), paint)
                 }
             }
         }
@@ -141,7 +135,10 @@ fun MoyuSurface(
         haze = if (lite) null else LocalHazeHandle.current,
         useHaze = !lite,
         specular = GlassStyle.specular > 0f,
-        shape = shape,
+        // Pass the resolved shape, not the raw nullable parameter: a glass
+        // surface created with only `radius` used to fall back to a circular
+        // round-rect while every flat card around it had continuous corners.
+        shape = resolvedShape,
         fillOverride = GlassStyle.fill,
         blurOverride = GlassStyle.blur,
         grainOverride = GlassStyle.grain,

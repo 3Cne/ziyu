@@ -35,7 +35,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -85,9 +84,9 @@ private fun safeFileName(name: String): String {
 }
 
 fun chapterDisplayTitle(book: Book, index: Int): String {
-    val raw = book.chapters.getOrNull(index)?.title?.trim().orEmpty().ifBlank { "第${index + 1}章" }
+    val raw = book.chapters.getOrNull(index)?.title?.trim().orEmpty().ifBlank { chapterFallbackTitle(index) }
     val recognized = Regex("^(第[一二三四五六七八九十百千万零两0-9]+[章节卷回]|序章|楔子|引子|后记|尾声|番外)")
-    return if (recognized.containsMatchIn(raw)) raw else "第${index + 1}章 $raw"
+    return if (recognized.containsMatchIn(raw)) raw else "${chapterFallbackTitle(index)} $raw"
 }
 
 fun buildTxt(book: Book, includeSynopsis: Boolean): ByteArray {
@@ -715,12 +714,12 @@ private fun FormatCard(
     onClick: () -> Unit,
 ) {
     val ui = LocalInk.current
-    val border by animateFloatAsState(if (selected) 1.6f else .8f, spring(.9f, 500f), label = "border")
+    val border by animateFloatAsState(if (selected) 1.6f else .8f, spring(MOYU_DAMPING, 500f, PROGRESS_THRESHOLD), visibilityThreshold = PROGRESS_THRESHOLD, label = "border")
     Column(
         modifier
-            .clip(RoundedCornerShape(20.dp))
-            .background(if (selected) ui.palette.ink.copy(alpha = if (ui.palette.isDark) .10f else .055f) else ui.palette.faint)
-            .then(if (selected) Modifier.border(border.dp, ui.accent, RoundedCornerShape(20.dp)) else Modifier.border(.8.dp, ui.palette.line, RoundedCornerShape(20.dp)))
+            .clip(SmoothCorner(20.dp))
+            .background(if (selected) accentTint(ui.palette, ui.accent) else ui.palette.faint)
+            .then(if (selected) Modifier.border(border.dp, accentLine(ui.palette, ui.accent), SmoothCorner(20.dp)) else Modifier.border(.8.dp, ui.palette.line, SmoothCorner(20.dp)))
             .bouncy(scale = .98f) { onClick() }
             .padding(14.dp),
     ) {

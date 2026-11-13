@@ -1,8 +1,7 @@
 package com.moyu.writer
 
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
@@ -17,6 +16,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
 import kotlinx.coroutines.delay
 
@@ -48,12 +48,6 @@ internal fun DepthStack(
         leaving.add(previous)
     }
     SideEffect { prevTop.value = top }
-    LaunchedEffect(top, leaving.size) {
-        if (leaving.isNotEmpty()) {
-            delay(perPageMs.toLong() + 40L)
-            if (leaving.isNotEmpty()) leaving.removeAt(0)
-        }
-    }
     val layers = retained + leaving.filterNot { retained.contains(it) }
     val topIndex = layers.indexOf(top)
     val firstEver = layers.size == 1
@@ -67,13 +61,20 @@ internal fun DepthStack(
                 // the page would pop in with no entrance at all.
                 val anim = remember(screen) { Animatable(if (firstEver) target else 1f) }
                 LaunchedEffect(target) {
-                    anim.animateTo(target, tween(perPageMs, easing = FastOutSlowInEasing))
+                    anim.animateTo(target, spring(MOYU_DAMPING, pageStiffness(perPageMs), PAGE_THRESHOLD))
+                    // Remove a popped page only after its own spring has really
+                    // stopped. The old fixed perPageMs+40 delay unmounted it
+                    // while a few pixels were still moving, which read as a
+                    // small teleport at the end of every back navigation.
+                    if (!screens.contains(screen)) leaving.remove(screen)
                 }
                 Box(
                     Modifier
                         .fillMaxSize()
                         .clipToBounds()
-                        .offset(x = with(LocalDensity.current) { (anim.value * widthPx).toDp() }),
+                        // graphicsLayer keeps sub-pixel positions; a Dp offset is
+                        // rounded by layout and steps 1px on the last frame.
+                        .graphicsLayer { translationX = anim.value * widthPx },
                 ) {
                     content(screen, screen == top)
                 }

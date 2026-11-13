@@ -14,6 +14,7 @@ import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
@@ -32,6 +33,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import kotlinx.coroutines.withTimeoutOrNull
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -65,7 +67,6 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -74,6 +75,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
@@ -91,6 +93,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -319,18 +322,44 @@ fun fontFamilyFor(name: String): FontFamily = when (name) {
     else -> FontFamily.Serif
 }
 
+/**
+ * One damping for the whole app: 1.0 (critically damped, no overshoot).
+ * "肉感" comes from low stiffness plus press deformation, not from bouncing
+ * past the target. Only stiffness changes between the four motion presets.
+ */
+const val MOYU_DAMPING = 1f
+
+/**
+ * Compose springs stop as soon as they are within `visibilityThreshold` of the
+ * target and then snap the remaining distance. The default 0.01 is huge for
+ * page offsets (0.01 * 1220px = 12px) and for press scale (1% of the view), and
+ * that snap is the "最后吸一下". These thresholds are expressed in each
+ * animation's own unit so the spring actually settles instead of jumping.
+ */
+const val PAGE_THRESHOLD = 1e-4f
+const val PRESS_THRESHOLD = 2e-4f
+const val PROGRESS_THRESHOLD = 1e-3f
+
 fun motionSpec(style: String): androidx.compose.animation.core.SpringSpec<Float> = when (style) {
-    "gentle" -> spring(dampingRatio = .9f, stiffness = 230f)
-    "snappy" -> spring(dampingRatio = .72f, stiffness = 760f)
-    "none" -> spring(dampingRatio = 1f, stiffness = 2000f)
-    else -> spring(dampingRatio = .78f, stiffness = 430f)
+    "gentle" -> spring(dampingRatio = MOYU_DAMPING, stiffness = 300f, visibilityThreshold = PROGRESS_THRESHOLD)
+    "snappy" -> spring(dampingRatio = MOYU_DAMPING, stiffness = 700f, visibilityThreshold = PROGRESS_THRESHOLD)
+    "none" -> spring(dampingRatio = MOYU_DAMPING, stiffness = 2000f, visibilityThreshold = PROGRESS_THRESHOLD)
+    else -> spring(dampingRatio = MOYU_DAMPING, stiffness = 420f, visibilityThreshold = PROGRESS_THRESHOLD)
 }
 
+/**
+ * Page-to-page stiffness. The four motion presets still change how long a
+ * page transition reads: shorter perPageMs becomes a stiffer spring, but the
+ * damping stays 1.0 so pages never overshoot their target.
+ */
+fun pageStiffness(perPageMs: Int): Float =
+    if (perPageMs <= 0) 2000f else (90000f / perPageMs).coerceIn(240f, 900f)
+
 fun motionSpecDp(style: String) = when (style) {
-    "gentle" -> spring<Dp>(dampingRatio = .9f, stiffness = 230f)
-    "snappy" -> spring<Dp>(dampingRatio = .72f, stiffness = 760f)
-    "none" -> spring<Dp>(dampingRatio = 1f, stiffness = 2000f)
-    else -> spring<Dp>(dampingRatio = .78f, stiffness = 430f)
+    "gentle" -> spring<Dp>(dampingRatio = MOYU_DAMPING, stiffness = 300f, visibilityThreshold = .001.dp)
+    "snappy" -> spring<Dp>(dampingRatio = MOYU_DAMPING, stiffness = 700f, visibilityThreshold = .001.dp)
+    "none" -> spring<Dp>(dampingRatio = MOYU_DAMPING, stiffness = 2000f, visibilityThreshold = .001.dp)
+    else -> spring<Dp>(dampingRatio = MOYU_DAMPING, stiffness = 420f, visibilityThreshold = .001.dp)
 }
 
 @Composable
@@ -615,7 +644,7 @@ fun GlassSurface(
     borderColor: Color? = null,
     content: @Composable BoxScope.() -> Unit,
 ) {
-    val resolvedShape = shape ?: RoundedCornerShape(radius.dp)
+    val resolvedShape = shape ?: SmoothCorner(radius.dp)
     val clipped = modifier.clip(resolvedShape)
     // Haze used to hard-code a 25% white tint, which turned the dark TabBar into
     // a flat gray slab. Tint the blur toward the paper color in each theme.
@@ -671,23 +700,35 @@ fun Modifier.bouncy(
     // it to squash its lens). Defaults to a no-op for every existing caller.
     LaunchedEffect(pressed) { onPressChange(pressed) }
     val anim = remember { Animatable(1f) }
-    val peak = 1f + (1f - scale) * .32f
+    var stretch by remember { mutableFloatStateOf(0f) }
+    var originX by remember { mutableFloatStateOf(.5f) }
+    var last by remember { mutableFloatStateOf(1f) }
     LaunchedEffect(pressed, enabled) {
         val down = pressed && enabled
         if (motion == "none") {
             anim.snapTo(if (down) scale else 1f)
+            stretch = 0f
             return@LaunchedEffect
         }
+        last = anim.value
         if (down) {
-            anim.animateTo(scale, spring(.55f, 900f))
-        } else if (overshoot) {
-            // Tap: shrink, spring past 1, settle. The whole point is that a
-            // 50 ms press still shows a visible bounce.
-            anim.animateTo(peak, tween(70, easing = FastOutSlowInEasing))
-            anim.animateTo(1f, spring(.5f, 480f))
+            // 水滴按压：帧位移驱动横向拉伸、纵向轻压，原点在按下的位置。
+            // 位移按 (1-scale) 归一，dock 的 .88 和普通按钮的 .97 得到同一档
+            // 形变，不会因为按得深就甩出去。
+            anim.animateTo(scale, spring(MOYU_DAMPING, 620f, PRESS_THRESHOLD)) {
+                val step = kotlin.math.abs(value - last)
+                last = value
+                val unit = (step / (1f - scale).coerceAtLeast(.02f)).coerceIn(0f, 1f)
+                stretch += ((unit * .12f).coerceIn(0f, .06f) - stretch) * .5f
+            }
         } else {
-            anim.animateTo(1f, spring(.64f, 700f))
+            // No overshoot: damping 1.0 settles exactly on 1.
+            anim.animateTo(1f, spring(MOYU_DAMPING, 460f, PRESS_THRESHOLD)) {
+                last = value
+                stretch += (0f - stretch) * .35f
+            }
         }
+        stretch = 0f
     }
     val clicks = if (onLongPress != null) {
         Modifier.combinedClickable(
@@ -704,7 +745,18 @@ fun Modifier.bouncy(
         }
     }
     return this
-        .graphicsLayer { scaleX = anim.value; scaleY = anim.value }
+        .pointerInput(enabled) {
+            awaitEachGesture {
+                val down = awaitFirstDown(requireUnconsumed = false)
+                originX = (down.position.x / size.width.coerceAtLeast(1)).coerceIn(0f, 1f)
+                waitForUpOrCancellation()
+            }
+        }
+        .graphicsLayer {
+            scaleX = anim.value + stretch
+            scaleY = anim.value - stretch * .6f
+            transformOrigin = androidx.compose.ui.graphics.TransformOrigin(originX, .5f)
+        }
         .then(clicks)
 }
 
@@ -723,7 +775,7 @@ fun PrimaryButton(
     Box(
         modifier
             .heightIn(min = 50.dp)
-            .clip(RoundedCornerShape(999.dp))
+            .clip(SmoothCorner(999.dp))
             .background(if (enabled) bg else bg.copy(alpha = .35f))
             .then(
                 if (enabled) Modifier.drawWithCache {
@@ -799,7 +851,7 @@ fun GlassIconButton(
     glyph: Glyph,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
-    size: Dp = 44.dp,
+    size: Dp = 40.dp,
     tint: Color = LocalInk.current.palette.ink,
     strength: Float = .78f,
 ) {
@@ -818,6 +870,7 @@ fun GlassIconButton(
     }
 }
 
+
 @Composable
 fun GlassChip(
     label: String,
@@ -827,13 +880,13 @@ fun GlassChip(
 ) {
     val ui = LocalInk.current
     val bg by animateColorAsState(
-        if (selected) ui.palette.ink else Color.Transparent,
-        animationSpec = tween(260, easing = FastOutSlowInEasing),
+        if (selected) accentTint(ui.palette, ui.accent) else Color.Transparent,
+        animationSpec = spring(MOYU_DAMPING, 420f),
         label = "chip",
     )
     val fg by animateColorAsState(
-        if (selected) ui.palette.bgTop else ui.palette.muted,
-        animationSpec = tween(220),
+        if (selected) ui.palette.ink else ui.palette.muted,
+        animationSpec = spring(MOYU_DAMPING, 520f),
         label = "chipFg",
     )
     if (selected) {
@@ -876,41 +929,90 @@ fun Segmented(
     if (options.isEmpty()) return
     val ui = LocalInk.current
     val height = 40.dp
-    BoxWithConstraints(
+    // The frame is painted LAST, over the moving pill (drawWithContent), not as
+    // a background band underneath it. As a background the 1dp ring was simply
+    // hidden wherever the black pill sat against the edge, which read as "the
+    // frame fades when the selected block lands". The stroke is 2dp wide and
+    // centred on the boundary, so the container's own clip leaves exactly the
+    // inside 1dp visible.
+    Box(
         modifier
             .height(height)
-            .clip(RoundedCornerShape(14.dp))
+            .clip(SmoothCorner(14.dp))
             .background(ui.palette.faint)
-            .border(.8.dp, ui.palette.line, RoundedCornerShape(14.dp))
-            .padding(3.dp)
+            .drawWithContent {
+                drawContent()
+                val frame = Path().apply {
+                    addOutline(SmoothCorner(14.dp).createOutline(size, layoutDirection, this@drawWithContent))
+                }
+                drawPath(frame, ui.palette.line, style = Stroke(2.dp.toPx()))
+            }
     ) {
-        val itemW = maxWidth / options.size
-        val target = itemW * selected.coerceIn(0, options.size - 1)
-        val x by animateDpAsState(target, motionSpecDp(ui.settings.motion), label = "segment")
-        Box(
+        BoxWithConstraints(
             Modifier
-                .offset(x)
-                .width(itemW)
-                .fillMaxHeight()
-                .clip(RoundedCornerShape(11.dp))
-                .background(ui.palette.ink)
-        )
-        Row(Modifier.fillMaxSize()) {
-            options.forEachIndexed { i, option ->
-                Box(
-                    Modifier
-                        .weight(1f)
-                        .fillMaxHeight()
-                        .bouncy { onSelect(i) },
-                    contentAlignment = Alignment.Center,
+                .fillMaxSize()
+                .padding(4.dp)
+        ) {
+            val itemW = maxWidth / options.size
+            val clamped = selected.coerceIn(0, options.size - 1)
+            // 水滴滑动：选中块被拖着走时沿方向拉长、到位回弹一次；原点在前端，
+            // 所以是「前端先到、后端跟上来」。
+            val pos = remember { androidx.compose.animation.core.Animatable(clamped.toFloat()) }
+            var stretch by remember { androidx.compose.runtime.mutableFloatStateOf(0f) }
+            var last by remember { androidx.compose.runtime.mutableFloatStateOf(pos.value) }
+            var rightward by remember { androidx.compose.runtime.mutableStateOf(true) }
+            LaunchedEffect(clamped) {
+                rightward = clamped >= pos.value
+                last = pos.value
+                pos.animateTo(
+                    targetValue = clamped.toFloat(),
+                    animationSpec = if (ui.settings.motion == "none") {
+                        tween(0)
+                    } else {
+                        spring(dampingRatio = .8f, stiffness = 520f, visibilityThreshold = PROGRESS_THRESHOLD)
+                    },
                 ) {
-                    Txt(
-                        option,
-                        size = 11.5f,
-                        color = if (i == selected) ui.palette.bgTop else ui.palette.muted,
-                        weight = if (i == selected) FontWeight.Medium else FontWeight.Normal,
-                        maxLines = 1,
-                    )
+                    val step = kotlin.math.abs(value - last)
+                    last = value
+                    // 有文字，幅度比镜片收一档，避免边缘发糊。
+                    stretch += ((step * 22f).coerceIn(0f, .35f) - stretch) * .4f
+                }
+                stretch = 0f
+            }
+            Box(
+                Modifier
+                    // Same reason as the tab lens: sub-pixel Dp offsets are rounded
+                    // by layout, so the segment indicator stepped on the last frame.
+                    .graphicsLayer {
+                        translationX = pos.value * itemW.toPx()
+                        transformOrigin = androidx.compose.ui.graphics.TransformOrigin(
+                            if (rightward) 1f else 0f,
+                            .5f,
+                        )
+                        scaleX = 1f + stretch
+                    }
+                    .width(itemW)
+                    .fillMaxHeight()
+                    .clip(SmoothCorner(11.dp))
+                    .background(accentTint(ui.palette, ui.accent))
+            )
+            Row(Modifier.fillMaxSize()) {
+                options.forEachIndexed { i, option ->
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                            .bouncy { onSelect(i) },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Txt(
+                            option,
+                            size = 11.5f,
+                            color = if (i == selected) ui.palette.ink else ui.palette.muted,
+                            weight = if (i == selected) FontWeight.Medium else FontWeight.Normal,
+                            maxLines = 1,
+                        )
+                    }
                 }
             }
         }
@@ -932,6 +1034,9 @@ fun InkField(
     onDone: (() -> Unit)? = null,
     enabled: Boolean = true,
     focusRequester: FocusRequester? = null,
+    /** false = the caller already put this field on glass; only the focus ring
+     *  is drawn here so the field does not paint a flat card over the glass. */
+    surface: Boolean = true,
 ) {
     val ui = LocalInk.current
     val focus = remember { MutableInteractionSource() }
@@ -945,12 +1050,22 @@ fun InkField(
             .fillMaxWidth()
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .heightIn(min = minHeight)
-            .clip(RoundedCornerShape(16.dp))
-            .background(ui.palette.faint)
-            .border(
-                width = if (focused) 1.2.dp else .8.dp,
-                color = if (focused) ui.accent.copy(alpha = .55f) else ui.palette.line,
-                shape = RoundedCornerShape(16.dp),
+            .clip(SmoothCorner(16.dp))
+            .then(
+                if (surface) {
+                    Modifier
+                        .background(ui.palette.faint)
+                        .border(
+                            width = if (focused) 1.2.dp else .8.dp,
+                            color = if (focused) ui.accent.copy(alpha = .55f) else ui.palette.line,
+                            shape = SmoothCorner(16.dp),
+                        )
+                } else {
+                    // On glass, a themed focus ring reads as a black box floating
+                    // inside the capsule. The glass edge band already defines the
+                    // field and the caret shows focus, so nothing is drawn here.
+                    Modifier
+                }
             )
             .padding(horizontal = 15.dp, vertical = 14.dp),
         enabled = enabled,
@@ -1025,7 +1140,7 @@ fun SettingRow(
             Box(
                 Modifier
                     .size(34.dp)
-                    .clip(RoundedCornerShape(11.dp))
+                    .clip(SmoothCorner(11.dp))
                     .background(ui.palette.faint),
                 contentAlignment = Alignment.Center,
             ) {
@@ -1069,7 +1184,8 @@ fun AnimatedTodoBox(
     val motion = ui.settings.motion != "none"
     val progress by animateFloatAsState(
         if (done) 1f else 0f,
-        if (motion) spring(.62f, 520f) else tween(0),
+        if (motion) spring(MOYU_DAMPING, 520f, PROGRESS_THRESHOLD) else tween(0),
+        visibilityThreshold = PROGRESS_THRESHOLD,
         label = "todoBox",
     )
     val border = lerp(ui.palette.muted.copy(alpha = .55f), ui.accent, progress)
@@ -1117,32 +1233,61 @@ fun AnimatedTodoBox(
 @Composable
 fun InkToggle(checked: Boolean, onChange: (Boolean) -> Unit) {
     val ui = LocalInk.current
-    val progress by animateFloatAsState(
-        if (checked) 1f else 0f,
-        if (ui.settings.motion == "none") tween(0) else spring(.72f, 500f),
-        label = "toggle",
-    )
-    val track = if (ui.palette.isDark) Color(0xFF3C403D) else Color(0xFFE4DFD4)
+    val off = if (ui.palette.isDark) Color(0xFF3C403D) else Color(0xFFE4DFD4)
+    val knob = if (ui.palette.isDark) Color(0xFFF3F1EA) else Color(0xFFFDFCF8)
+    // 水滴滑动：圆点被拖着走时沿运动方向拉长、到位弹回正圆；
+    // 体积感用镜片同款边缘带（内缘奶白渐变 + 1.1dp 亮线），不加任何阴影。
+    val pos = remember { androidx.compose.animation.core.Animatable(if (checked) 1f else 0f) }
+    var stretch by remember { androidx.compose.runtime.mutableFloatStateOf(0f) }
+    var last by remember { androidx.compose.runtime.mutableFloatStateOf(pos.value) }
+    LaunchedEffect(checked) {
+        last = pos.value
+        pos.animateTo(
+            targetValue = if (checked) 1f else 0f,
+            animationSpec = if (ui.settings.motion == "none") {
+                tween(0)
+            } else {
+                spring(dampingRatio = .62f, stiffness = 520f, visibilityThreshold = PROGRESS_THRESHOLD)
+            },
+        ) {
+            val step = kotlin.math.abs(value - last)
+            last = value
+            stretch += ((step * 26f).coerceIn(0f, .45f) - stretch) * .5f
+        }
+        stretch = 0f
+    }
+    val progress = pos.value
     Box(
         Modifier
             .width(48.dp)
             .height(29.dp)
             .clip(CircleShape)
-            .background(lerp(track, ui.accent, progress))
+            .background(lerp(off, ui.accent, progress))
+            .drawWithContent {
+                drawContent()
+                glassEdgeBand(CircleShape, ui.palette, .55f)
+            }
             .bouncy { onChange(!checked) }
             .padding(3.dp),
         contentAlignment = Alignment.CenterStart,
     ) {
         Box(
             Modifier
-                .offset(x = (19 * progress).dp)
+                .graphicsLayer {
+                    translationX = 19.dp.toPx() * progress
+                    transformOrigin = androidx.compose.ui.graphics.TransformOrigin(
+                        if (checked) 1f else 0f,
+                        .5f,
+                    )
+                    scaleX = 1f + stretch
+                    scaleY = 1f - stretch * .10f
+                }
                 .size(23.dp)
                 .clip(CircleShape)
-                .background(if (ui.palette.isDark) Color(0xFFF3F1EA) else Color.White)
-                .graphicsLayer {
-                    shadowElevation = 4f
-                    shape = CircleShape
-                    clip = true
+                .background(knob)
+                .drawWithContent {
+                    drawContent()
+                    glassEdgeBand(CircleShape, ui.palette, .7f)
                 }
         )
     }
@@ -1154,6 +1299,22 @@ fun lerp(a: Color, b: Color, t: Float): Color = Color(
     blue = a.blue + (b.blue - a.blue) * t,
     alpha = a.alpha + (b.alpha - a.alpha) * t,
 )
+
+/**
+ * The one fill for a selected block: paper with the accent mixed in.
+ *
+ * A solid accent block read as a black slab; a paper-accent tint is what the
+ * reader reads as "this one is chosen" without the accent shouting. Every
+ * selectable surface (segmented pill, chip, theme card, export format) must use
+ * this single function — two different "selected" colours on one screen is what
+ * made the app look assembled from parts.
+ */
+fun accentTint(p: InkPalette, accent: Color): Color =
+    lerp(p.paper, accent, if (p.isDark) .20f else .13f)
+
+/** The edge of a selected block: the same tint, denser, so a 1 dp line reads. */
+fun accentLine(p: InkPalette, accent: Color): Color =
+    lerp(p.paper, accent, if (p.isDark) .42f else .30f)
 
 /**
  * One gesture owner for both tap-to-seek and horizontal drag.
@@ -1243,7 +1404,8 @@ fun InkSlider(
     val haptic = LocalHaptic.current
     val knob by animateFloatAsState(
         targetValue = if (grabbed) 1.35f else 1f,
-        animationSpec = if (ui.settings.motion == "none") tween(0) else spring(.6f, 500f),
+        animationSpec = if (ui.settings.motion == "none") tween(0) else spring(MOYU_DAMPING, 520f, PROGRESS_THRESHOLD),
+        visibilityThreshold = PROGRESS_THRESHOLD,
         label = "knobGrab",
     )
     Box(
@@ -1345,16 +1507,16 @@ fun Stepper(value: String, onMinus: () -> Unit, onPlus: () -> Unit, minusEnabled
     val ui = LocalInk.current
     Row(
         Modifier
-            .clip(RoundedCornerShape(999.dp))
+            .clip(SmoothCorner(999.dp))
             .background(ui.palette.faint)
-            .border(.8.dp, ui.palette.line, RoundedCornerShape(999.dp)),
+            .border(.8.dp, ui.palette.line, SmoothCorner(999.dp)),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(Modifier.size(40.dp).clickable(enabled = minusEnabled) { onMinus() }, contentAlignment = Alignment.Center) {
+        Box(Modifier.size(40.dp).bouncy(enabled = minusEnabled, scale = .92f) { onMinus() }, contentAlignment = Alignment.Center) {
             Txt("−", size = 18f, color = if (minusEnabled) ui.palette.ink else ui.palette.muted.copy(alpha = .4f))
         }
         Txt(value, size = 12f, color = ui.palette.ink, weight = FontWeight.Medium, modifier = Modifier.widthIn(min = 38.dp), align = TextAlign.Center)
-        Box(Modifier.size(40.dp).clickable(enabled = plusEnabled) { onPlus() }, contentAlignment = Alignment.Center) {
+        Box(Modifier.size(40.dp).bouncy(enabled = plusEnabled, scale = .92f) { onPlus() }, contentAlignment = Alignment.Center) {
             Txt("+", size = 17f, color = if (plusEnabled) ui.palette.ink else ui.palette.muted.copy(alpha = .4f))
         }
     }
@@ -1387,13 +1549,13 @@ fun <T> AnimatedPane(
         modifier = modifier,
         transitionSpec = {
             (
-                fadeIn(tween(150)) +
-                    slideInHorizontally(tween(220)) { full ->
+                fadeIn(spring(MOYU_DAMPING, 500f)) +
+                    slideInHorizontally(spring(MOYU_DAMPING, 420f)) { full ->
                         if (targetState != null) full / 4 else -full / 4
                     }
                 ) togetherWith (
-                fadeOut(tween(120)) +
-                    slideOutHorizontally(tween(170)) { full ->
+                fadeOut(spring(MOYU_DAMPING, 520f)) +
+                    slideOutHorizontally(spring(MOYU_DAMPING, 460f)) { full ->
                         if (targetState != null) -full / 5 else full / 5
                     }
                 )
@@ -1449,8 +1611,8 @@ fun GlassDialog(
                 val panelMax = maxHeight * .94f
                 AnimatedVisibility(
                     visible = true,
-                    enter = fadeIn(tween(150)) +
-                        scaleIn(initialScale = .965f, animationSpec = tween(190, easing = FastOutSlowInEasing)),
+                    enter = fadeIn(spring(MOYU_DAMPING, 500f)) +
+                        scaleIn(initialScale = .965f, animationSpec = spring(MOYU_DAMPING, 420f, PRESS_THRESHOLD)),
                 ) {
                     CompositionLocalProvider(LocalGlassLite provides performanceMode) {
                         MoyuSurface(modifier
@@ -1511,7 +1673,7 @@ fun DialogTitle(title: String, subtitle: String? = null, onClose: (() -> Unit)? 
             }
         }
         if (onClose != null) {
-            GlassIconButton(Glyph.Close, onClose, size = 34.dp, tint = ui.palette.muted)
+            GlassIconButton(Glyph.Close, onClose, tint = ui.palette.muted)
         }
     }
 }
@@ -1539,7 +1701,7 @@ fun ConfirmDialog(
                         Modifier
                             .fillMaxWidth()
                             .height(50.dp)
-                            .clip(RoundedCornerShape(999.dp))
+                            .clip(SmoothCorner(999.dp))
                             .background(Color(0xFFB3453D))
                             .bouncy { onConfirm() },
                         contentAlignment = Alignment.Center,
@@ -1566,13 +1728,15 @@ fun InlineModalSheet(
     content: @Composable ColumnScope.(close: () -> Unit) -> Unit,
 ) {
     val ui = LocalInk.current
-    val scope = rememberCoroutineScope()
-    var shown by remember { mutableStateOf(false) }
     var closing by remember { mutableStateOf(false) }
     var dismissReady by remember { mutableStateOf(false) }
+    // The sheet leaves the composition only when the exit spring is idle.
+    // A fixed 250ms dismiss used to unmount it while the last pixels were
+    // still sliding, which showed up as a tiny teleport on close.
+    val visibleState = remember { MutableTransitionState(false) }
 
     LaunchedEffect(Unit) {
-        shown = true
+        visibleState.targetState = true
         delay(260)
         dismissReady = true
     }
@@ -1580,25 +1744,26 @@ fun InlineModalSheet(
     fun close() {
         if (closing) return
         closing = true
-        shown = false
-        scope.launch {
-            delay(250)
-            onDismiss()
-        }
+        visibleState.targetState = false
+    }
+
+    LaunchedEffect(closing, visibleState.isIdle, visibleState.currentState) {
+        if (closing && visibleState.isIdle && !visibleState.currentState) onDismiss()
     }
 
     val sheetCorner = GlassStyle.corner
-    val panelShape = RoundedCornerShape(
+    val panelShape = SmoothCorner(
         topStart = sheetCorner.dp,
         topEnd = sheetCorner.dp,
     )
     val scrimAlpha by animateFloatAsState(
-        targetValue = if (shown) {
+        targetValue = if (visibleState.targetState) {
             if (ui.palette.isDark) .38f else .22f
         } else {
             0f
         },
-        animationSpec = tween(190),
+        animationSpec = spring(MOYU_DAMPING, 520f),
+        visibilityThreshold = .002f,
         label = "inlineSheetScrim",
     )
 
@@ -1622,15 +1787,17 @@ fun InlineModalSheet(
         ) {
             val panelMax = maxHeight
             AnimatedVisibility(
-                visible = shown,
+                visibleState = visibleState,
+                // Slide only. Fading the whole sheet makes its opaque paper
+                // translucent mid-flight, so body text shows through the menu.
                 enter = slideInVertically(
                     initialOffsetY = { it },
-                    animationSpec = tween(260, easing = FastOutSlowInEasing),
-                ) + fadeIn(tween(200)),
+                    animationSpec = spring(MOYU_DAMPING, 420f),
+                ),
                 exit = slideOutVertically(
                     targetOffsetY = { it },
-                    animationSpec = tween(210, easing = FastOutSlowInEasing),
-                ) + fadeOut(tween(150)),
+                    animationSpec = spring(MOYU_DAMPING, 460f),
+                ),
             ) {
                 // Consume taps that land on the sheet itself so the scrim behind
                 // does not close it, while leaving every child row's own tap
@@ -1684,7 +1851,7 @@ fun ModalSheet(
 ) {
     val ui = LocalInk.current
     val sheetCorner = GlassStyle.corner
-    val panelShape = RoundedCornerShape(
+    val panelShape = SmoothCorner(
         topStart = sheetCorner.dp,
         topEnd = sheetCorner.dp,
     )
@@ -1716,10 +1883,12 @@ fun ModalSheet(
                     visible = true,
                     // No spring overshoot here: the old 330f spring made the
                     // sheet top edge bounce/閳ユ竾lash閳?while it was entering.
+                    // Slide only: a fading opaque sheet shows the page through
+                    // itself while it enters.
                     enter = slideInVertically(
                         initialOffsetY = { it },
-                        animationSpec = tween(220, easing = FastOutSlowInEasing),
-                    ) + fadeIn(tween(170)),
+                        animationSpec = spring(MOYU_DAMPING, 380f),
+                    ),
                 ) {
                     MoyuSurface(Modifier
                             .fillMaxWidth()
@@ -1762,9 +1931,15 @@ fun AmbientBackground(modifier: Modifier = Modifier, overlayOnly: Boolean = fals
     // white radial bloom at 12% width and 90 dots of grain; all three made the
     // paper read as uneven even on a still screen. A page is a sheet of paper,
     // not a lit surface.
+    // Theme switches now cross-fade the paper colour instead of snapping.
+    val bg by animateColorAsState(
+        targetValue = p.bgTop,
+        animationSpec = spring(MOYU_DAMPING, 420f),
+        label = "ambientBg",
+    )
     Canvas(modifier.fillMaxSize()) {
         if (!overlayOnly) {
-            drawRect(p.bgTop)
+            drawRect(bg)
         }
     }
 }
@@ -1782,10 +1957,10 @@ fun ToastLayer(modifier: Modifier = Modifier) {
     }
     AnimatedVisibility(
         visible = message != null,
-        enter = fadeIn(tween(180)) + slideInVertically(initialOffsetY = { it / 2 }, animationSpec = spring(.8f, 400f)),
-        exit = fadeOut(tween(200)) + slideOutVertically(
+        enter = fadeIn(spring(MOYU_DAMPING, 500f)) + slideInVertically(initialOffsetY = { it / 2 }, animationSpec = spring(MOYU_DAMPING, 420f)),
+        exit = fadeOut(spring(MOYU_DAMPING, 520f)) + slideOutVertically(
             targetOffsetY = { it / 3 },
-            animationSpec = tween(200, easing = FastOutSlowInEasing),
+            animationSpec = spring(MOYU_DAMPING, 460f),
         ),
         modifier = modifier.imePadding(),
     ) {
@@ -1824,9 +1999,9 @@ fun EmptyState(
         Box(
             Modifier
                 .size(78.dp)
-                .clip(RoundedCornerShape(26.dp))
+                .clip(SmoothCorner(26.dp))
                 .background(ui.palette.faint)
-                .border(.8.dp, ui.palette.line, RoundedCornerShape(26.dp)),
+                .border(.8.dp, ui.palette.line, SmoothCorner(26.dp)),
             contentAlignment = Alignment.Center,
         ) {
             LineIcon(glyph, ui.palette.muted, 30.dp, 1.3f)

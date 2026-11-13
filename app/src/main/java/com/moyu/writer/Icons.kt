@@ -19,7 +19,7 @@ enum class Glyph {
     Back, Chevron, ChevronDown, Plus, More, Search, Close, Check, Trash, Edit, Export,
     Share, Pin, Clock, Calendar, Bell, List, Layers, Palette, Font, Motion, Download,
     Upload, Info, Undo, Redo, Indent, Quote, Divider, Focus, Keyboard, Sun, Moon,
-    Grid, Rows, Sparkles, Book, Note, Chart, Gear, Folder, ArrowUp, Lock, Link,
+    Grid, Rows, Sparkles, Book, Note, Chart, Gear, Folder, File, ArrowUp, Lock, Link,
 }
 
 @Composable
@@ -217,6 +217,10 @@ fun LineIcon(
             }
             Glyph.Folder -> {
                 path(3.5f to 6f, 9f to 6f, 11f to 8.5f, 20.5f to 8.5f, 20.5f to 19f, 3.5f to 19f, close = true)
+            }
+            Glyph.File -> {
+                path(7f to 3.5f, 14f to 3.5f, 18f to 7.5f, 18f to 20.5f, 7f to 20.5f, close = true)
+                path(14f to 3.5f, 14f to 7.5f, 18f to 7.5f)
             }
             Glyph.ArrowUp -> {
                 path(12f to 19f, 12f to 5f); path(6f to 11f, 12f to 5f, 18f to 11f)

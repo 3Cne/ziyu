@@ -1,5 +1,6 @@
 package com.moyu.writer
 
+import androidx.compose.ui.draw.shadow
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -7,12 +8,16 @@ import android.provider.Settings
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
+import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import kotlinx.coroutines.delay
 import androidx.compose.foundation.Canvas
@@ -52,7 +57,6 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -64,6 +68,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -214,6 +219,17 @@ fun SettingsScreen(store: AppStore, listState: LazyListState, onOpenPage: (Strin
             }
         }
         item {
+            SettingGroup("问书") {
+                SettingRow(
+                    "AI 与记忆",
+                    if (s.aiEnabled) "${s.aiModel} · 已启用 · ${if (s.aiAutoMemory) "自动记忆" else "手动记忆"}"
+                    else "未启用 · ${s.aiModel}",
+                    Glyph.Sparkles,
+                    onClick = { onOpenPage("ai") },
+                )
+            }
+        }
+        item {
             SettingGroup("体验") {
                 SettingRow(
                     "动效",
@@ -241,7 +257,7 @@ fun SettingsScreen(store: AppStore, listState: LazyListState, onOpenPage: (Strin
                 RowDivider()
                 SettingRow(
                     "关于字隅",
-                    "${BuildConfig.VERSION_NAME} · Compose · 120Hz",
+                    BuildConfig.VERSION_NAME,
                     Glyph.Info,
                     onClick = { onOpenPage("about") },
                 )
@@ -260,13 +276,20 @@ fun SettingsScreen(store: AppStore, listState: LazyListState, onOpenPage: (Strin
 }
 
 @Composable
-fun SettingsDetailScreen(store: AppStore, page: String, onBack: () -> Unit) {
+fun SettingsDetailScreen(
+    store: AppStore,
+    page: String,
+    onBack: () -> Unit,
+    onOpen: (String) -> Unit = {},
+) {
     when (page) {
-        "appearance" -> AppearancePage(store, onBack)
+        "appearance" -> AppearancePage(store, onBack, onOpen)
+        "glass" -> GlassSettingsPage(store, onBack)
         "library" -> LibrarySettingsPage(store, onBack)
         "writing" -> WritingSettingsPage(store, onBack)
         "motion" -> MotionSettingsPage(store, onBack)
         "navigation" -> NavigationSettingsPage(store, onBack)
+        "ai" -> AiSettingsPage(store, onBack, onOpen)
         "data" -> DataSettingsPage(store, onBack)
         "space" -> SpaceSettingsPage(store, onBack)
         else -> AboutPage(store, onBack)
@@ -301,8 +324,10 @@ private fun SettingsPage(
                 Spacer(androidx.compose.ui.Modifier.width(11.dp))
                 Column {
                     Txt(title, size = 20f, weight = FontWeight.SemiBold)
-                    Spacer(androidx.compose.ui.Modifier.height(2.dp))
-                    Txt(subtitle, size = 9.5f, color = LocalInk.current.palette.muted)
+                    if (subtitle.isNotBlank()) {
+                        Spacer(androidx.compose.ui.Modifier.height(2.dp))
+                        Txt(subtitle, size = 9.5f, color = LocalInk.current.palette.muted)
+                    }
                 }
             }
             // A pinned block lives outside the scroller so tuning a lower slider
@@ -340,7 +365,7 @@ private fun SectionCaption(text: String) {
 }
 
 @Composable
-private fun AppearancePage(store: AppStore, onBack: () -> Unit) {
+private fun AppearancePage(store: AppStore, onBack: () -> Unit, onOpen: (String) -> Unit = {}) {
     val ui = LocalInk.current
     val s = ui.settings
     // Preview cards are transient: they appear only while a related control is
@@ -434,143 +459,12 @@ private fun AppearancePage(store: AppStore, onBack: () -> Unit) {
                 }
             }
         }
-        item { SectionCaption("标签栏玻璃") }
+        item { SectionCaption("玻璃") }
         item {
             SettingGroup {
-                Column {
-                    SettingRow("模糊", "${s.tabBlur.roundToInt()} dp", Glyph.Sparkles)
-                    InkSlider(
-                        s.tabBlur,
-                        { v -> store.updateSettings { it.copy(tabBlur = (v * 10).roundToInt() / 10f) }; preview = 2 },
-                        0f, 20f,
-                        modifier = androidx.compose.ui.Modifier.padding(horizontal = 16.dp),
-                    )
-                }
-                RowDivider()
-                Column {
-                    SettingRow("边缘折射", "${s.tabRefraction.roundToInt()} dp", Glyph.Sparkles)
-                    InkSlider(
-                        s.tabRefraction,
-                        { v -> store.updateSettings { it.copy(tabRefraction = (v * 10).roundToInt() / 10f) }; preview = 2 },
-                        0f, 40f,
-                        modifier = androidx.compose.ui.Modifier.padding(horizontal = 16.dp),
-                    )
-                }
-                RowDivider()
-                Column {
-                    SettingRow("内外阴影", "${(s.tabShadow * 100).roundToInt()}%", Glyph.Sparkles)
-                    InkSlider(
-                        s.tabShadow,
-                        { v -> store.updateSettings { it.copy(tabShadow = v) }; preview = 2 },
-                        0f, 1f,
-                        modifier = androidx.compose.ui.Modifier.padding(horizontal = 16.dp),
-                    )
-                }
-                RowDivider()
-                Column {
-                    SettingRow("整条不透明度", "${(s.tabBarOpacity * 100).roundToInt()}%", Glyph.Sparkles)
-                    InkSlider(
-                        s.tabBarOpacity,
-                        { v -> store.updateSettings { it.copy(tabBarOpacity = v) }; preview = 2 },
-                        0f, 1f,
-                        modifier = androidx.compose.ui.Modifier.padding(horizontal = 16.dp),
-                    )
-                }
-                RowDivider()
-                Column {
-                    SettingRow("边缘带", "${(s.tabEdge * 100).roundToInt()}%", Glyph.Sparkles)
-                    InkSlider(
-                        s.tabEdge,
-                        { v -> store.updateSettings { it.copy(tabEdge = v) }; preview = 2 },
-                        0f, 1f,
-                        modifier = androidx.compose.ui.Modifier.padding(horizontal = 16.dp),
-                    )
-                }
-                RowDivider()
-                Row(
-                    androidx.compose.ui.Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Txt("边缘色散", size = 10f, color = ui.palette.ink)
-                    Spacer(androidx.compose.ui.Modifier.weight(1f))
-                    Segmented(
-                        listOf("开", "关"),
-                        if (s.tabDispersion) 0 else 1,
-                        { i -> store.updateSettings { it.copy(tabDispersion = i == 0) }; preview = 2 },
-                        androidx.compose.ui.Modifier.width(120.dp),
-                    )
-                }
+                SettingRow("玻璃", glyph = Glyph.Layers, onClick = { onOpen("glass") })
             }
         }
-        item { SectionCaption("选中镜片") }
-        item {
-            SettingGroup {
-                Column {
-                    SettingRow("模糊", "${s.lensBlur.roundToInt()} dp", Glyph.Sparkles)
-                    InkSlider(
-                        s.lensBlur,
-                        { v -> store.updateSettings { it.copy(lensBlur = (v * 10).roundToInt() / 10f) }; preview = 2 },
-                        0f, 20f,
-                        modifier = androidx.compose.ui.Modifier.padding(horizontal = 16.dp),
-                    )
-                }
-                RowDivider()
-                Column {
-                    SettingRow("边缘折射", "${s.lensRefraction.roundToInt()} dp", Glyph.Sparkles)
-                    InkSlider(
-                        s.lensRefraction,
-                        { v -> store.updateSettings { it.copy(lensRefraction = (v * 10).roundToInt() / 10f) }; preview = 2 },
-                        0f, 40f,
-                        modifier = androidx.compose.ui.Modifier.padding(horizontal = 16.dp),
-                    )
-                }
-                RowDivider()
-                Column {
-                    SettingRow("内外阴影", "${(s.lensShadow * 100).roundToInt()}%", Glyph.Sparkles)
-                    InkSlider(
-                        s.lensShadow,
-                        { v -> store.updateSettings { it.copy(lensShadow = v) }; preview = 2 },
-                        0f, 1f,
-                        modifier = androidx.compose.ui.Modifier.padding(horizontal = 16.dp),
-                    )
-                }
-                RowDivider()
-                Column {
-                    SettingRow("镜片不透明度", "${(s.tabLensOpacity * 100).roundToInt()}%", Glyph.Sparkles)
-                    InkSlider(
-                        s.tabLensOpacity,
-                        { v -> store.updateSettings { it.copy(tabLensOpacity = v) }; preview = 2 },
-                        0f, 1f,
-                        modifier = androidx.compose.ui.Modifier.padding(horizontal = 16.dp),
-                    )
-                }
-                RowDivider()
-                Column {
-                    SettingRow("边缘带", "${(s.lensEdge * 100).roundToInt()}%", Glyph.Sparkles)
-                    InkSlider(
-                        s.lensEdge,
-                        { v -> store.updateSettings { it.copy(lensEdge = v) }; preview = 2 },
-                        0f, 1f,
-                        modifier = androidx.compose.ui.Modifier.padding(horizontal = 16.dp),
-                    )
-                }
-                RowDivider()
-                Row(
-                    androidx.compose.ui.Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Txt("边缘色散", size = 10f, color = ui.palette.ink)
-                    Spacer(androidx.compose.ui.Modifier.weight(1f))
-                    Segmented(
-                        listOf("开", "关"),
-                        if (s.lensDispersion) 0 else 1,
-                        { i -> store.updateSettings { it.copy(lensDispersion = i == 0) }; preview = 2 },
-                        androidx.compose.ui.Modifier.width(120.dp),
-                    )
-                }
-            }
-        }
-        item { DockGlassSection(store) { preview = 2 } }
         item { SectionCaption("字体") }
         item {
             Segmented(
@@ -724,21 +618,54 @@ private fun GlassPreview(
     lensVeil: Float,
     barEdge: Float = 1f,
     lensEdge: Float = 1f,
+    showBar: Boolean = true,
+    showLens: Boolean = true,
 ) {
     val ui = LocalInk.current
     val p = ui.palette
     val backdrop = rememberLayerBackdrop()
-    val shape = RoundedCornerShape(50)
-    // Same two layers as the real bar: glass body (with its paper veil) and a
-    // lens inside it drawn with its own blur / refraction / veil. If this card
-    // lies, the settings page lies too.
+    val shape = SmoothCorner(50)
     val lensTint = if (p.isDark) Color.White.copy(alpha = .08f) else p.ink.copy(alpha = .08f)
     val lensPaper = p.paper.copy(alpha = lensVeil.coerceIn(0f, 1f) * .94f)
+    val lensSurface: Modifier = (
+        if (backdrop != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            Modifier.drawBackdrop(
+                backdrop = backdrop,
+                shape = { shape },
+                effects = {
+                    vibrancy()
+                    if (lensBlur > 0f) blur(lensBlur.dp.toPx())
+                    if (lensRefraction > 0f) {
+                        lens(
+                            refractionHeight = lensRefraction.dp.toPx(),
+                            refractionAmount = (lensRefraction * 1.2f).dp.toPx(),
+                            depthEffect = true,
+                            chromaticAberration = lensDispersion,
+                        )
+                    }
+                },
+                highlight = null,
+                shadow = { Shadow(radius = 12.dp, alpha = lensShadow) },
+                innerShadow = { InnerShadow(radius = 6.dp, alpha = lensShadow + .07f) },
+                onDrawSurface = {
+                    drawRect(lensTint)
+                    if (lensVeil > 0f) drawRect(lensPaper)
+                    glassEdgeBand(shape, p, lensEdge)
+                },
+            )
+        } else {
+            Modifier.clip(shape).background(p.paper.copy(alpha = .94f))
+        }
+        ).border(
+        .5.dp,
+        if (p.isDark) Color.White.copy(alpha = .06f) else p.ink.copy(alpha = .05f),
+        shape,
+    )
     Box(
         Modifier
             .fillMaxWidth()
             .height(80.dp)
-            .clip(RoundedCornerShape(18.dp)),
+            .clip(SmoothCorner(18.dp)),
         contentAlignment = Alignment.Center,
     ) {
         Column(
@@ -754,67 +681,44 @@ private fun GlassPreview(
                     Modifier
                         .fillMaxWidth(if (i == 2) .55f else 1f)
                         .height(6.dp)
-                        .background(p.ink.copy(alpha = .34f), RoundedCornerShape(3.dp)),
+                        .background(p.ink.copy(alpha = .34f), SmoothCorner(3.dp)),
                 )
                 Spacer(androidx.compose.ui.Modifier.height(9.dp))
             }
         }
-        Box(
-            Modifier
-                .width(210.dp)
-                .height(44.dp)
-                .liquidGlassBar(
-                    backdrop = backdrop,
-                    shape = shape,
-                    palette = p,
-                    blurDp = barBlur,
-                    refractionDp = barRefraction,
-                    dispersion = barDispersion,
-                    shadowAlpha = barShadow,
-                    veil = barVeil,
-                    edgeStrength = barEdge,
-                ),
-            contentAlignment = Alignment.Center,
-        ) {
+        if (showBar) {
             Box(
                 Modifier
-                    .width(58.dp)
-                    .height(34.dp)
-                    .then(
-                        if (backdrop != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                            Modifier.drawBackdrop(
-                                backdrop = backdrop,
-                                shape = { shape },
-                                effects = {
-                                    vibrancy()
-                                    if (lensBlur > 0f) blur(lensBlur.dp.toPx())
-                                    if (lensRefraction > 0f) {
-                                        lens(
-                                            refractionHeight = lensRefraction.dp.toPx(),
-                                            refractionAmount = (lensRefraction * 1.2f).dp.toPx(),
-                                            depthEffect = true,
-                                            chromaticAberration = lensDispersion,
-                                        )
-                                    }
-                                },
-                                highlight = null,
-                                shadow = { Shadow(radius = 12.dp, alpha = lensShadow) },
-                                innerShadow = { InnerShadow(radius = 6.dp, alpha = lensShadow + .07f) },
-                                onDrawSurface = {
-                                    drawRect(lensTint)
-                                    if (lensVeil > 0f) drawRect(lensPaper)
-                                    glassEdgeBand(shape, p, lensEdge)
-                                },
-                            )
-                        } else {
-                            Modifier.clip(shape).background(p.paper.copy(alpha = .94f))
-                        },
-                    )
-                    .border(
-                        .5.dp,
-                        if (p.isDark) Color.White.copy(alpha = .06f) else p.ink.copy(alpha = .05f),
-                        shape,
+                    .width(210.dp)
+                    .height(44.dp)
+                    .liquidGlassBar(
+                        backdrop = backdrop,
+                        shape = shape,
+                        palette = p,
+                        blurDp = barBlur,
+                        refractionDp = barRefraction,
+                        dispersion = barDispersion,
+                        shadowAlpha = barShadow,
+                        veil = barVeil,
+                        edgeStrength = barEdge,
                     ),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (showLens) {
+                    Box(
+                        Modifier
+                            .width(58.dp)
+                            .height(34.dp)
+                            .then(lensSurface),
+                    )
+                }
+            }
+        } else if (showLens) {
+            Box(
+                Modifier
+                    .width(124.dp)
+                    .height(34.dp)
+                    .then(lensSurface),
             )
         }
     }
@@ -832,12 +736,12 @@ private fun ThemePicker(store: AppStore, onChange: () -> Unit = {}) {
             Column(
                 androidx.compose.ui.Modifier
                     .width(104.dp)
-                    .clip(RoundedCornerShape(18.dp))
+                    .clip(SmoothCorner(18.dp))
                     .background(Brush.verticalGradient(listOf(pal.bgTop, pal.bgBottom)))
                     .border(
-                        if (s.theme == key) 1.8.dp else .8.dp,
-                        if (s.theme == key) ui.accent else ui.palette.line,
-                        RoundedCornerShape(18.dp),
+                        if (s.theme == key) 1.5.dp else .8.dp,
+                        if (s.theme == key) accentLine(ui.palette, ui.accent) else ui.palette.line,
+                        SmoothCorner(18.dp),
                     )
                     .bouncy(scale = .96f) {
                         store.updateSettings { it.copy(theme = key) }
@@ -849,9 +753,9 @@ private fun ThemePicker(store: AppStore, onChange: () -> Unit = {}) {
                     androidx.compose.ui.Modifier
                         .fillMaxWidth()
                         .height(46.dp)
-                        .clip(RoundedCornerShape(11.dp))
+                        .clip(SmoothCorner(11.dp))
                         .background(pal.paper)
-                        .border(.6.dp, if (pal.isDark) Color.White.copy(alpha = .08f) else Color.Black.copy(alpha = .06f), RoundedCornerShape(11.dp))
+                        .border(.6.dp, if (pal.isDark) Color.White.copy(alpha = .08f) else Color.Black.copy(alpha = .06f), SmoothCorner(11.dp))
                 ) {
                     Column(androidx.compose.ui.Modifier.padding(8.dp)) {
                         Box(androidx.compose.ui.Modifier.width(28.dp).height(2.dp).background(pal.ink.copy(alpha = .5f)))
@@ -1061,7 +965,7 @@ private fun WritingSettingsPage(store: AppStore, onBack: () -> Unit) {
                 Box(
                     androidx.compose.ui.Modifier
                         .fillMaxWidth()
-                        .clip(RoundedCornerShape(18.dp))
+                        .clip(SmoothCorner(18.dp))
                         .background(ui.palette.faint)
                         .padding(horizontal = 16.dp, vertical = 14.dp)
                 ) {
@@ -1176,13 +1080,58 @@ private fun NavigationSettingsPage(store: AppStore, onBack: () -> Unit) {
     val ui = LocalInk.current
     val s = ui.settings
     var names by remember { mutableStateOf(s.tabNames) }
-    SettingsPage("标签栏", "四个入口的名字，改完立刻出现在底部。", onBack) {
+    val tabDefaults = listOf("书架", "笔记", "数据", "问书", "设置")
+    SettingsPage("标签栏", "五个入口的名字，改完立刻出现在底部。", onBack) {
         item { MiniTabPreview(names, s.showTabLabels) }
         item { SectionCaption("显示") }
         item {
             SettingGroup {
                 SettingRow("显示文字", "图标下方显示标签名", Glyph.Layers) {
                     InkToggle(s.showTabLabels) { on -> store.updateSettings { it.copy(showTabLabels = on) } }
+                }
+            }
+        }
+        item { SectionCaption("显示哪些页面") }
+        item {
+            // 设置页永远在；其余四项可单独关掉，至少留一个。
+            val pages = listOf(
+                Triple("library", "书架", Glyph.Book),
+                Triple("notes", "笔记", Glyph.Note),
+                Triple("stats", "数据", Glyph.Chart),
+                Triple("ai", "问书", Glyph.Sparkles),
+            )
+            SettingGroup {
+                pages.forEachIndexed { i, (key, label, glyph) ->
+                    if (i > 0) RowDivider()
+                    val on = key !in s.hiddenTabs
+                    val wouldBeEmpty = on && s.hiddenTabs.size >= 3
+                    SettingRow(
+                        label,
+                        when {
+                            !on -> "已隐藏"
+                            wouldBeEmpty -> "至少留一个页面"
+                            else -> "显示在底部"
+                        },
+                        glyph,
+                    ) {
+                        Box(androidx.compose.ui.Modifier.alpha(if (wouldBeEmpty) .45f else 1f)) {
+                            InkToggle(on) { next ->
+                                if (!next && s.hiddenTabs.size >= 3) {
+                                    ToastBus.show("至少留一个页面")
+                                } else {
+                                    store.updateSettings {
+                                        it.copy(
+                                            hiddenTabs = if (next) s.hiddenTabs - key else s.hiddenTabs + key,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                RowDivider()
+                SettingRow("设置", "总是显示", Glyph.Gear) {
+                    Txt("常开", size = 11f, color = ui.palette.muted)
                 }
             }
         }
@@ -1197,7 +1146,7 @@ private fun NavigationSettingsPage(store: AppStore, onBack: () -> Unit) {
                         Box(
                             androidx.compose.ui.Modifier
                                 .size(26.dp)
-                                .clip(RoundedCornerShape(8.dp))
+                                .clip(SmoothCorner(8.dp))
                                 .background(ui.palette.faint),
                             contentAlignment = Alignment.Center,
                         ) {
@@ -1211,23 +1160,23 @@ private fun NavigationSettingsPage(store: AppStore, onBack: () -> Unit) {
                                 next[index] = value.take(5)
                                 names = next
                                 store.updateSettings {
-                                    it.copy(tabNames = next.mapIndexed { i, n -> n.ifBlank { listOf("书架", "笔记", "数据", "设置")[i] } })
+                                    it.copy(tabNames = next.mapIndexed { i, n -> n.ifBlank { tabDefaults.getOrElse(i) { "标签" } } })
                                 }
                             },
-                            listOf("书架", "笔记", "数据", "设置")[index],
+                            tabDefaults.getOrElse(index) { "标签" },
                             minHeight = 44.dp,
                             textSize = 13f,
                             modifier = androidx.compose.ui.Modifier.weight(1f),
                         )
                     }
-                    if (index < 3) RowDivider()
+                    if (index < names.lastIndex) RowDivider()
                 }
             }
         }
         item {
             GlassButton("恢复默认名称", {
-                names = listOf("书架", "笔记", "数据", "设置")
-                store.updateSettings { it.copy(tabNames = names) }
+                names = tabDefaults
+                store.updateSettings { it.copy(tabNames = tabDefaults) }
                 ToastBus.show("标签名称已恢复")
             }, androidx.compose.ui.Modifier.fillMaxWidth(), glyph = Glyph.Undo)
         }
@@ -1239,13 +1188,13 @@ private fun MiniTabPreview(names: List<String>, showLabels: Boolean) {
     val ui = LocalInk.current
     MoyuSurface(androidx.compose.ui.Modifier.fillMaxWidth(), radius = 30f, flat = true) {
         Row(androidx.compose.ui.Modifier.fillMaxWidth().padding(7.dp)) {
-            val icons = listOf(Glyph.Book, Glyph.Note, Glyph.Chart, Glyph.Gear)
+            val icons = listOf(Glyph.Book, Glyph.Note, Glyph.Chart, Glyph.Sparkles, Glyph.Gear)
             names.forEachIndexed { index, name ->
                 val active = index == 0
                 Column(
                     androidx.compose.ui.Modifier
                         .weight(1f)
-                        .clip(RoundedCornerShape(22.dp))
+                        .clip(SmoothCorner(22.dp))
                         .background(if (active) ui.palette.ink else Color.Transparent)
                         .padding(vertical = 9.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -1303,7 +1252,7 @@ private fun DataSettingsPage(store: AppStore, onBack: () -> Unit) {
                         Box(
                             androidx.compose.ui.Modifier
                                 .size(42.dp)
-                                .clip(RoundedCornerShape(13.dp))
+                                .clip(SmoothCorner(13.dp))
                                 .background(ui.accent.copy(alpha = .12f)),
                             contentAlignment = Alignment.Center,
                         ) { LineIcon(Glyph.Lock, ui.accent, 20.dp) }
@@ -1496,22 +1445,20 @@ private fun AboutPage(store: AppStore, onBack: () -> Unit) {
     var resetSettings by remember { mutableStateOf(false) }
     var checkingUpdate by remember { mutableStateOf(false) }
     var availableUpdate by remember { mutableStateOf<UpdateInfo?>(null) }
-    SettingsPage("关于字隅", "一个安静的写作空间。", onBack) {
+    SettingsPage("关于字隅", "", onBack) {
         item {
             Column(
                 androidx.compose.ui.Modifier.fillMaxWidth().padding(vertical = 16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Box(
-                    androidx.compose.ui.Modifier.size(76.dp).clip(RoundedCornerShape(23.dp)).background(ui.palette.ink),
+                    androidx.compose.ui.Modifier.size(76.dp).clip(SmoothCorner(23.dp)).background(ui.palette.ink),
                     contentAlignment = Alignment.Center,
                 ) {
                     Txt("字", size = 34f, color = ui.palette.bgTop, weight = FontWeight.Medium, fontFamily = androidx.compose.ui.text.font.FontFamily.Serif)
                 }
                 Spacer(androidx.compose.ui.Modifier.height(12.dp))
                 Txt("字隅", size = 23f, weight = FontWeight.SemiBold, letterSpacing = 3f)
-                Spacer(androidx.compose.ui.Modifier.height(3.dp))
-                Txt("${BuildConfig.VERSION_NAME} · Compose 重写版", size = 9.5f, color = ui.palette.muted)
                 Spacer(androidx.compose.ui.Modifier.height(7.dp))
                 Txt(
                     "作者 3Cne · QQ 2503581955",
@@ -1523,8 +1470,6 @@ private fun AboutPage(store: AppStore, onBack: () -> Unit) {
         }
         item {
             SettingGroup("技术") {
-                SettingRow("界面框架", "Jetpack Compose · 纯原生绘制", Glyph.Layers)
-                RowDivider()
                 SettingRow("屏幕刷新率", "本机支持 ${maxRefresh.roundToInt()}Hz · 当前 ${refresh.roundToInt()}Hz", Glyph.Motion)
                 RowDivider()
                 SettingRow("显示帧率", "在屏幕下方显示实时帧率", Glyph.Chart) {
@@ -1532,8 +1477,6 @@ private fun AboutPage(store: AppStore, onBack: () -> Unit) {
                 }
                 RowDivider()
                 SettingRow("导出格式", "EPUB 3 / TXT · 自动目录与封面", Glyph.Export)
-                RowDivider()
-                SettingRow("数据位置", "仅本机 · 可导出 JSON 备份", Glyph.Lock)
             }
         }
         item {
@@ -1659,102 +1602,445 @@ private fun openNotificationSettings(context: Context) {
 
 
 
-
+/**
+ * 问书 settings live in the app's own settings, not inside the AI tab: the tab
+ * is for asking, the settings are for wiring it up. Same controls, one home.
+ */
 @Composable
-private fun DockGlassSection(store: AppStore, onPreview: () -> Unit) {
+private fun AiSettingsPage(store: AppStore, onBack: () -> Unit, onOpen: (String) -> Unit = {}) {
     val ui = LocalInk.current
-    val s = ui.settings
-    SectionCaption("投射亮度")
-    SettingGroup {
-        Column {
-            SettingRow("标签栏", "${(s.tabBarLight * 100).roundToInt()}%", Glyph.Sparkles)
-            InkSlider(s.tabBarLight, { v -> store.updateSettings { it.copy(tabBarLight = v) }; onPreview() },
-                0f, 1f, modifier = Modifier.padding(horizontal = 16.dp))
+    val context = LocalContext.current
+    val settings = store.settings
+    val scope = rememberCoroutineScope()
+    var keyInput by remember { mutableStateOf("") }
+    var testing by remember { mutableStateOf(false) }
+    var testResult by remember { mutableStateOf<String?>(null) }
+    var keyTick by remember { mutableStateOf(0) }
+    val hasKey = remember(keyTick) { AiKey.has(context) }
+    val keyTail = remember(keyTick) { AiKey.load(context)?.let { AiKey.tail(it) }.orEmpty() }
+
+    SettingsPage("问书", "", onBack) {
+        item {
+            SettingGroup("开与关") {
+                SettingRow(
+                    "启用问书",
+                    glyph = Glyph.Sparkles,
+                ) {
+                    InkToggle(settings.aiEnabled) { v -> store.updateSettings { it.copy(aiEnabled = v) } }
+                }
+                RowDivider()
+                SettingRow(
+                    "自动记忆",
+                    glyph = Glyph.Note,
+                ) {
+                    InkToggle(settings.aiAutoMemory) { v -> store.updateSettings { it.copy(aiAutoMemory = v) } }
+                }
+            }
         }
-        RowDivider()
-        Column {
-            SettingRow("选中镜片", "${(s.tabLensLight * 100).roundToInt()}%", Glyph.Sparkles)
-            InkSlider(s.tabLensLight, { v -> store.updateSettings { it.copy(tabLensLight = v) }; onPreview() },
-                0f, 1f, modifier = Modifier.padding(horizontal = 16.dp))
+        item {
+            SettingGroup("联网与文件") {
+                SettingRow(
+                    "联网搜索",
+                    "按次计费 · \$0.75/1000 次",
+                    Glyph.Search,
+                ) {
+                    InkToggle(settings.aiWeb) { v -> store.updateSettings { it.copy(aiWeb = v) } }
+                }
+                RowDivider()
+                SettingRow("搜索上限", "一次最多几次", Glyph.Layers) {
+                    androidx.compose.foundation.layout.Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        (1..5).forEach { n ->
+                            GlassChip(n.toString(), settings.aiWebMax == n) {
+                                store.updateSettings { it.copy(aiWebMax = n) }
+                            }
+                        }
+                    }
+                }
+                RowDivider()
+                SettingRow("工具过程", "回答下方显示每一步", Glyph.List) {
+                    InkToggle(settings.aiToolTrace) { v -> store.updateSettings { it.copy(aiToolTrace = v) } }
+                }
+            }
         }
-        RowDivider()
-        Column {
-            SettingRow("工具 dock", "${(s.dockLight * 100).roundToInt()}%", Glyph.Sparkles)
-            InkSlider(s.dockLight, { v -> store.updateSettings { it.copy(dockLight = v) }; onPreview() },
-                0f, 1f, modifier = Modifier.padding(horizontal = 16.dp))
+        item {
+            SettingGroup("服务") {
+                Column(androidx.compose.ui.Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                    Txt("服务地址", size = 12.5f)
+                    Spacer(androidx.compose.ui.Modifier.height(6.dp))
+                    InkField(
+                        value = settings.aiBaseUrl,
+                        onValueChange = { v -> store.updateSettings { it.copy(aiBaseUrl = v) } },
+                        placeholder = AiDefaults.BASE_URL,
+                        textSize = 13f,
+                        minHeight = 44.dp,
+                    )
+                    Spacer(androidx.compose.ui.Modifier.height(12.dp))
+                    Txt("模型", size = 12.5f)
+                    Spacer(androidx.compose.ui.Modifier.height(6.dp))
+                    InkField(
+                        value = settings.aiModel,
+                        onValueChange = { v -> store.updateSettings { it.copy(aiModel = v) } },
+                        placeholder = AiDefaults.MODEL,
+                        textSize = 13f,
+                        minHeight = 44.dp,
+                    )
+                    Spacer(androidx.compose.ui.Modifier.height(8.dp))
+                    GlassChip("还原默认", false, onClick = {
+                        store.updateSettings { it.copy(aiBaseUrl = AiDefaults.BASE_URL, aiModel = AiDefaults.MODEL) }
+                    })
+                }
+            }
+        }
+        item {
+            SettingGroup("Key") {
+                Column(androidx.compose.ui.Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                    Txt(if (hasKey) "已保存 $keyTail" else "还没有 Key", size = 12.5f)
+                    Spacer(androidx.compose.ui.Modifier.height(6.dp))
+                    InkField(
+                        value = keyInput,
+                        onValueChange = { keyInput = it },
+                        placeholder = if (hasKey) "输入新 Key 可替换" else "粘贴 Key",
+                        textSize = 13f,
+                        minHeight = 44.dp,
+                    )
+                    Spacer(androidx.compose.ui.Modifier.height(10.dp))
+                    androidx.compose.foundation.layout.Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        GlassButton("保存", {
+                            if (AiKey.save(context, keyInput)) {
+                                keyInput = ""
+                                keyTick++
+                                testResult = "已保存到本机加密存储"
+                            } else {
+                                testResult = "保存失败：本机安全存储不可用"
+                            }
+                        }, androidx.compose.ui.Modifier.weight(1f), glyph = Glyph.Check)
+                        GlassButton(if (testing) "测试中…" else "测试连接", {
+                            val k = AiKey.load(context) ?: keyInput
+                            if (k.isBlank()) {
+                                testResult = "先填 Key"
+                            } else {
+                                testing = true
+                                testResult = null
+                                scope.launch {
+                                    val r = AiClient.chat(
+                                        settings.aiBaseUrl, settings.aiModel, k, settings.aiTemperature,
+                                        "你是测试助手。", "只回复两个字：可以", maxTokens = 16,
+                                    )
+                                    testing = false
+                                    testResult = if (r.ok) "连接正常：${r.text.take(20)}" else r.error
+                                }
+                            }
+                        }, androidx.compose.ui.Modifier.weight(1f), glyph = Glyph.Link)
+                    }
+                    if (testResult != null) {
+                        Spacer(androidx.compose.ui.Modifier.height(8.dp))
+                        Txt(testResult!!, size = 10.5f, color = ui.palette.muted, lineHeight = 16f)
+                    }
+                    Spacer(androidx.compose.ui.Modifier.height(4.dp))
+                }
+            }
+        }
+        item {
+            SettingGroup("发送上限") {
+                SettingRow("自动检索", "没引用时每次带多少原文", Glyph.Search) {
+                    Txt("${settings.aiContextChars} 字 · ${settings.aiTopK} 段", size = 12f, color = ui.palette.muted)
+                }
+                RowDivider()
+                SettingRow("引用上限", "整本 / 章节 / 笔记合计最多发多少字", Glyph.Link) {
+                    Txt("${settings.aiQuoteMaxChars} 字", size = 12f, color = ui.palette.muted)
+                }
+                RowDivider()
+                SettingRow("记忆上限", "超出后按「最久没用」淘汰", Glyph.Layers) {
+                    Txt("${settings.aiMemoryLimit} 条", size = 12f, color = ui.palette.muted)
+                }
+            }
         }
     }
-    Spacer(Modifier.height(12.dp))
-    SectionCaption("工具 dock 玻璃")
-    SettingGroup {
-        Column {
-            SettingRow("模糊", "${s.dockBlur.roundToInt()} dp", Glyph.Sparkles)
-            InkSlider(s.dockBlur, { v -> store.updateSettings { it.copy(dockBlur = (v * 10).roundToInt() / 10f) }; onPreview() },
-                0f, 20f, modifier = Modifier.padding(horizontal = 16.dp))
+}
+/** A named slider with its live value and a one-line explanation. Used by the
+ *  问书 glass section so three knobs do not need three bespoke rows. */
+@Composable
+private fun GlassSliderRow(
+    title: String,
+    value: Float,
+    min: Float,
+    max: Float,
+    onChange: (Float) -> Unit,
+) {
+    val ui = LocalInk.current
+    Column(androidx.compose.ui.Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+        androidx.compose.foundation.layout.Row(verticalAlignment = Alignment.CenterVertically) {
+            Txt(title, size = 12.5f)
+            Spacer(androidx.compose.ui.Modifier.weight(1f))
+            Txt(
+                if (max <= 2f) "${(value * 100).roundToInt()}%" else "${value.roundToInt()}",
+                size = 12f,
+                color = ui.palette.muted,
+            )
         }
-        RowDivider()
-        Column {
-            SettingRow("边缘折射", "${s.dockRefraction.roundToInt()} dp", Glyph.Sparkles)
-            InkSlider(s.dockRefraction, { v -> store.updateSettings { it.copy(dockRefraction = (v * 10).roundToInt() / 10f) }; onPreview() },
-                0f, 60f, modifier = Modifier.padding(horizontal = 16.dp))
-        }
-        RowDivider()
-        Column {
-            SettingRow("内外阴影", "${(s.dockShadow * 100).roundToInt()}%", Glyph.Sparkles)
-            InkSlider(s.dockShadow, { v -> store.updateSettings { it.copy(dockShadow = v) }; onPreview() },
-                0f, 1f, modifier = Modifier.padding(horizontal = 16.dp))
-        }
-        RowDivider()
-        Column {
-            SettingRow("dock 不透明度", "${(s.dockBarOpacity * 100).roundToInt()}%", Glyph.Sparkles)
-            InkSlider(s.dockBarOpacity, { v -> store.updateSettings { it.copy(dockBarOpacity = v) }; onPreview() },
-                0f, 1f, modifier = Modifier.padding(horizontal = 16.dp))
-        }
-        RowDivider()
-        Column {
-            SettingRow("边缘带", "${(s.dockEdge * 100).roundToInt()}%", Glyph.Sparkles)
-            InkSlider(s.dockEdge, { v -> store.updateSettings { it.copy(dockEdge = v) }; onPreview() },
-                0f, 1f, modifier = Modifier.padding(horizontal = 16.dp))
-        }
-        RowDivider()
-        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-            Txt("边缘色散", size = 10f, color = ui.palette.ink)
-            Spacer(Modifier.weight(1f))
-            Segmented(listOf("开", "关"), if (s.dockDispersion) 0 else 1,
-                { i -> store.updateSettings { it.copy(dockDispersion = i == 0) }; onPreview() },
-                Modifier.width(120.dp))
-        }
+        Spacer(androidx.compose.ui.Modifier.height(6.dp))
+        InkSlider(value = value, onChange = onChange, min = min, max = max)
     }
-    Spacer(Modifier.height(10.dp))
-    DockGlassPreview()
 }
 
+/** 开 / 关 row, same shape as the tab bar's 边缘色散 switch. */
 @Composable
-private fun DockGlassPreview() {
+private fun DispersionRow(on: Boolean, onChange: (Boolean) -> Unit) {
     val ui = LocalInk.current
-    val p = ui.palette
-    val s = ui.settings
-    val backdrop = rememberLayerBackdrop()
-    Box(Modifier.fillMaxWidth().height(104.dp).clip(RoundedCornerShape(14.dp))) {
-        Column(Modifier.fillMaxSize().layerBackdrop(backdrop).background(p.paper).padding(16.dp)) {
-            Box(Modifier.fillMaxWidth(.85f).height(6.dp).background(p.ink.copy(alpha = .30f), RoundedCornerShape(3.dp)))
-            Spacer(Modifier.height(8.dp))
-            Box(Modifier.fillMaxWidth(.6f).height(6.dp).background(p.ink.copy(alpha = .30f), RoundedCornerShape(3.dp)))
+    androidx.compose.foundation.layout.Row(
+        androidx.compose.ui.Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(androidx.compose.ui.Modifier.weight(1f)) {
+            Txt("边缘色散", size = 12.5f)
         }
-        Box(
-            Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(48.dp).liquidGlassBar(
-                backdrop = backdrop,
-                shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
-                palette = p,
-                blurDp = s.dockBlur,
-                refractionDp = s.dockRefraction,
-                dispersion = s.dockDispersion,
-                shadowAlpha = s.dockShadow,
-                veil = s.dockBarOpacity,
-                edgeStrength = s.dockEdge,
-                light = s.dockLight,
-            ),
-            contentAlignment = Alignment.Center,
-        ) { Txt("工具 dock 预览", size = 9f, color = p.ink) }
+        Segmented(
+            listOf("开", "关"),
+            if (on) 0 else 1,
+            { i -> onChange(i == 0) },
+            androidx.compose.ui.Modifier.width(110.dp),
+        )
+    }
+}
+
+/**
+ * All four glass surfaces on one page: 标签栏 / 镜片 / 输入框 / 按钮.
+ * They used to live in two places (外观 and 问书), which made "tune the glass"
+ * a hunt; one page, one preview, one set of rows.
+ */
+@Composable
+private fun GlassSettingsPage(store: AppStore, onBack: () -> Unit) {
+    val ui = LocalInk.current
+    val s = ui.settings
+    var group by remember { mutableStateOf(0) }
+    // The preview reads the live settings directly. The old 110 ms debounce was
+    // the reason "nothing moves while I drag": each new value reset the timer,
+    // so a continuous drag never let a single snapshot through.
+    SettingsPage("玻璃", "", onBack) {
+        item {
+            Segmented(
+                listOf("标签栏", "镜片", "输入框", "按钮"),
+                group,
+                { group = it },
+                androidx.compose.ui.Modifier.fillMaxWidth(),
+            )
+        }
+        // The preview has to stay on screen while the knobs are dragged or it
+        // reads as "nothing is connected": pin it to the top of the list.
+        stickyHeader {
+            Box(
+                androidx.compose.ui.Modifier
+                    .fillMaxWidth()
+                    .background(ui.palette.bgTop)
+                    .padding(top = 6.dp, bottom = 8.dp),
+            ) {
+                GlassLivePreview(group, s)
+            }
+        }
+        item {
+            // The four groups slide by their relative position, like the root
+            // tabs and the 对话/记忆 switch; the knobs travel together.
+            AnimatedContent(
+                targetState = group,
+                transitionSpec = {
+                    val dir = if (targetState > initialState) 1 else -1
+                    (slideInHorizontally(tween(240)) { it * dir } + fadeIn(tween(180)))
+                        .togetherWith(slideOutHorizontally(tween(240)) { -it * dir } + fadeOut(tween(140)))
+                },
+                label = "glassGroup",
+            ) { g ->
+                Column {
+                    Spacer(androidx.compose.ui.Modifier.height(2.dp))
+                    when (g) {
+                        0 -> GlassKnobs(
+                            blur = s.tabBlur, onBlur = { v -> store.updateSettings { it.copy(tabBlur = v) } },
+                            refraction = s.tabRefraction, onRefraction = { v -> store.updateSettings { it.copy(tabRefraction = v) } },
+                            shadow = s.tabShadow, onShadow = { v -> store.updateSettings { it.copy(tabShadow = v) } },
+                            opacity = s.tabBarOpacity, onOpacity = { v -> store.updateSettings { it.copy(tabBarOpacity = v) } },
+                            edge = s.tabEdge, onEdge = { v -> store.updateSettings { it.copy(tabEdge = v) } },
+                            dispersion = s.tabDispersion, onDispersion = { v -> store.updateSettings { it.copy(tabDispersion = v) } },
+                            opacityLabel = "整条不透明度",
+                        )
+                        1 -> GlassKnobs(
+                            blur = s.lensBlur, onBlur = { v -> store.updateSettings { it.copy(lensBlur = v) } },
+                            refraction = s.lensRefraction, onRefraction = { v -> store.updateSettings { it.copy(lensRefraction = v) } },
+                            shadow = s.lensShadow, onShadow = { v -> store.updateSettings { it.copy(lensShadow = v) } },
+                            opacity = s.tabLensOpacity, onOpacity = { v -> store.updateSettings { it.copy(tabLensOpacity = v) } },
+                            edge = s.lensEdge, onEdge = { v -> store.updateSettings { it.copy(lensEdge = v) } },
+                            dispersion = s.lensDispersion, onDispersion = { v -> store.updateSettings { it.copy(lensDispersion = v) } },
+                            opacityLabel = "镜片不透明度",
+                        )
+                        2 -> GlassKnobs(
+                            blur = s.fieldGlassBlur, onBlur = { v -> store.updateSettings { it.copy(fieldGlassBlur = v) } },
+                            refraction = s.fieldGlassRefraction, onRefraction = { v -> store.updateSettings { it.copy(fieldGlassRefraction = v) } },
+                            shadow = s.fieldGlassShadow, onShadow = { v -> store.updateSettings { it.copy(fieldGlassShadow = v) } },
+                            opacity = s.fieldGlassOpacity, onOpacity = { v -> store.updateSettings { it.copy(fieldGlassOpacity = v) } },
+                            edge = s.fieldGlassEdge, onEdge = { v -> store.updateSettings { it.copy(fieldGlassEdge = v) } },
+                            dispersion = s.fieldGlassDispersion, onDispersion = { v -> store.updateSettings { it.copy(fieldGlassDispersion = v) } },
+                            opacityLabel = "输入框不透明度",
+                        )
+                        else -> GlassKnobs(
+                            blur = s.btnGlassBlur, onBlur = { v -> store.updateSettings { it.copy(btnGlassBlur = v) } },
+                            refraction = s.btnGlassRefraction, onRefraction = { v -> store.updateSettings { it.copy(btnGlassRefraction = v) } },
+                            shadow = s.btnGlassShadow, onShadow = { v -> store.updateSettings { it.copy(btnGlassShadow = v) } },
+                            opacity = s.btnGlassOpacity, onOpacity = { v -> store.updateSettings { it.copy(btnGlassOpacity = v) } },
+                            edge = s.btnGlassEdge, onEdge = { v -> store.updateSettings { it.copy(btnGlassEdge = v) } },
+                            dispersion = s.btnGlassDispersion, onDispersion = { v -> store.updateSettings { it.copy(btnGlassDispersion = v) } },
+                            opacityLabel = "按钮不透明度",
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** The same six rows for every group, so the four tabs cannot drift apart. */
+@Composable
+private fun GlassKnobs(
+    blur: Float, onBlur: (Float) -> Unit,
+    refraction: Float, onRefraction: (Float) -> Unit,
+    shadow: Float, onShadow: (Float) -> Unit,
+    opacity: Float, onOpacity: (Float) -> Unit,
+    edge: Float, onEdge: (Float) -> Unit,
+    dispersion: Boolean, onDispersion: (Boolean) -> Unit,
+    opacityLabel: String,
+) {
+    SettingGroup {
+        GlassSliderRow("模糊", blur, 0f, 30f) { onBlur(it) }
+        RowDivider()
+        GlassSliderRow("边缘折射", refraction, 0f, 40f) { onRefraction(it) }
+        RowDivider()
+        GlassSliderRow("内外阴影", shadow, 0f, 1f) { onShadow(it) }
+        RowDivider()
+        GlassSliderRow(opacityLabel, opacity, 0f, 1f) { onOpacity(it) }
+        RowDivider()
+        GlassSliderRow("边缘带", edge, 0f, 2f) { onEdge(it) }
+        RowDivider()
+        DispersionRow(dispersion) { onDispersion(it) }
+    }
+}
+
+/**
+ * Live: the real bar + lens, plus the actual input and button glass below.
+ *
+ * The field and button previews used to be hand-drawn (paper fill + shadow +
+ * border). That is not the material the tab runs: the blur went on the PAGE
+ * behind the control, and the control itself had no refraction and no
+ * dispersion — so three of the six sliders moved nothing. They now take the
+ * same `liquidGlassBar` + recorded-layer path as the real input row, which is
+ * the only way "tune it here, see it there" can be true.
+ */
+@Composable
+private fun GlassLivePreview(group: Int, s: AppSettings) {
+    val p = LocalInk.current.palette
+    if (group <= 1) {
+        GlassPreview(
+            barBlur = s.tabBlur,
+            barRefraction = s.tabRefraction,
+            barDispersion = s.tabDispersion,
+            barShadow = s.tabShadow,
+            barVeil = s.tabBarOpacity,
+            lensBlur = s.lensBlur,
+            lensRefraction = s.lensRefraction,
+            lensDispersion = s.lensDispersion,
+            lensShadow = s.lensShadow,
+            lensVeil = s.tabLensOpacity,
+            barEdge = s.tabEdge,
+            lensEdge = s.lensEdge,
+            showBar = group == 0,
+            showLens = group == 1,
+        )
+        return
+    }
+    val button = group == 3
+    val backdrop = rememberLayerBackdrop()
+    val blur = if (button) s.btnGlassBlur else s.fieldGlassBlur
+    val refraction = if (button) s.btnGlassRefraction else s.fieldGlassRefraction
+    val dispersion = if (button) s.btnGlassDispersion else s.fieldGlassDispersion
+    val veil = if (button) s.btnGlassOpacity else s.fieldGlassOpacity
+    val edge = if (button) s.btnGlassEdge else s.fieldGlassEdge
+    val shadow = if (button) s.btnGlassShadow else s.fieldGlassShadow
+    // Backdrop's lens walks a CornerBasedShape only; SmoothCorner would silently
+    // drop refraction (and used to throw at draw time). The real input row uses
+    // the same rounded shape, so preview and device stay identical.
+    val shape = if (button) CircleShape else androidx.compose.foundation.shape.RoundedCornerShape(22.dp)
+    Box(
+        androidx.compose.ui.Modifier
+            .fillMaxWidth()
+            .height(96.dp)
+            .clip(SmoothCorner(18.dp)),
+        contentAlignment = Alignment.Center,
+    ) {
+        // The layer the glass samples: a static paper slice. Nothing here
+        // changes while a slider moves, so the backdrop is recorded once and
+        // only the effects re-run — that is what keeps the drag smooth.
+        Column(
+            androidx.compose.ui.Modifier
+                .fillMaxSize()
+                .layerBackdrop(backdrop)
+                .background(p.paper)
+                .padding(horizontal = 18.dp),
+            verticalArrangement = Arrangement.Center,
+        ) {
+            repeat(3) { i ->
+                Box(
+                    androidx.compose.ui.Modifier
+                        .fillMaxWidth(if (i == 2) .55f else 1f)
+                        .height(6.dp)
+                        .background(p.ink.copy(alpha = .34f), SmoothCorner(3.dp)),
+                )
+                Spacer(androidx.compose.ui.Modifier.height(9.dp))
+            }
+        }
+        if (!button) {
+            Box(
+                androidx.compose.ui.Modifier
+                    .padding(horizontal = 24.dp)
+                    .fillMaxWidth()
+                    .height(48.dp)
+                    .liquidGlassBar(
+                        backdrop = backdrop,
+                        shape = shape,
+                        palette = p,
+                        blurDp = blur,
+                        refractionDp = refraction,
+                        dispersion = dispersion,
+                        shadowAlpha = shadow,
+                        veil = veil,
+                        edgeStrength = edge,
+                    ),
+                contentAlignment = Alignment.CenterStart,
+            ) {
+                Box(androidx.compose.ui.Modifier.padding(horizontal = 14.dp)) {
+                    Txt("问这本书的任何事", size = 12.5f, color = p.muted)
+                }
+            }
+        } else {
+            androidx.compose.foundation.layout.Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                listOf(Glyph.Link, Glyph.ArrowUp).forEach { glyph ->
+                    Box(
+                        androidx.compose.ui.Modifier
+                            .size(46.dp)
+                            .liquidGlassBar(
+                                backdrop = backdrop,
+                                shape = shape,
+                                palette = p,
+                                blurDp = blur,
+                                refractionDp = refraction,
+                                dispersion = dispersion,
+                                shadowAlpha = shadow,
+                                veil = veil,
+                                edgeStrength = edge,
+                            ),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        LineIcon(glyph, p.ink, 18.dp)
+                    }
+                }
+            }
+        }
     }
 }

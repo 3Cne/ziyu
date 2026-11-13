@@ -28,12 +28,12 @@ import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import kotlinx.coroutines.delay
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -42,6 +42,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -124,7 +127,7 @@ fun NotesScreen(
                         Column(Modifier.weight(1f)) {
                             Txt("笔记", size = 34f, weight = FontWeight.SemiBold, letterSpacing = .4f)
                         }
-                        GlassIconButton(Glyph.Plus, { create() }, size = 44.dp)
+                        GlassIconButton(Glyph.Plus, { create() })
                     }
                     Spacer(Modifier.height(18.dp))
                     val groupName = when (selectedGroup) {
@@ -165,13 +168,15 @@ fun NotesScreen(
                 }
             } else {
                 gridItems(filtered, key = { it.id }) { note ->
-                    NoteCard(
-                        note = note,
-                        groupName = store.noteGroups.firstOrNull { it.id == note.groupId }?.name,
-                        chapterBadge = noteChapterBadge(store, note),
-                        onClick = { onOpenNote(note.id) },
-                        onMore = { menuNote = note },
-                    )
+                    Box(Modifier.animateItem()) {
+                        NoteCard(
+                            note = note,
+                            groupName = store.noteGroups.firstOrNull { it.id == note.groupId }?.name,
+                            chapterBadge = noteChapterBadge(store, note),
+                            onClick = { _ -> onOpenNote(note.id) },
+                            onMore = { menuNote = note },
+                        )
+                    }
                 }
             }
         }
@@ -283,18 +288,29 @@ private fun NoteCard(
     note: Note,
     groupName: String?,
     chapterBadge: String? = null,
-    onClick: () -> Unit,
+    onClick: (androidx.compose.ui.layout.LayoutCoordinates?) -> Unit,
     onMore: () -> Unit,
 ) {
     val ui = LocalInk.current
     val p = ui.palette
     val pending = note.todos.count { !it.done }
     val next = note.nextReminder()
-    MoyuSurface(Modifier.fillMaxWidth(), radius = 24f, flat = true) {
+    // The card keeps its own coordinates, not a rect: the tab pager moves pages
+    // with a graphics-layer translation, which does not re-run layout callbacks,
+    // so a rect cached at layout time would be stale (and read zero while the
+    // page is still off-screen). boundsInRoot() at click time is current.
+    var cardCoords by remember { mutableStateOf<androidx.compose.ui.layout.LayoutCoordinates?>(null) }
+    MoyuSurface(
+        Modifier
+            .fillMaxWidth()
+            .onGloballyPositioned { cardCoords = it },
+        radius = 24f,
+        flat = true,
+    ) {
         Column(
             Modifier
                 .fillMaxWidth()
-                .bouncy(scale = .985f) { onClick() }
+                .bouncy(scale = .985f) { onClick(cardCoords) }
                 .padding(16.dp)
         ) {
             Row(verticalAlignment = Alignment.Top) {

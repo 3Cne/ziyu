@@ -40,12 +40,12 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -53,8 +53,10 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -67,6 +69,8 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
@@ -131,11 +135,20 @@ fun BookCover(
             }.getOrNull()
         }
     }
-    val shape = RoundedCornerShape(radius.dp)
-    BoxWithConstraints(modifier.clip(shape)) {
+    val shape = SmoothCorner(radius.dp)
+    // `clip` anti-aliases its edge: the outermost pixels are semi-transparent and
+    // the card's paper colour shows through, which on a dark cover reads as a
+    // thin bright fringe. Painting the cover's own base colour under the clip
+    // makes those edge pixels blend into the cover instead.
+    val coverBase = coverColorA(book.coverStyle)
+    BoxWithConstraints(
+        modifier
+            .clip(shape)
+            .background(coverBase)
+    ) {
         val widthDp = maxWidth
         val titleSize = (widthDp.value * .14f).coerceIn(15f, 34f)
-        val a = coverColorA(book.coverStyle)
+        val a = coverBase
         val b = coverColorB(book.coverStyle)
         val ink = coverInk(book.coverStyle)
         Canvas(Modifier.fillMaxSize()) {
@@ -320,17 +333,6 @@ fun BookCover(
                 }
             }
         }
-        val borderWidth = when {
-            maxWidth >= 100.dp -> 8.dp
-            maxWidth >= 60.dp -> 3.dp
-            else -> 2.dp
-        }
-        val borderColor = if (ui.palette.isDark) {
-            lerp(ui.palette.paper, Color.White, .08f)
-        } else {
-            lerp(ui.palette.paper, ui.palette.ink, .08f)
-        }
-        Box(Modifier.matchParentSize().border(borderWidth, borderColor, shape))
     }
 }
 
@@ -362,6 +364,13 @@ fun LibraryScreen(
     var groupManagerOpen by remember { mutableStateOf(false) }
     var controlsOpen by remember { mutableStateOf(false) }
     var selectedGroup by remember { mutableStateOf<String?>(null) }
+    // Where each card sits right now. Click time resolves it through the live
+    // coordinates: the tab pager moves pages with a graphics-layer translation,
+    // so a rect cached at layout time would be stale.
+    val flightCoords = remember { mutableStateMapOf<String, androidx.compose.ui.layout.LayoutCoordinates>() }
+    fun openBook(book: Book) {
+        onOpenBook(book.id)
+    }
     val visibleBooks = books.filter { b ->
         selectedGroup == null || (selectedGroup == "" && b.groupId == null) || (selectedGroup != "" && b.groupId == selectedGroup)
     }
@@ -416,11 +425,13 @@ fun LibraryScreen(
                     }
                 } else {
                     items(visibleBooks, key = { it.id }) { book ->
-                        BookListRow(
-                            book,
-                            groupName = store.bookGroups.firstOrNull { it.id == book.groupId }?.name,
-                            onClick = { onOpenBook(book.id) },
-                        )
+                        Box(Modifier.animateItem()) {
+                            BookListRow(
+                                book,
+                                groupName = store.bookGroups.firstOrNull { it.id == book.groupId }?.name,
+                                onClick = { openBook(book) },
+                            )
+                        }
                     }
                 }
             }
@@ -463,12 +474,14 @@ fun LibraryScreen(
                     }
                 } else {
                     items(visibleBooks, key = { it.id }) { book ->
-                        BookGridCard(
-                            book,
-                            compact = settings.libraryMode == "compact",
-                            groupName = store.bookGroups.firstOrNull { it.id == book.groupId }?.name,
-                            onClick = { onOpenBook(book.id) },
-                        )
+                        Box(Modifier.animateItem()) {
+                            BookGridCard(
+                                book,
+                                compact = settings.libraryMode == "compact",
+                                groupName = store.bookGroups.firstOrNull { it.id == book.groupId }?.name,
+                                onClick = { openBook(book) },
+                            )
+                        }
                     }
                 }
             }
@@ -558,7 +571,7 @@ private fun LibraryHeader(store: AppStore, onAdd: () -> Unit) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Txt("书架", size = 34f, weight = FontWeight.SemiBold, letterSpacing = .4f)
             Spacer(Modifier.weight(1f))
-            GlassIconButton(Glyph.Plus, onClick = onAdd, size = 38.dp)
+            GlassIconButton(Glyph.Plus, onClick = onAdd)
         }
         Spacer(Modifier.height(14.dp))
     }
@@ -763,9 +776,9 @@ private fun AddBookTile(onClick: () -> Unit) {
             Modifier
                 .fillMaxWidth()
                 .aspectRatio(.68f)
-                .clip(RoundedCornerShape(ui.settings.coverRadius.dp))
+                .clip(SmoothCorner(ui.settings.coverRadius.dp))
                 .background(ui.palette.faint)
-                .border(1.dp, ui.palette.line, RoundedCornerShape(ui.settings.coverRadius.dp)),
+                .border(1.dp, ui.palette.line, SmoothCorner(ui.settings.coverRadius.dp)),
             contentAlignment = Alignment.Center,
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -793,9 +806,9 @@ private fun AddBookRow(onClick: () -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(22.dp))
+            .clip(SmoothCorner(22.dp))
             .background(ui.palette.faint)
-            .border(.8.dp, ui.palette.line, RoundedCornerShape(22.dp))
+            .border(.8.dp, ui.palette.line, SmoothCorner(22.dp))
             .bouncy(scale = .985f) { onClick() }
             .padding(horizontal = 16.dp, vertical = 15.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -889,7 +902,7 @@ fun BookEditorDialog(
             Spacer(Modifier.height(14.dp))
         } else {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                GlassIconButton(Glyph.Back, { finishEdit() }, size = 34.dp)
+                GlassIconButton(Glyph.Back, { finishEdit() })
                 Spacer(Modifier.width(8.dp))
                 Txt(
                     when (field) {
@@ -904,7 +917,7 @@ fun BookEditorDialog(
                     weight = FontWeight.SemiBold,
                 )
                 Spacer(Modifier.weight(1f))
-                GlassIconButton(Glyph.Check, { finishEdit() }, size = 34.dp)
+                GlassIconButton(Glyph.Check, { finishEdit() })
             }
             Spacer(Modifier.height(10.dp))
             when (field) {
@@ -998,7 +1011,7 @@ fun BookEditorDialog(
                     } else {
                         keyboard?.hide()
                         if (existing == null) {
-                            val first = Chapter(title = "第一章")
+                            val first = Chapter(title = chapterFallbackTitle(0))
                             onSubmit(
                                 Book(
                                     title = titleState.value.trim(),
@@ -1046,7 +1059,7 @@ private fun BookFormRow(
     Row(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
+            .clip(SmoothCorner(12.dp))
             .clickable(onClick = onClick)
             .padding(horizontal = 8.dp, vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -1175,7 +1188,7 @@ fun BookDetailScreen(
                     "目录",
                     "${book.chapters.size} 章 · 每章都会自动成为电子书目录",
                     trailing = {
-                        GlassIconButton(Glyph.Plus, { addChapter = true }, size = 34.dp)
+                        GlassIconButton(Glyph.Plus, { addChapter = true })
                     }
                 )
             }
@@ -1283,7 +1296,7 @@ fun BookDetailScreen(
     }
     if (addChapter) {
         ChapterDialog(
-            initial = "第${book.chapters.size + 1}章",
+            initial = chapterFallbackTitle(book.chapters.size),
             title = "新建章节",
             confirm = "添加",
             onDismiss = { addChapter = false },
@@ -1374,7 +1387,7 @@ private fun ChapterRow(index: Int, chapter: Chapter, onClick: () -> Unit, onMore
     Row(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(18.dp))
+            .clip(SmoothCorner(18.dp))
             .bouncy(scale = .985f) { onClick() }
             .padding(start = 8.dp, end = 3.dp, top = 10.dp, bottom = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -1404,7 +1417,7 @@ private fun AddChapterRow(onClick: () -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(18.dp))
+            .clip(SmoothCorner(18.dp))
             .bouncy(scale = .985f) { onClick() }
             .padding(horizontal = 12.dp, vertical = 15.dp),
         verticalAlignment = Alignment.CenterVertically,

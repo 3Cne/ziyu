@@ -10,6 +10,7 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
@@ -31,6 +32,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -46,7 +49,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
@@ -66,14 +68,17 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.layer.GraphicsLayer
 import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -99,7 +104,8 @@ sealed class Screen(val depth: Int, val tabIndex: Int? = null) {
     data object Library : Screen(0, 0)
     data object Notes : Screen(0, 1)
     data object Stats : Screen(0, 2)
-    data object Settings : Screen(0, 3)
+    data object Ai : Screen(0, 3)
+    data object Settings : Screen(0, 4)
     data class BookDetail(val bookId: String) : Screen(1)
     data class ChapterEditor(val bookId: String, val chapterId: String) : Screen(2)
     data class NoteEditor(val noteId: String) : Screen(1)
@@ -153,6 +159,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun MoyuRoot(store: AppStore, initialNote: String?, consumeInitialNote: () -> Unit) {
     val ui = LocalInk.current
@@ -262,6 +269,11 @@ private fun MoyuRoot(store: AppStore, initialNote: String?, consumeInitialNote: 
                 .fillMaxSize()
                 .layerBackdrop(tabBarBackdrop),
         ) {
+            // In-page glass (the AI input row and its chips) samples the same
+            // recorded page layer as the tab bar, so both read the same pixels.
+            androidx.compose.runtime.CompositionLocalProvider(
+                LocalGlassBackdrop provides tabBarBackdrop
+            ) {
 // The tab pager is the bottom layer of the depth stack and is kept alive
 // while a detail page sits on top of it: pushed pages wait one screen to the
 // right, the pager waits one screen to the left, and going back slides the
@@ -270,6 +282,20 @@ private fun MoyuRoot(store: AppStore, initialNote: String?, consumeInitialNote: 
 // twice and both copies slid over each other.
 val rootTabs: Any = RootTabsLayer
 val rootTab = stack.firstOrNull { it.depth == 0 }?.tabIndex ?: 0
+// 底部可以关掉「书架 / 笔记 / 数据 / 问书」中的任意几页；设置永远在。
+// key 与 Screen.tabIndex 一一对应，顺序固定，关掉后不重排。
+val tabKeys = listOf("library", "notes", "stats", "ai", "settings")
+val tabScreens = listOf(Screen.Library, Screen.Notes, Screen.Stats, Screen.Ai, Screen.Settings)
+val hiddenTabs = ui.settings.hiddenTabs.toSet()
+val visibleTabs = tabKeys.indices.filter { it == 4 || tabKeys[it] !in hiddenTabs }
+val visibleScreens = visibleTabs.map { tabScreens[it] }
+val rootIndex = visibleScreens.indexOfFirst { it.tabIndex == rootTab }.coerceAtLeast(0)
+// 正停在被关掉的那页时自动回退到第一个可见页，否则页面和底栏会对不上。
+LaunchedEffect(visibleTabs) {
+    if (rootTab !in visibleTabs) {
+        stack = listOf(visibleScreens.firstOrNull() ?: Screen.Settings)
+    }
+}
 val depthScreens: List<Any> = listOf(rootTabs) + stack.filter { it.depth > 0 }
 DepthStack(
     screens = depthScreens,
@@ -290,14 +316,14 @@ DepthStack(
             else -> 280
         }
         TabPager(
-            index = rootTab,
-            pageCount = 4,
+            index = rootIndex,
+            pageCount = visibleScreens.size,
             perPageMs = perPage,
             motion = store.data.settings.pageMotion,
         ) { i ->
             CompositionLocalProvider(LocalHazeHandle provides if (hazeSupported) haze else null) {
-                when (i) {
-                    0 -> LibraryScreen(
+                when (visibleScreens[i]) {
+                    Screen.Library -> LibraryScreen(
                         store = store,
                         onOpenBook = { stack = stack + Screen.BookDetail(it) },
                         onContinue = { book, chapter ->
@@ -305,12 +331,20 @@ DepthStack(
                         },
                         onCreateBook = { book -> stack = stack + Screen.BookDetail(book.id) },
                     )
-                    1 -> NotesScreen(
+                    Screen.Notes -> NotesScreen(
                         store = store,
                         onOpenNote = { stack = stack + Screen.NoteEditor(it) },
                         onCreateNote = { stack = stack + Screen.NoteEditor(it) },
                     )
-                    2 -> StatsScreen(store)
+                    Screen.Stats -> StatsScreen(store)
+                    Screen.Ai -> AiScreen(
+                        store = store,
+                        onOpenChapter = { bookId, chapterId ->
+                            stack = stack + Screen.ChapterEditor(bookId, chapterId)
+                        },
+                        onOpenBook = { bookId -> stack = stack + Screen.BookDetail(bookId) },
+                        onOpenNote = { noteId -> stack = stack + Screen.NoteEditor(noteId) },
+                    )
                     else -> SettingsScreen(store, settingsListState) { page ->
                         stack = stack + Screen.SettingPage(page)
                     }
@@ -334,6 +368,14 @@ DepthStack(
                     onCreateNote = { stack = stack + Screen.NoteEditor(it) },
                 )
                 Screen.Stats -> StatsScreen(store)
+                Screen.Ai -> AiScreen(
+                    store = store,
+                    onOpenChapter = { bookId, chapterId ->
+                        stack = stack + Screen.ChapterEditor(bookId, chapterId)
+                    },
+                    onOpenBook = { bookId -> stack = stack + Screen.BookDetail(bookId) },
+                    onOpenNote = { noteId -> stack = stack + Screen.NoteEditor(noteId) },
+                )
                 Screen.Settings -> SettingsScreen(store, settingsListState) { page ->
                     stack = stack + Screen.SettingPage(page)
                 }
@@ -366,7 +408,9 @@ DepthStack(
                     store = store,
                     page = screen.page,
                     onBack = { pop() },
+                    onOpen = { p -> stack = stack + Screen.SettingPage(p) },
                 )
+            }
             }
             }
         }
@@ -390,26 +434,25 @@ DepthStack(
 
         AnimatedVisibility(
             visible = rootVisible,
-            enter = slideInVertically(initialOffsetY = { it / 2 }, animationSpec = spring(.86f, 340f)) + fadeIn(tween(180)),
+            enter = slideInVertically(initialOffsetY = { it / 2 }, animationSpec = spring(MOYU_DAMPING, 380f)) + fadeIn(tween(180)),
             exit = slideOutVertically(targetOffsetY = { it }, animationSpec = tween(200)) + fadeOut(tween(140)),
             modifier = Modifier.align(Alignment.BottomCenter),
         ) {
+            // 同一套规则就近再算一次：设置永远在，其余按开关过滤，顺序固定。
+            val barKeys = listOf("library", "notes", "stats", "ai", "settings")
+            val barHidden = ui.settings.hiddenTabs.toSet()
+            val barVisible = barKeys.indices.filter { it == 4 || barKeys[it] !in barHidden }
+            val barScreens = barVisible.map {
+                listOf(Screen.Library, Screen.Notes, Screen.Stats, Screen.Ai, Screen.Settings)[it]
+            }
+            val barPos = barScreens.indexOfFirst {
+                it.tabIndex == (stack.firstOrNull { s -> s.depth == 0 }?.tabIndex ?: 0)
+            }.coerceAtLeast(0)
             MoyuTabBar(
-                current = when (current) {
-                    Screen.Notes -> 1
-                    Screen.Stats -> 2
-                    Screen.Settings -> 3
-                    else -> 0
-                },
+                current = barPos,
+                visible = barVisible,
                 onSelect = { index ->
-                    stack = listOf(
-                        when (index) {
-                            1 -> Screen.Notes
-                            2 -> Screen.Stats
-                            3 -> Screen.Settings
-                            else -> Screen.Library
-                        }
-                    )
+                    stack = listOf(barScreens.getOrElse(index) { Screen.Settings })
                 },
                 backdrop = tabBarBackdrop,
             )

@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Shape
@@ -19,13 +20,15 @@ import androidx.compose.ui.unit.dp
 import com.kyant.backdrop.Backdrop
 import com.kyant.backdrop.drawBackdrop
 import com.kyant.backdrop.effects.blur
-import com.kyant.backdrop.effects.colorControls
 import com.kyant.backdrop.effects.lens
 import com.kyant.backdrop.effects.vibrancy
 import com.kyant.backdrop.shadow.InnerShadow
 import com.kyant.backdrop.shadow.Shadow
 
-/**
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.compositionLocalOf/**
  * The one liquid-glass bar material.
  *
  * The floating tab bar and the editor dock are the same material on purpose:
@@ -61,9 +64,6 @@ internal fun Modifier.liquidGlassBar(
     /** 0..1 strength of the inner bevel band. Reads as glass thickness; it is
      *  a soft band, not a glow. */
     edgeStrength: Float = 1f,
-    /** 0..1 brightness of the *projected* content: boosts the sampled layer
-     *  itself (colorControls), never a white overlay on the glass. */
-    light: Float = 0f,
 ): Modifier {
     if (backdrop == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
         val fallback = if (palette.isDark) {
@@ -83,18 +83,18 @@ internal fun Modifier.liquidGlassBar(
         palette.ink.copy(alpha = .045f)
     }
     val paperVeil = palette.paper.copy(alpha = veil.coerceIn(0f, 1f) * .94f)
+    // Backdrop's lens effect walks a CornerBasedShape's SDF. `SmoothCorner` is a
+    // custom continuous-corner shape, so asking for refraction on it throws
+    // "Only CornerBasedShape is supported in lens effects" at draw time — it
+    // crashed the whole app the first time an in-page field used glass.
+    val canRefract = shape is androidx.compose.foundation.shape.CornerBasedShape && refractionDp > 0f
     return drawBackdrop(
         backdrop = backdrop,
         shape = { shape },
         effects = {
-            if (light > 0f) {
-                // Brighten the sampled pixels, not the glass: 1.0 keeps the page
-                // as-is, 1.7 at light = 1 is still inside a readable range.
-                colorControls(brightness = 1f + light.coerceIn(0f, 1f) * .7f)
-            }
             vibrancy()
             if (blurDp > 0f) blur(blurDp.dp.toPx())
-            if (refractionDp > 0f) {
+            if (canRefract) {
                 lens(
                     refractionHeight = refractionDp.dp.toPx(),
                     refractionAmount = refractionDp.dp.toPx(),
@@ -172,4 +172,68 @@ internal fun androidx.compose.ui.graphics.drawscope.DrawScope.glassEdgeBand(
             style = Stroke(width = 1.1.dp.toPx()),
         )
     }
+}
+
+/**
+ * Where the AI tab's in-page glass finds the page it should sample.
+ *
+ * The tab bar and the dock get their backdrop handed to them by `MoyuRoot`;
+ * a field inside a page has no such argument, so the same recorded layer is
+ * published here once and every in-page glass reads it.
+ */
+val LocalGlassBackdrop = compositionLocalOf<Backdrop?> { null }
+
+/**
+ * In-page glass: the input row and the pinned-quote chips.
+ *
+ * Same material as the tab bar (`liquidGlassBar`), but tuned separately: an
+ * input sits over moving text, so it needs a little more veil and less
+ * refraction than a bar at the bottom edge. The three knobs live in
+ * 设置 → 问书 → 玻璃.
+ */
+@Composable
+fun GlassField(
+    modifier: Modifier = Modifier,
+    shape: Shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp),
+    shadowAlpha: Float = .16f,
+    press: Float = 0f,
+    /** Paper veil for this surface; null = the shared 问书 setting. Buttons sit
+     *  on top of scrolling text, so they need to be denser than the input. */
+    veil: Float? = null,
+    /** "field" = the 问书 input, "button" = the link / send pills. Each has its
+     *  own five knobs in 设置 → 问书玻璃. */
+    kind: String = "field",
+    content: @Composable BoxScope.() -> Unit,
+) {
+    val ui = LocalInk.current
+    val s = ui.settings
+    val button = kind == "button"
+    val blur = if (button) s.btnGlassBlur else s.fieldGlassBlur
+    val refraction = if (button) s.btnGlassRefraction else s.fieldGlassRefraction
+    val dispersion = if (button) s.btnGlassDispersion else s.fieldGlassDispersion
+    val edge = if (button) s.btnGlassEdge else s.fieldGlassEdge
+    val baseVeil = if (button) s.btnGlassOpacity else s.fieldGlassOpacity
+    // Callers still pass a shadow for emphasis (idle vs ready); the setting is
+    // the base, .16 being the neutral the old call sites were written against.
+    val baseShadow = if (button) s.btnGlassShadow else s.fieldGlassShadow
+    val shadow = baseShadow * (shadowAlpha / .16f)
+    // Real 1型玻璃: the page records its scrolling list into a layer, this node
+    // sits OUTSIDE that layer and samples it — the same relationship the tab bar
+    // has with the page. Sampling a layer from inside it is the self-reference
+    // that crashed the render thread.
+    Box(
+        modifier.liquidGlassBar(
+            backdrop = LocalGlassBackdrop.current,
+            shape = shape,
+            palette = ui.palette,
+            press = press,
+            blurDp = blur,
+            refractionDp = refraction,
+            dispersion = dispersion,
+            shadowAlpha = shadow,
+            veil = veil ?: baseVeil,
+            edgeStrength = edge,
+        ),
+        content = content,
+    )
 }

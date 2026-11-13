@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
@@ -53,7 +52,7 @@ fun PreviewGallery(theme: String = "night") {
             }
             PreviewCard {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    GlassIconButton(Glyph.Edit, {}, size = 44.dp)
+                    GlassIconButton(Glyph.Edit, {})
                     GlassChip("标签", false) {}
                     GlassButton("继续写", {}, Modifier.width(120.dp), glyph = Glyph.Edit)
                 }
@@ -150,21 +149,6 @@ private fun PreviewTabBarPaper() {
     }
 }
 
-/**
- * The liquid bar in isolation, for the screenshot tests in `src/screenshotTest`
- * and `src/test`. `variant` is the focused tab, so the lens can be captured in
- * either slot. There is no window to sample in layoutlib, so this shows the
- * documented fallback fill + rim rather than the real glass.
- */
-@Composable
-fun LiquidBarPreview(theme: String = "night", variant: Int = 1) {
-    PreviewShell(theme) {
-        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-            MoyuTabBar(current = variant, onSelect = {})
-        }
-    }
-}
-
 @Preview(name = "按钮", widthDp = 412, heightDp = 140, showBackground = true)
 @Composable
 private fun PreviewButtons() {
@@ -174,8 +158,8 @@ private fun PreviewButtons() {
             horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            GlassIconButton(Glyph.Edit, {}, size = 44.dp)
-            GlassIconButton(Glyph.Search, {}, size = 44.dp)
+            GlassIconButton(Glyph.Edit, {})
+            GlassIconButton(Glyph.Search, {})
             GlassChip("标签", false) {}
             GlassChip("已选", true) {}
             GlassButton("继续写", {}, Modifier.width(120.dp), glyph = Glyph.Edit)

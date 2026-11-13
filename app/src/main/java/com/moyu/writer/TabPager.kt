@@ -1,8 +1,7 @@
 package com.moyu.writer
 
-import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
@@ -43,12 +42,12 @@ internal fun TabPager(
 ) {
     val offset by animateFloatAsState(
         targetValue = index.toFloat(),
-        animationSpec = tween(
-            // One duration for the whole jump: the distance already carries the
-            // "how far" part, multiplying it here made a 3-tab hop crawl.
-            durationMillis = perPageMs.coerceAtLeast(0),
-            easing = FastOutSlowInEasing,
-        ),
+        // Spring instead of tween: damping is fixed at 1.0, stiffness follows
+        // the motion preset. The distance already carries the "how far" part.
+        animationSpec = spring(MOYU_DAMPING, pageStiffness(perPageMs), PAGE_THRESHOLD),
+        // This parameter, not the spec's threshold, is what animateFloatAsState
+        // actually uses. Its default 0.01 snapped the page ~13px on the last frame.
+        visibilityThreshold = PAGE_THRESHOLD,
         label = "tabPager",
     )
     // For fade/scale only the two ends are shown: intermediate tabs must not
@@ -104,8 +103,11 @@ internal fun TabPager(
                 Modifier
                     .width(pageWidth)
                     .fillMaxHeight()
-                    .offset(x = pageWidth * d)
+                    // Float translation, not Modifier.offset(Dp): layout offsets
+                    // round to whole pixels, so the last sub-pixel of a spring
+                    // was held then stepped 1px at the end ("小小的瞬移").
                     .graphicsLayer {
+                        translationX = widthPx * d
                         alpha = 1f
                         scaleX = scale
                         scaleY = scale

@@ -51,9 +51,12 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
@@ -79,13 +82,16 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.union
@@ -97,10 +103,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.LocalTextSelectionColors
@@ -124,6 +130,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusRequester
@@ -147,6 +154,7 @@ import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.GraphicsLayerScope
 import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.boundsInWindow
@@ -213,6 +221,9 @@ data class NoteLinkUi(
     val onOpenSheet: () -> Unit,
     val onToggleFloat: (Boolean) -> Unit,
     val onOpenNote: (Note) -> Unit,
+    /** Saves an edit made inside the floating panel (title, body, todos). */
+    val onSaveNote: (id: String, title: String, content: String, todos: List<Todo>) -> Unit =
+        { _, _, _, _ -> },
     val floatX: Float = .62f,
     val floatY: Float = 0f,
     val floatW: Float = .60f,
@@ -320,6 +331,8 @@ fun WritingScreen(
     metaPrefix: String = "",
     noteLinks: NoteLinkUi? = null,
     chapterTags: (@Composable () -> Unit)? = null,
+    /** Book whose memory supplies name-consistency checks; null for a note. */
+    proofBookId: String? = null,
 ) {
     val ui = LocalInk.current
     val p = ui.palette
@@ -331,19 +344,8 @@ fun WritingScreen(
     val scope = rememberCoroutineScope()
     val keyboard = LocalSoftwareKeyboardController.current
     var bodyEditor by remember { mutableStateOf<BodyEditText?>(null) }
-    // Compose body actions (copy/paste/select-all) for the dock's selection row.
-    var composeController by remember(seedKey) { mutableStateOf<ComposeBodyController?>(null) }
 
     fun hideEditorKeyboard() {
-        // Compose body: clearing focus discards the IME composition buffer, so
-        // a long pinyin string vanished when 收起 was tapped. Hide the keyboard
-        // and keep focus; the field commits on its own next edit.
-        if (EditorTest.composeBody) {
-            val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
-            imm?.hideSoftInputFromWindow(view.windowToken, 0)
-            keyboard?.hide()
-            return
-        }
         focusManager.clearFocus(force = true)
         bodyEditor?.clearFocus()
         val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
@@ -389,7 +391,15 @@ fun WritingScreen(
     // opens on full-width text: the 行文时悬浮 setting decides whether the panel
     // may be shown, not whether it is already open.
     var floatNotePanel by remember(seedKey) { mutableStateOf(false) }
-    var showSymbols by remember { mutableStateOf(true) }
+    // 能力栏（工具 + 符号栏）的展开态：左下角的球收起/展开整块能力栏。
+    var abilityOpen by remember { mutableStateOf(true) }
+    val abilityT = remember { Animatable(1f) }
+    LaunchedEffect(abilityOpen) {
+        abilityT.animateTo(
+            if (abilityOpen) 1f else 0f,
+            spring(dampingRatio = .52f, stiffness = 300f),
+        )
+    }
     // The editor dock overlays the body instead of sitting below it. The body
     // layer is recorded separately so the dock can sample the real text under
     // its glass, and dockHeight keeps the caret/last line above the dock.
@@ -402,13 +412,6 @@ fun WritingScreen(
     val editorBodyBackdrop = remember(p.paper) {
         EditorBodyBackdrop({ bodyEditor }, p.paper)
     }
-    // Test branch: a Compose body records itself as a real Compose layer, so
-    // the dock's glass can sample the glyphs instead of a software bitmap.
-    val bodyBackdrop = rememberLayerBackdrop()
-    // The dock must sample the page, not just the body layer: the tab bar
-    // samples the whole page (paper + content) and that is what makes it read
-    // as the same 1-type glass. Record the writing page here.
-    val pageBackdrop = rememberLayerBackdrop()
     // 1型玻璃 only re-samples when its draw node records a new frame. The body
     // is a native EditText, so Compose never sees its scroll. Bump this tick on
     // every body scroll / text change and pass it as the glass epoch.
@@ -496,6 +499,172 @@ fun WritingScreen(
         val insert = if (settings.indent && text.endsWith('\n')) "$text　　" else text
         val newText = body.text.replaceRange(start, end, insert)
         body = TextFieldValue(newText, TextRange(start + insert.length))
+    }
+
+    // ── 校核：选中一段 → 本地规则 + 可选 AI → 逐条采纳 ─────────────────────
+    var proofOpen by remember { mutableStateOf(false) }
+    var proofIssues by remember { mutableStateOf<List<ProofIssue>>(emptyList()) }
+    var proofBusy by remember { mutableStateOf(false) }
+    var proofAsked by remember { mutableStateOf(false) }
+    var proofError by remember { mutableStateOf<String?>(null) }
+    var proofText by remember { mutableStateOf("") }
+    var proofStatus by remember { mutableStateOf<String?>(null) }
+    /** The passage the panel was opened for; closing puts the selection back. */
+    var proofSelection by remember { mutableStateOf(0 to 0) }
+
+    fun startProof() {
+        val a = min(body.selection.start, body.selection.end).coerceIn(0, body.text.length)
+        val b = max(body.selection.start, body.selection.end).coerceIn(0, body.text.length)
+        if (b - a < 4) {
+            ToastBus.show("先选中一段正文再校核")
+            return
+        }
+        val text = body.text.substring(a, b)
+        if (text.length > Proofing.MAX_INPUT) {
+            ToastBus.show("这段 " + text.length + " 字，先选到 " + Proofing.MAX_INPUT + " 字以内")
+            return
+        }
+        proofText = text
+        proofSelection = a to b
+        // Two right-side panels never stack: the notes window gives way, and the
+        // body keeps its scroll position while the writing column re-wraps.
+        floatNotePanel = false
+        bodyEditor?.captureScrollAnchor()
+        var found = Proofing.local(text)
+        if (proofBookId != null) {
+            runCatching {
+                val memo = MemoStore.load(context, proofBookId)
+                val global = MemoStore.loadGlobal(context)
+                found = found + Proofing.names(text, memo.facts + global.facts)
+            }
+        }
+        proofIssues = found
+        proofBusy = false
+        proofAsked = false
+        proofError = null
+        proofOpen = true
+        bodyEditor?.collapseSelection()
+    }
+
+    fun askAiProof() {
+        val key = AiKey.load(context)
+        if (!settings.aiEnabled || key.isNullOrBlank()) {
+            proofError = "还没配置 AI：设置 → AI 与记忆"
+            return
+        }
+        proofBusy = true
+        proofError = null
+        proofAsked = true
+        scope.launch {
+            val parts = Proofing.chunks(proofText)
+            val names = if (proofBookId != null) {
+                runCatching {
+                    (MemoStore.load(context, proofBookId).facts + MemoStore.loadGlobal(context).facts)
+                        .filter { it.enabled && it.name.length in 2..6 }
+                        .map { it.name.trim() }
+                        .distinct()
+                }.getOrElse { emptyList() }
+            } else emptyList()
+            var foundAny = false
+            for ((index, part) in parts.withIndex()) {
+                proofStatus = if (parts.size == 1) null else "正在读第 " + (index + 1) + "/" + parts.size + " 段…"
+                val (sys, usr) = Proofing.prompt(part, names)
+                var r = AiClient.chat(
+                    baseUrl = settings.aiBaseUrl,
+                    model = settings.aiModel,
+                    key = key,
+                    temperature = .2f,
+                    system = sys,
+                    user = usr,
+                    maxTokens = 3000,
+                    disableThinking = true,
+                )
+                // 一段三千字时，思考模型会把 3000 token 全花在 reasoning 上，
+                // content 为空（和问书 3.11.16 同一个坑）。空回答再给一次大预算。
+                if (!r.ok && r.error?.contains("空内容") == true) {
+                    r = AiClient.chat(
+                        baseUrl = settings.aiBaseUrl,
+                        model = settings.aiModel,
+                        key = key,
+                        temperature = .2f,
+                        system = sys,
+                        user = usr,
+                        maxTokens = 8000,
+                        disableThinking = true,
+                    )
+                }
+                if (r.ok) {
+                    val found = Proofing.parse(r.text)
+                    if (found.isNotEmpty()) {
+                        proofIssues = (proofIssues + found).distinctBy { it.quote + "\u0000" + it.suggestion }
+                        foundAny = true
+                    }
+                } else {
+                    proofError = r.error ?: "没拿到结果，再试一次"
+                    break
+                }
+            }
+            proofBusy = false
+            proofStatus = null
+            if (!foundAny && proofError == null) ToastBus.show("AI 没挑出新的问题")
+        }
+    }
+
+    fun acceptProof(issue: ProofIssue) {
+        val src = body.text
+        val at = src.indexOf(issue.quote)
+        if (at < 0) {
+            proofIssues = proofIssues - issue
+            ToastBus.show("正文里找不到这句了，已跳过")
+            return
+        }
+        val editor = bodyEditor
+        if (editor != null) {
+            // The native watcher records the undo entry, so 撤销 restores this.
+            editor.replaceKeepingViewport(at, at + issue.quote.length, issue.suggestion)
+        } else {
+            pushUndo()
+            body = body.copy(text = src.replaceRange(at, at + issue.quote.length, issue.suggestion))
+        }
+        proofIssues = proofIssues - issue
+    }
+
+    /** 关闭校核：右侧浮窗收起，选区回到打开校核时那一段。 */
+    fun closeProof() {
+        proofOpen = false
+        val (a, b) = proofSelection
+        if (b > a && b <= body.text.length) {
+            body = body.copy(selection = TextRange(a, b))
+            val ed = bodyEditor
+            ed?.post { runCatching { ed.setSelection(a, b) } }
+        }
+    }
+
+    // 系统返回先收校核浮窗，而不是直接离开这一章。
+    BackHandler(enabled = proofOpen) { closeProof() }
+
+    /** 点建议卡：正文滚到那句，并短暂标亮它。 */
+    fun locateProof(issue: ProofIssue) {
+        val src = body.text
+        val at = src.indexOf(issue.quote)
+        if (at < 0) {
+            ToastBus.show("正文里找不到这句了")
+            return
+        }
+        // 折叠光标要跟着挪到这一句：滚动会触发重组，AndroidView.update 会把
+        // Compose 里的选区写回 EditText；光标还在原处时 TextView 又会把页面
+        // 拉回光标（v3.13.0 的「先跳后拉回」）。用折叠光标而不是选区，
+        // 这样底部保持工具行，不会跳成框选行。
+        body = body.copy(selection = TextRange(at))
+        val ed = bodyEditor ?: return
+        ed.post {
+            ed.setSelection(at)
+            ed.highlightRange(at, at + issue.quote.length)
+            val layout = ed.layout ?: return@post
+            val line = layout.getLineForOffset(at)
+            val y = layout.getLineTop(line)
+            ed.scrollTo(0, (y - ed.height / 3).coerceAtLeast(0))
+        }
     }
 
     fun findTodoLineStart(todo: Todo): Int {
@@ -790,12 +959,6 @@ fun WritingScreen(
                 },
             )
             Box(Modifier.weight(1f).fillMaxWidth()) {
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    .background(p.paper)
-                    .layerBackdrop(pageBackdrop)
-            ) {
             Row(
                 Modifier
                     .fillMaxSize()
@@ -909,7 +1072,6 @@ fun WritingScreen(
                         .weight(1f)
                         .fillMaxWidth()
                 ) {
-                if (!EditorTest.composeBody) {
                 AndroidView(
                     factory = { ctx ->
                         BodyEditText(
@@ -948,6 +1110,7 @@ fun WritingScreen(
                             onTodoSwipe = null,
                             onBodyScroll = { bodyScrollTick.intValue++ },
                         ).apply {
+                            onProofRequest = { startProof() }
                             background = null
                             val side = maxOf(
                                 with(density) { settings.pageMargin.dp.toPx() },
@@ -1124,36 +1287,6 @@ fun WritingScreen(
                     },
                     modifier = Modifier.fillMaxSize().clipToBounds(),
                 )
-                } else {
-                    ComposeBodyHost(
-                        seedKey = seedKey,
-                        initialText = initialContent,
-                        body = body,
-                        onBodyChange = { onBodyChange(it) },
-                        inlineTodos = inlineTodos,
-                        onTodoToggle = { id ->
-                            val updated = latestTodos.map {
-                                if (it.id == id) it.copy(done = !it.done) else it
-                            }
-                            inlineTodos = updated
-                            latestTodosChange?.invoke(updated)
-                            dirty = true
-                            saveTick++
-                        },
-                        placeholder = placeholder,
-                        settings = settings,
-                        palette = p,
-                        accent = ui.accent,
-                        bodySize = bodySize,
-                        dockBottomInsetPx = dockHeightPx +
-                            with(density) { 6.dp.toPx() }.toInt(),
-                        onScroll = { bodyScrollTick.intValue++ },
-                        onController = { composeController = it },
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .layerBackdrop(bodyBackdrop),
-                    )
-                }
                 SelectionOverlay(
                     geometry = selectionGeometry,
                     handleDrawable = bodyEditor?.selectHandleDrawable,
@@ -1259,7 +1392,36 @@ fun WritingScreen(
                         .padding(bottom = with(density) { dockHeightPx.toDp() } + 12.dp),
                 )
             }
-            }
+            // 校核浮窗：和「本章笔记」同一套右侧浮窗（平卡、20 圆角、标题行、
+            // 竖排建议卡、可拖宽）。打开时笔记窗让位，关闭把选区放回去。
+            ProofSidePanel(
+                visible = proofOpen && !sideOfNotes,
+                issues = proofIssues,
+                busy = proofBusy,
+                status = proofStatus,
+                error = proofError,
+                asked = proofAsked,
+                chars = proofText.length,
+                canAsk = settings.aiEnabled,
+                onAsk = { if (!proofAsked) askAiProof() },
+                onAccept = { acceptProof(it) },
+                onIgnore = { proofIssues = proofIssues - it },
+                onLocate = { locateProof(it) },
+                onClose = { closeProof() },
+                onWidthAnimating = { bodyEditor?.captureScrollAnchorIfNone() },
+                onWidthSettled = { bodyEditor?.releaseScrollAnchor() },
+                onResizeStart = { bodyEditor?.captureScrollAnchor() },
+                onClearEditorFocus = {
+                    val ed = bodyEditor
+                    if (ed != null && ed.hasFocus()) {
+                        ed.clearFocus()
+                        collapseBodySelection()
+                    }
+                },
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .padding(bottom = with(density) { dockHeightPx.toDp() } + 12.dp),
+            )
             }
             Box(
                 Modifier
@@ -1271,8 +1433,24 @@ fun WritingScreen(
                     // bitmap instead of freezing the dock on its first frame.
                     .onGloballyPositioned { dockHeightPx = it.size.height }
             ) {
-            if (showSymbols) {
-                EditorDock(
+                Box(
+                    Modifier.fillMaxWidth()
+                        // 收起后整块缩成左下角的球；原区域不保留吞触摸的层，
+                        // 否则无法在能力栏位置滑动正文（v3.11.87）。
+                        .graphicsLayer {
+                            // 同柔展开/收回：整块能力栏从左下角的球里长出来，
+                            // 收回时缩回球里。左下锚定，形状跟着缩放，曲率连续。
+                            val ball = 56.dp.toPx()
+                            val sx = ball / maxOf(1f, size.width)
+                            val sy = ball / maxOf(1f, size.height)
+                            val t = abilityT.value
+                            scaleX = sx + (1f - sx) * t
+                            scaleY = sy + (1f - sy) * t
+                            alpha = t
+                            transformOrigin = TransformOrigin(0f, 1f)
+                        },
+                ) {
+                    EditorDock(
                     canUndo = undo.isNotEmpty(),
                     canRedo = redo.isNotEmpty(),
                     isNote = isNote,
@@ -1299,6 +1477,8 @@ fun WritingScreen(
                             // dock never opens two things at once. Do NOT dismiss
                             // the IME here: the re-wrap anchor needs the caret to
                             // stay active and visible while the width changes.
+                            // 校核浮窗和笔记浮窗共用右侧，打开笔记先收起校核。
+                            if (proofOpen) proofOpen = false
                             // Capture before the row is re-laid out: the first
                             // animation frame already re-wraps the body, and
                             // TextView's own bring-caret-into-view would have
@@ -1330,84 +1510,77 @@ fun WritingScreen(
                     },
                     onHideKeyboard = {
                         hideEditorKeyboard()
-                        showSymbols = true
                     },
-                    onCollapse = { showSymbols = false },
+                    onCollapse = {
+                        // 能力栏整块缩成左下角的球；正文视口不变（布局高度不改），
+                        // 只补一次滚动，避免 TextView 把 scrollY 夹回 0。
+                        val keep = bodyEditor?.scrollY ?: 0
+                        abilityOpen = false
+                        bodyEditor?.post { bodyEditor?.scrollTo(0, keep) }
+                        android.os.Handler(android.os.Looper.getMainLooper())
+                            .postDelayed({ bodyEditor?.scrollTo(0, keep) }, 140)
+                    },
                     onSymbol = { insertRaw(it) },
-                    onExpand = { showSymbols = true },
-                    selectionMode = if (EditorTest.composeBody) {
-                        composeController?.range != null
-                    } else {
-                        body.selection.start != body.selection.end
+                    onExpand = {
+                        val keep = bodyEditor?.scrollY ?: 0
+                        abilityOpen = true
+                        bodyEditor?.post { bodyEditor?.scrollTo(0, keep) }
+                        android.os.Handler(android.os.Looper.getMainLooper())
+                            .postDelayed({ bodyEditor?.scrollTo(0, keep) }, 140)
                     },
+                    selectionMode = body.selection.start != body.selection.end,
                     onCopy = {
-                        if (EditorTest.composeBody) {
-                            composeController?.copy()
-                            composeController?.collapse()
-                        } else {
-                            bodyEditor?.menuAction(android.R.id.copy)
-                            bodyEditor?.collapseSelection()
-                        }
+                        bodyEditor?.menuAction(android.R.id.copy)
+                        bodyEditor?.collapseSelection()
                         selectionMenu = null
                     },
                     onCut = {
-                        if (EditorTest.composeBody) {
-                            composeController?.cut()
-                        } else {
-                            bodyEditor?.menuAction(android.R.id.cut)
-                            bodyEditor?.collapseSelection()
-                        }
+                        bodyEditor?.menuAction(android.R.id.cut)
+                        bodyEditor?.collapseSelection()
                         selectionMenu = null
                     },
                     onPaste = {
-                        if (EditorTest.composeBody) {
-                            composeController?.paste()
-                        } else {
-                            bodyEditor?.menuAction(android.R.id.paste)
-                            bodyEditor?.collapseSelection()
-                        }
+                        bodyEditor?.menuAction(android.R.id.paste)
+                        bodyEditor?.collapseSelection()
                         selectionMenu = null
                     },
                     onSelectAll = {
-                        if (EditorTest.composeBody) {
-                            composeController?.selectAll()
-                        } else {
-                            bodyEditor?.menuAction(android.R.id.selectAll)
-                        }
+                        bodyEditor?.menuAction(android.R.id.selectAll)
                     },
                     onDelete = {
-                        if (EditorTest.composeBody) {
-                            composeController?.deleteSelection()
-                            composeController?.collapse()
-                        } else {
-                            bodyEditor?.deleteSelection()
-                        }
+                        bodyEditor?.deleteSelection()
                         selectionMenu = null
                     },
                     onCancelSelection = {
-                        if (EditorTest.composeBody) {
-                            composeController?.collapse()
-                        } else {
-                            bodyEditor?.collapseSelection()
-                        }
+                        bodyEditor?.collapseSelection()
                         selectionMenu = null
                     },
-                    backdrop = if (EditorTest.composeBody) pageBackdrop else editorBodyBackdrop,
-                    glass = EditorTest.glassDock && EditorTest.composeBody,
+                    onProof = { startProof() },
+                    backdrop = editorBodyBackdrop,
                     epoch = bodyScrollTick.intValue,
                     scrollTick = bodyScrollTick,
                     bodyEditor = bodyEditor,
                 )
-            } else {
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 6.dp),
-                    horizontalArrangement = Arrangement.Center,
-                ) {
-                    GlassIconButton(Glyph.Keyboard, { showSymbols = true }, size = 40.dp)
                 }
-            }
+                // 常驻球：展开时在左下显示收起箭头，收起时显示键盘图标，点击切换。
+                Box(
+                    Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(start = 16.dp, bottom = 12.dp)
+                        .size(40.dp)
+                        .clip(CircleShape)
+                        .background(dockTone(ui))
+                        .bouncy {
+                            abilityOpen = !abilityOpen
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    LineIcon(
+                        if (abilityOpen) Glyph.ChevronDown else Glyph.Keyboard,
+                        p.ink,
+                        18.dp,
+                    )
+                }
             }
             }
         }
@@ -1746,6 +1919,9 @@ private class BodyEditText(
     var handleColor = 0xFF457F85.toInt()
     private var selectionAnchor = 0
     private var selectionPopup: PopupWindow? = null
+    /** Set by the writing screen: the selection menu offers「校核」, which asks
+     *  the screen to open its proofing panel for the selected passage. */
+    var onProofRequest: (() -> Unit)? = null
     private val longPressRunnable = Runnable { performLongPress() }
     private var downSelectionStart = 0
     private var downSelectionEnd = 0
@@ -1757,6 +1933,19 @@ private class BodyEditText(
      *  software bitmap against this instead of redrawing each frame. */
     var renderRevision = 0L
     var lastTextLength = 0
+
+    /** Temporarily tints a range so a proofing suggestion can be found on the page. */
+    fun highlightRange(from: Int, to: Int) {
+        val editable = text as? android.text.Spannable ?: return
+        if (from < 0 || to <= from || to > editable.length) return
+        val span = android.text.style.BackgroundColorSpan(0x33C9A227)
+        editable.setSpan(span, from, to, android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+        invalidate()
+        postDelayed({
+            editable.removeSpan(span)
+            invalidate()
+        }, 1600)
+    }
 
     /** Window-space top of this view, used to align the dock slice. */
     fun windowTop(): Float {
@@ -2642,6 +2831,7 @@ private class BodyEditText(
                 return
             }
         }
+        markCaretActive()
         selectionListener?.invoke(text.toString(), selStart, selEnd)
         onTodoCursor?.invoke(activeTodoAt(selStart))
         emitGeometry()
@@ -2963,6 +3153,7 @@ private class BodyEditText(
         val insert = if (autoIndent && !onTodoLine) "\n　　" else "\n"
         text?.replace(start, end, insert)
         setSelection((start + insert.length).coerceAtMost(text?.length ?: 0))
+        markCaretActive()
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
@@ -3133,6 +3324,18 @@ private class BodyEditText(
         return PointF(a.centerX, a.centerY) to PointF(b.centerX, b.centerY)
     }
 
+    /** Uptime until which the caret is drawn solid, ignoring the blink phase.
+     *  Native editors restart the blink whenever the caret moves; this custom
+     *  caret only rode a global 500 ms clock, so pressing Enter could land in
+     *  the "off" half and the caret vanished right after the newline. */
+    private var caretSolidUntil = 0L
+
+    private fun markCaretActive() {
+        if (!isAttachedToWindow) return
+        caretSolidUntil = android.os.SystemClock.uptimeMillis() + 650L
+        invalidate()
+    }
+
     private fun drawSelfCursor(canvas: Canvas) {
         if (!hasFocus() || !isCursorVisible || selectionStart != selectionEnd) return
         val layout = layout ?: return
@@ -3149,7 +3352,9 @@ private class BodyEditText(
             color = selfCursorColor
             style = Paint.Style.FILL
         }
-        if ((android.os.SystemClock.uptimeMillis() / 500L) % 2L == 0L) {
+        val now = android.os.SystemClock.uptimeMillis()
+        val solid = now < caretSolidUntil
+        if (solid || (now / 500L) % 2L == 0L) {
             canvas.drawRoundRect(
                 x,
                 top,
@@ -3160,7 +3365,14 @@ private class BodyEditText(
                 paint,
             )
         }
-        postInvalidateDelayed(500L - (android.os.SystemClock.uptimeMillis() % 500L))
+        // While solid, wake up exactly when the solid window ends (to start
+        // blinking); otherwise at the next blink boundary.
+        val delay = if (solid) {
+            (caretSolidUntil - now).coerceIn(16L, 500L)
+        } else {
+            500L - (now % 500L)
+        }
+        postInvalidateDelayed(delay)
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -3224,6 +3436,19 @@ private class BodyEditText(
             add("全选" to android.R.id.selectAll)
         }
         val popup = PopupWindow(context)
+        if (onProofRequest != null) {
+            row.addView(TextView(context).apply {
+                text = "校核"
+                setTextColor(android.graphics.Color.WHITE)
+                textSize = 14f
+                gravity = Gravity.CENTER
+                setPadding(dp(11), dp(7), dp(11), dp(7))
+                setOnClickListener {
+                    popup.dismiss()
+                    onProofRequest?.invoke()
+                }
+            })
+        }
         actions.forEach { (label, action) ->
             row.addView(TextView(context).apply {
                 text = label
@@ -3484,6 +3709,10 @@ private class BodyEditText(
                 ) {
                     if (tapIsBelowLastReminder(event.y) && appendLineAfterLastReminder()) {
                         requestFocus()
+                        // DOWN hid the caret; a tap that edits the text must not
+                        // leave the body without one until the next touch.
+                        isCursorVisible = true
+                        markCaretActive()
                         return true
                     }
                     val offset = getOffsetForPosition(event.x, event.y).coerceIn(0, text.length)
@@ -3493,6 +3722,7 @@ private class BodyEditText(
                         event.y <= reminderBand.second + touchSlop
                     ) {
                         activeTodoAt(offset)?.let { onReminderTap?.invoke(it) }
+                        isCursorVisible = true
                         return true
                     }
                 }
@@ -3512,6 +3742,10 @@ private class BodyEditText(
                 ) {
                     parent?.requestDisallowInterceptTouchEvent(false)
                     tappedTodo.click()
+                    // Ticking a box rewrites the line; the caret used to stay
+                    // hidden (DOWN hid it) until the next tap in the body.
+                    isCursorVisible = true
+                    markCaretActive()
                     return true
                 }
                 if (wasDragging) {
@@ -3691,6 +3925,9 @@ private fun EditorTopBar(
     onToggleIndent: () -> Unit,
     onBack: () -> Unit,
     onMore: () -> Unit,
+    /** When set, this bar reports its heading position as the landing point of
+     *  the note card that opened this editor. */
+    flightKey: String? = null,
 ) {
     val ui = LocalInk.current
     val p = ui.palette
@@ -3719,6 +3956,13 @@ private fun EditorTopBar(
         Column(Modifier.weight(1f)) {
             Txt(
                 heading,
+                modifier = if (flightKey != null) {
+                    Modifier
+                        .onGloballyPositioned { Flight.land(flightKey, it) }
+                        .alpha(if (Flight.isCarrying(flightKey)) 0f else 1f)
+                } else {
+                    Modifier
+                },
                 size = 12.5f,
                 weight = FontWeight.Medium,
                 maxLines = 1,
@@ -3750,7 +3994,7 @@ private fun EditorTopBar(
         GlassIconButton(
             Glyph.Indent,
             onToggleIndent,
-            size = 36.dp,
+            size = 40.dp,
             tint = if (indentOn) ui.accent else p.muted,
             strength = .45f,
         )
@@ -3763,6 +4007,14 @@ private val symbols = listOf(
     "，", "。", "、", "；", "：", "？", "！", "“", "”", "‘", "’",
     "（", "）", "《", "》", "〈", "〉", "【", "】", "……", "——", "·", "～", "　",
 )
+
+/** Every toolbar mode (tools, selection) uses exactly this row height, so the
+ *  dock never changes height when the writer selects a passage. */
+private val DockRowHeight = 52.dp
+
+/** One tool cell: eight of these fit a 360dp screen without paging, and the
+ *  row spreads them evenly instead of packing them left with wide gaps. */
+private val DockToolWidth = 36.dp
 
 @Composable
 private fun EditorDock(
@@ -3792,6 +4044,8 @@ private fun EditorDock(
     onSelectAll: () -> Unit,
     onDelete: () -> Unit,
     onCancelSelection: () -> Unit,
+    /** The selection toolbar's「校核」entry: checks the selected passage. */
+    onProof: (() -> Unit)? = null,
     /** 1型玻璃 sampling source. Pass the body's software backdrop so the real
      *  EditText text shows through the dock; null falls back to a paper bar. */
     backdrop: Backdrop? = null,
@@ -3802,12 +4056,9 @@ private fun EditorDock(
      *  contains liquidGlassBar, so the backdrop is re-sampled on every scroll. */
     scrollTick: androidx.compose.runtime.MutableIntState? = null,
     bodyEditor: BodyEditText? = null,
-    /** Test branch: sample the Compose body layer instead of the solid bar. */
-    glass: Boolean = false,
 ) {
     val ui = LocalInk.current
     val p = ui.palette
-    val s = ui.settings
     // Solid bar: one straight full-width strip, a touch deeper than the theme
     // paper, so the tools and symbols own their surface. No glass, no rounding.
     // The bar is the theme paper nudged towards the accent, not the raw accent:
@@ -3829,47 +4080,38 @@ private fun EditorDock(
     Box(
         Modifier
             .fillMaxWidth()
+            // 一整块：左右不留白，上缘圆角、下缘压到底。
+            .fillMaxWidth()
             .onGloballyPositioned { dockTopInWindow = it.positionInWindow().y }
     ) {
         Box(
             Modifier
                 .fillMaxWidth()
+                .clip(
+                    androidx.compose.foundation.shape.RoundedCornerShape(
+                        topStart = 22.dp,
+                        topEnd = 22.dp,
+                    ),
+                )
                 // 1型玻璃 under the dock: the body is a native EditText, so the
                 // Backdrop library cannot sample it and its draw node freezes.
                 // Drawing the real view slice here every frame is what makes the
                 // text under the bar follow the scroll.
                 // Solid bar: one straight full-width strip, a touch deeper than the
                 // theme paper (dockTone), so the tools own their surface again.
-                .let { base ->
-                    if (glass && backdrop != null) {
-                        base.liquidGlassBar(
-                            backdrop = backdrop,
-                            shape = androidx.compose.foundation.shape.RoundedCornerShape(
-                                topStart = 26.dp,
-                                topEnd = 26.dp,
-                                bottomStart = 0.dp,
-                                bottomEnd = 0.dp,
-                            ),
-                            palette = p,
-                            epoch = epoch,
-                            blurDp = s.dockBlur,
-                            refractionDp = s.dockRefraction,
-                            dispersion = s.dockDispersion,
-                            shadowAlpha = s.dockShadow,
-                            veil = s.dockBarOpacity,
-                            edgeStrength = s.dockEdge,
-                            light = s.dockLight,
-                        )
-                    } else {
-                        base.background(bar)
-                    }
-                }
+                .background(bar)
         ) {
             CompositionLocalProvider(
                 LocalDockFg provides onBar,
                 LocalDockDim provides onBarDim,
             ) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp)) {
+                // 三种工具栏形态共用同一行高：普通工具 / 框选工具 / 校核。
+                // 框选后行高不变，dock 不会因为换了一行内容而跳一下。
+                Box(
+                    Modifier.fillMaxWidth().height(DockRowHeight).clipToBounds(),
+                    contentAlignment = Alignment.Center,
+                ) {
                 AnimatedContent(
                     targetState = selectionMode,
                     transitionSpec = {
@@ -3884,6 +4126,7 @@ private fun EditorDock(
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
+                            onProof?.let { DockTool(Glyph.Check, "校核", true, it) }
                             DockTool(Glyph.Share, "复制", true, onCopy)
                             DockTool(Glyph.Check, "全选", true, onSelectAll)
                             DockTool(Glyph.Edit, "剪切", true, onCut)
@@ -3892,43 +4135,49 @@ private fun EditorDock(
                             DockTool(Glyph.Close, "取消", true, onCancelSelection)
                         }
                     } else {
+                        // 工具行：8 格固定 36dp，整行 SpaceEvenly 均分。
+                        // 8×36=288dp，360dp 屏去掉两边 12dp 还剩 336dp，一屏
+                        // 放得下就不再横滑翻页；窄屏只收紧格间空隙，格宽不变。
                         Row(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
+                            Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceEvenly,
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            DockTool(Glyph.Undo, "撤销", canUndo, onUndo)
-                            DockTool(Glyph.Redo, "重做", canRedo, onRedo)
-                            DockTool(Glyph.Indent, "缩进", true, onIndent)
-                            DockTool(Glyph.Quote, "引号", true, onQuote)
-                            DockTool(Glyph.Divider, "分节", true, onDivider)
+                            DockTool(Glyph.Undo, "撤销", canUndo, onUndo, width = DockToolWidth)
+                            DockTool(Glyph.Redo, "重做", canRedo, onRedo, width = DockToolWidth)
+                            DockTool(Glyph.Indent, "缩进", true, onIndent, width = DockToolWidth)
+                            DockTool(Glyph.Quote, "引号", true, onQuote, width = DockToolWidth)
+                            DockTool(Glyph.Divider, "分节", true, onDivider, width = DockToolWidth)
                             if (isNote && onTodos != null) {
-                                AnimatedContent(
-                                    targetState = todoActive,
-                                    transitionSpec = {
-                                        if (targetState) {
-                                            (slideInVertically(tween(180)) { it } + fadeIn(tween(180))) togetherWith
-                                                (slideOutVertically(tween(180)) { -it } + fadeOut(tween(180)))
+                                Box(Modifier.width(DockToolWidth)) {
+                                    AnimatedContent(
+                                        targetState = todoActive,
+                                        transitionSpec = {
+                                            if (targetState) {
+                                                (slideInVertically(tween(180)) { it } + fadeIn(tween(180))) togetherWith
+                                                    (slideOutVertically(tween(180)) { -it } + fadeOut(tween(180)))
+                                            } else {
+                                                (slideInVertically(tween(180)) { -it } + fadeIn(tween(180))) togetherWith
+                                                    (slideOutVertically(tween(180)) { it } + fadeOut(tween(180)))
+                                            }
+                                        },
+                                        label = "todoTool",
+                                    ) { active ->
+                                        if (active) {
+                                            DockTool(Glyph.Clock, "提醒", true, onTodos, width = DockToolWidth)
                                         } else {
-                                            (slideInVertically(tween(180)) { -it } + fadeIn(tween(180))) togetherWith
-                                                (slideOutVertically(tween(180)) { it } + fadeOut(tween(180)))
+                                            DockTool(
+                                                Glyph.List,
+                                                if (pendingTodos > 0) "待办·$pendingTodos" else "待办",
+                                                true,
+                                                onTodos,
+                                                width = DockToolWidth,
+                                            )
                                         }
-                                    },
-                                    label = "todoTool",
-                                ) { active ->
-                                    if (active) {
-                                        DockTool(Glyph.Clock, "提醒", true, onTodos)
-                                    } else {
-                                        DockTool(
-                                            Glyph.List,
-                                            if (pendingTodos > 0) "待办·$pendingTodos" else "待办",
-                                            true,
-                                            onTodos,
-                                        )
                                     }
                                 }
                             }
-                            DockTool(Glyph.Font, "排版", true, onType)
+                            DockTool(Glyph.Font, "排版", true, onType, width = DockToolWidth)
                             if (onNotes != null) {
                                 DockTool(
                                     Glyph.Link,
@@ -3936,23 +4185,27 @@ private fun EditorDock(
                                     true,
                                     onNotes,
                                     onLongPress = onNotesLongPress,
+                                    width = DockToolWidth,
                                 )
                             }
-                            DockTool(Glyph.Keyboard, "收起", true, onHideKeyboard)
+                            DockTool(Glyph.Keyboard, "收起", true, onHideKeyboard, width = DockToolWidth)
                         }
                     }
+                }
                 }
                 Spacer(Modifier.height(7.dp))
                 LazyRow(
                     Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(1.dp),
                     verticalAlignment = Alignment.CenterVertically,
+                    // 左下角常驻球占的宽度，符号从球右边开始。
+                    contentPadding = PaddingValues(start = 48.dp),
                 ) {
                     items(symbols) { symbol ->
                         Box(
                             Modifier
                                 .size(38.dp)
-                                .clip(RoundedCornerShape(11.dp))
+                                .clip(SmoothCorner(11.dp))
                                 .bouncy(scale = .86f, hapticType = 1) { onSymbol(symbol) },
                             contentAlignment = Alignment.Center,
                         ) {
@@ -3962,21 +4215,6 @@ private fun EditorDock(
                                 color = LocalDockFg.current.takeIf { it != Color.Unspecified } ?: p.ink,
                                 align = TextAlign.Center,
                                 maxLines = 1,
-                            )
-                        }
-                    }
-                    item {
-                        Box(
-                            Modifier
-                                .size(38.dp)
-                                .clip(RoundedCornerShape(11.dp))
-                                .bouncy(scale = .86f) { onCollapse() },
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            LineIcon(
-                                Glyph.ChevronDown,
-                                LocalDockDim.current.takeIf { it != Color.Unspecified } ?: p.muted,
-                                15.dp,
                             )
                         }
                     }
@@ -3998,14 +4236,22 @@ private fun DockTool(
     onClick: () -> Unit,
     iconSize: Dp = 18.dp,
     onLongPress: (() -> Unit)? = null,
+    width: Dp = 42.dp,
 ) {
     val ui = LocalInk.current
+    var pressed by remember { mutableStateOf(false) }
     val currentOnClick by rememberUpdatedState(onClick)
     val currentOnLong by rememberUpdatedState(onLongPress)
     Column(
         Modifier
-            .width(42.dp)
-            .clip(RoundedCornerShape(12.dp))
+            .width(width)
+            // No clip: at the system's largest font scale a 36dp cell would cut
+            // the last character of 「笔记·1」; the background already draws with
+            // the rounded shape, so nothing needs clipping.
+            .background(
+                if (pressed) lerp(ui.palette.paper, ui.accent, .10f) else Color.Transparent,
+                SmoothCorner(12.dp),
+            )
             // One gesture owner for tap and long press (two detectors would
             // race for the same down), and the same bounce for every tool.
             .bouncy(
@@ -4013,6 +4259,7 @@ private fun DockTool(
                 scale = .88f,
                 overshoot = true,
                 onLongPress = currentOnLong,
+                onPressChange = { pressed = it },
             ) { currentOnClick() }
             .padding(vertical = 4.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -4204,6 +4451,9 @@ fun BookEditorScreen(
         onOpenSheet = { notesOpen = true },
         onToggleFloat = { on -> store.updateSettings { it.copy(noteFloat = on) } },
         onOpenNote = { note -> onOpenNote(note.id) },
+        onSaveNote = { id, title, content, todos ->
+            store.updateNote(id) { it.copy(title = title, content = content, todos = todos) }
+        },
         floatX = store.settings.noteFloatX,
         floatY = store.settings.noteFloatY,
         floatW = store.settings.noteFloatW,
@@ -4218,17 +4468,18 @@ fun BookEditorScreen(
         WritingScreen(
             seedKey = chapter.id,
             heading = book.title,
-            metaPrefix = "第 ${book.chapters.indexOf(chapter) + 1} 章",
+            metaPrefix = chapterFallbackTitle(book.chapters.indexOf(chapter)),
             initialTitle = chapter.title,
             initialContent = chapter.content,
             placeholder = "从这里开始。写下第一句，故事就有了方向。",
             inputBlocked = menuOpen || notesOpen,
             noteLinks = noteLinks,
             onSave = { title, content ->
-                store.updateChapter(book.id, chapter.id, title = title.ifBlank { "第${book.chapters.indexOf(chapter) + 1}章" }, content = content)
+                store.updateChapter(book.id, chapter.id, title = title.ifBlank { chapterFallbackTitle(book.chapters.indexOf(chapter)) }, content = content)
             },
             onBack = onBack,
             onMore = { menuOpen = true },
+            proofBookId = book.id,
         )
 
         if (notesOpen) {
@@ -4456,7 +4707,7 @@ fun TodoSheet(store: AppStore, noteId: String, onDismiss: () -> Unit) {
             }
             Spacer(Modifier.width(8.dp))
             Box(Modifier.size(48.dp)) {
-                GlassIconButton(Glyph.Plus, { addTodo() }, size = 48.dp)
+                GlassIconButton(Glyph.Plus, { addTodo() })
             }
         }
         Spacer(Modifier.height(11.dp))
@@ -4529,7 +4780,7 @@ private fun InlineReminderPanel(
     val ui = LocalInk.current
     val context = LocalContext.current
     val zone = ZoneId.systemDefault()
-    val shape = RoundedCornerShape(22.dp)
+    val shape = SmoothCorner(22.dp)
     val base = remember(todo.id, todo.remindAt) {
         todo.remindAt?.let { java.time.Instant.ofEpochMilli(it).atZone(zone).toLocalDateTime() }
             ?: LocalDateTime.now().plusHours(1).withSecond(0).withNano(0)
@@ -4599,7 +4850,7 @@ private fun InlineReminderPanel(
                     Modifier
                         .weight(1f)
                         .height(46.dp)
-                        .clip(RoundedCornerShape(23.dp))
+                        .clip(SmoothCorner(23.dp))
                         .background(ui.palette.faint),
                     contentAlignment = Alignment.Center,
                 ) {
@@ -4624,7 +4875,7 @@ private fun InlineReminderPanel(
 private fun MiniStepper(value: String, onMinus: () -> Unit, onPlus: () -> Unit) {
     val ui = LocalInk.current
     Row(
-        Modifier.clip(RoundedCornerShape(14.dp)).background(ui.palette.faint),
+        Modifier.clip(SmoothCorner(14.dp)).background(ui.palette.faint),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(Modifier.size(28.dp).clickable { onMinus() }, contentAlignment = Alignment.Center) {
@@ -4672,7 +4923,7 @@ private fun TodoReminderDialog(
         Row(
             Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(18.dp))
+                .clip(SmoothCorner(18.dp))
                 .background(ui.palette.faint)
                 .clickable { openDatePicker() }
                 .padding(horizontal = 15.dp, vertical = 13.dp),
@@ -4688,7 +4939,7 @@ private fun TodoReminderDialog(
         Column(
             Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(18.dp))
+                .clip(SmoothCorner(18.dp))
                 .background(ui.palette.faint)
                 .padding(horizontal = 12.dp, vertical = 10.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -4756,7 +5007,7 @@ private fun ReminderTimeDialog(initial: Long?, onDismiss: () -> Unit, onPick: (L
         Row(
             Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(20.dp))
+                .clip(SmoothCorner(20.dp))
                 .background(ui.palette.faint)
                 .padding(16.dp),
             verticalAlignment = Alignment.CenterVertically,

@@ -10,3 +10,6 @@ keystore.properties
 *.aab
 .idea/
 .DS_Store
+tmp/
+*.log
+

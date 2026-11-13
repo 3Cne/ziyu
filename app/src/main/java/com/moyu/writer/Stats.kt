@@ -21,7 +21,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -51,7 +50,8 @@ fun StatsScreen(store: AppStore) {
     val goal = store.data.settings.dailyGoal.coerceAtLeast(1)
     val progress by animateFloatAsState(
         (today.toFloat() / goal).coerceIn(0f, 1f),
-        spring(.9f, 300f),
+        spring(MOYU_DAMPING, 300f, PROGRESS_THRESHOLD),
+        visibilityThreshold = PROGRESS_THRESHOLD,
         label = "goal",
     )
     val total = store.books.sumOf { it.words }
@@ -89,7 +89,8 @@ fun StatsScreen(store: AppStore) {
                             week.forEach { (date, words) ->
                                 val dayProgress by animateFloatAsState(
                                     if (words == 0) .025f else (words.toFloat() / maxDay).coerceIn(.08f, 1f),
-                                    spring(.85f, 260f),
+                                    spring(MOYU_DAMPING, 260f, PROGRESS_THRESHOLD),
+                                    visibilityThreshold = PROGRESS_THRESHOLD,
                                     label = "bar_$date",
                                 )
                                 val isToday = date == LocalDate.now()
@@ -109,7 +110,7 @@ fun StatsScreen(store: AppStore) {
                                         Modifier
                                             .width(15.dp)
                                             .height(86.dp)
-                                            .clip(RoundedCornerShape(7.dp))
+                                            .clip(SmoothCorner(7.dp))
                                             .background(p.faint),
                                         contentAlignment = Alignment.BottomCenter,
                                     ) {
@@ -117,7 +118,7 @@ fun StatsScreen(store: AppStore) {
                                             Modifier
                                                 .fillMaxWidth()
                                                 .fillMaxHeight(dayProgress)
-                                                .clip(RoundedCornerShape(7.dp))
+                                                .clip(SmoothCorner(7.dp))
                                                 .background(
                                                     if (isToday) ui.accent
                                                     else if (p.isDark) Color.White.copy(alpha = .28f)
@@ -163,7 +164,7 @@ fun StatsScreen(store: AppStore) {
                     Row(
                         Modifier
                             .fillMaxWidth()
-                            .clip(RoundedCornerShape(18.dp))
+                            .clip(SmoothCorner(18.dp))
                             .padding(vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
@@ -267,7 +268,7 @@ private fun StatCard(value: String, label: String, unit: String, modifier: Modif
             Box(
                 Modifier
                     .size(28.dp)
-                    .clip(RoundedCornerShape(9.dp))
+                    .clip(SmoothCorner(9.dp))
                     .background(ui.palette.faint),
                 contentAlignment = Alignment.Center,
             ) {
