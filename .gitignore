@@ -13,3 +13,8 @@ keystore.properties
 tmp/
 *.log
 
+# 内部工作笔记（含设备序列号与本机路径），不进公开仓库
+docs/PROJECT_MEMORY.md
+docs/RELEASE-3.7.13.md
+docs/SOURCE-RECOVERY.md
+
