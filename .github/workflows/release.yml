@@ -1,12 +1,15 @@
 name: Release APK
 
 on:
-  push:
-    tags:
-      - "v*"
-  release:
-    types: [published]
+  # 只用 Actions 页面手动触发。
+  # 本地签名密钥不在仓库里，tag 自动触发会拿不到 keystore 而失败；
+  # 等 Secrets 配齐（KEYSTORE_BASE64 等）后，再取消下面 push/release 的注释即可恢复全自动。
   workflow_dispatch:
+  # push:
+  #   tags:
+  #     - "v*"
+  # release:
+  #   types: [published]
 
 permissions:
   contents: write
