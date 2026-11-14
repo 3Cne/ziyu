@@ -57,7 +57,7 @@ private val ONBOARD_PAGES = listOf(
     OnboardPage(
         "上手 · 1 / 5",
         "第一本书",
-        "字隅没有账号，打开就能写。书架上的每一本，都只存在这台手机里。",
+        "素纸没有账号，打开就能写。书架上的每一本，都只存在这台手机里。",
         Glyph.Book,
         listOf(
             "底部第 1 个标签是「书架」",
@@ -163,7 +163,7 @@ private val ONBOARD_PAGES = listOf(
         listOf(
             "「对话 / 记忆」两个页签；记忆分这本书和跨书偏好",
             "顶部能切书，也能引用别的书来问",
-            "让它改书、建章、设提醒，会先排队，点「采纳」才落库",
+            "让它改书、建章、设提醒，说完就生效；删除前会再问你一次，改错了点「撤销」",
             "回答下方「用了 N 个工具」可展开看每一步",
         ),
     ),
@@ -269,7 +269,7 @@ fun OnboardingOverlay(onDone: () -> Unit) {
                     Txt("字", size = 10f, color = p.paper, weight = FontWeight.SemiBold)
                 }
                 Spacer(Modifier.width(9.dp))
-                Txt("字隅", size = 11f, color = p.ink, weight = FontWeight.Medium, letterSpacing = .8f)
+                Txt("素纸", size = 11f, color = p.ink, weight = FontWeight.Medium, letterSpacing = .8f)
                 Spacer(Modifier.weight(1f))
                 Txt(
                     "${page + 1} / ${pages.size}",

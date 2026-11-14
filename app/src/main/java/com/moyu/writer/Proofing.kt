@@ -18,15 +18,17 @@ data class ProofIssue(
 )
 
 /**
- * Three layers, per the 2026-11-11 proofing design:
- *  - local rules only report what is certainly wrong (repeated punctuation,
- *    half-width marks inside Chinese, punctuation at line start);
- *  - name consistency is driven by the writer's own memory table — measured
- *    17/17 true positives on his two chapters, and it costs no request;
- *  - semantic checks (wrong homophone, broken sentence) need the model.
+ * 校核（2026-11-14 改版）：**全部交给模型**。
  *
- * Locating is always local: every suggestion carries the quote it replaces,
- * and the editor refuses a quote it cannot find exactly once.
+ * 3.16.0 之前有本地规则层（重复标点 / 半角标点 / 行首标点 / 16 条错别字固定搭配 / 人名比对）。
+ * 用作者真实的 2405 字章测过：五类合计命中 **0**，等于没有。用户当场定：
+ * 「不要本地校核了，全交给 AI」。
+ *
+ * 所以现在只有一条路：选中 → 直接发模型 → 错别字 / 符号 / 语义三类一起查。
+ * `local()` 与 `names()` 保留在下面但**不再被调用**（留着是为了对照历史结论，
+ * 接线时别再把它们挂回去，除非有人拿真实正文证明它们能命中）。
+ *
+ * 定位仍是本地：每条建议带着要替换的原文，编辑器只改能找到且唯一的那一处。
  */
 object Proofing {
     /** One model request covers a passage of this size (the design's 1500–2500;
@@ -38,9 +40,46 @@ object Proofing {
     private val HALF = Regex("([\\u4e00-\\u9fa5])([,.;:?!])([\\u4e00-\\u9fa5])")
     private const val LINE_STARTS = "，。、；：？！"
 
+    /**
+     * 高置信度错别字：只收「写了就是错」的固定搭配，不收要判断语境的
+     * 的/地/得、在/再。误报一次，作者就不再信这个检查。
+     */
+    private val TYPO = listOf(
+        "既使" to "即使",
+        "按装" to "安装",
+        "部份" to "部分",
+        "做为" to "作为",
+        "以经" to "已经",
+        "因该" to "应该",
+        "迫不急待" to "迫不及待",
+        "再接再励" to "再接再厉",
+        "一如继往" to "一如既往",
+        "一股作气" to "一鼓作气",
+        "不径而走" to "不胫而走",
+        "默守成规" to "墨守成规",
+        "金榜提名" to "金榜题名",
+        "名符其实" to "名副其实",
+        "帐号" to "账号",
+        "坐位" to "座位",
+    )
+
     /** Local, zero-cost findings. Only items that can be replaced exactly. */
     fun local(text: String): List<ProofIssue> {
         val out = ArrayList<ProofIssue>()
+        // 错别字：固定搭配，直接给出正确写法。
+        for ((wrong, right) in TYPO) {
+            var at = text.indexOf(wrong)
+            while (at >= 0) {
+                out += ProofIssue(
+                    kind = "错别字",
+                    quote = wrong,
+                    suggestion = right,
+                    why = "应为「$right」",
+                    local = true,
+                )
+                at = text.indexOf(wrong, at + wrong.length)
+            }
+        }
         DUP.findAll(text).forEach { m ->
             out += ProofIssue(
                 kind = "符号",
@@ -109,7 +148,7 @@ object Proofing {
                     for (k in 0 until n) if (win[k] != name[k]) diff++
                     if (diff == 1) {
                         out += ProofIssue(
-                            kind = "错字",
+                            kind = "错别字",
                             quote = win,
                             suggestion = name,
                             why = "记忆里的名字是「$name」",
@@ -128,12 +167,18 @@ object Proofing {
      *  character's spelling, and with no list it "fixed" 赵意年 into 赵意念 by
      *  frequency. 人名 is checked locally against the memory table instead. */
     fun prompt(text: String, names: List<String> = emptyList()): Pair<String, String> {
+        val roster = if (names.isEmpty()) "" else
+            "\n这本书的人名/地名（以这些写法为准，写成别的就是错别字）：" + names.joinToString("、")
         val system = """
-            你只做两件事：找病句，找用错的标点。
-            错别字、人名、地名、专有名词的写法一个字都不要改、不要报——它们由另外的名单核对。
+            你替作者把这一段查一遍，只做三件事：
+            1 错别字：同音或形近写错（在/再、做/作、那/哪、已/以、帐/账），以及成语里的错字。
+            2 符号：标点用错——半角标点混进中文、重复标点、行首标点、「...」代替省略号、
+              引号或括号不配对、句末漏标点。
+            3 语义：病句、指代不清（谁、哪个人）、逻辑跳跃、同一个意思说两遍、上下句接不上。$roster
             只输出 JSON 数组，不要输出任何别的文字。每项格式：
-            {"quote":"原文片段","suggestion":"改后片段","kind":"病句|符号","why":"一句话说明"}
-            规则：quote 必须从原文逐字复制，3 到 40 个字，不能含换行；suggestion 只改最少的字，保持原意；拿不准的不要报；没有问题就输出 []。
+            {"quote":"原文片段","suggestion":"改后片段","kind":"错别字|符号|语义","why":"一句话说明"}
+            规则：quote 必须从原文逐字复制，2 到 40 个字，不能含换行；suggestion 只改最少的字，保持原意；
+            拿不准的不要报；没有问题就输出 []。
         """.trimIndent()
         val user = "原文：\n$text\n\n请输出 JSON 数组。"
         return system to user
@@ -183,9 +228,9 @@ object Proofing {
             if (quote.length !in 2..60 || suggestion.isEmpty() || quote == suggestion) continue
             val rawKind = o.optString("kind")
             val kind = when {
-                rawKind.contains("字") -> "错字"
-                rawKind.contains("句") -> "病句"
-                else -> "符号"
+                rawKind.contains("字") -> "错别字"
+                rawKind.contains("符") -> "符号"
+                else -> "语义"
             }
             out += ProofIssue(
                 kind = kind,

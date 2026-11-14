@@ -256,7 +256,7 @@ fun SettingsScreen(store: AppStore, listState: LazyListState, onOpenPage: (Strin
                 )
                 RowDivider()
                 SettingRow(
-                    "关于字隅",
+                    "关于素纸",
                     BuildConfig.VERSION_NAME,
                     Glyph.Info,
                     onClick = { onOpenPage("about") },
@@ -268,7 +268,7 @@ fun SettingsScreen(store: AppStore, listState: LazyListState, onOpenPage: (Strin
                 androidx.compose.ui.Modifier.fillMaxWidth().padding(top = 18.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Txt("字隅 ${BuildConfig.VERSION_NAME}", size = 8.5f, color = p.muted.copy(alpha = .65f), letterSpacing = 1f)
+                Txt("${BuildConfig.VERSION_NAME}", size = 8.5f, color = p.muted.copy(alpha = .65f), letterSpacing = 1f)
             }
         }
         }
@@ -1415,19 +1415,19 @@ private fun SpaceSettingsPage(store: AppStore, onBack: () -> Unit) {
         }
         item { SectionCaption("名称") }
         item {
-            InkField(name, { name = it.take(8) }, "字隅", textSize = 17f)
+            InkField(name, { name = it.take(8) }, "素纸", textSize = 17f)
         }
         item {
             PrimaryButton("保存", {
-                store.updateSettings { it.copy(appName = name.trim().ifBlank { "字隅" }) }
+                store.updateSettings { it.copy(appName = name.trim().ifBlank { "素纸" }) }
                 ToastBus.show("空间名称已更新")
                 onBack()
             }, androidx.compose.ui.Modifier.fillMaxWidth(), glyph = Glyph.Check)
         }
         item {
             GlassButton("恢复默认", {
-                name = "字隅"
-                store.updateSettings { it.copy(appName = "字隅") }
+                name = "素纸"
+                store.updateSettings { it.copy(appName = "素纸") }
             }, androidx.compose.ui.Modifier.fillMaxWidth())
         }
     }
@@ -1445,7 +1445,7 @@ private fun AboutPage(store: AppStore, onBack: () -> Unit) {
     var resetSettings by remember { mutableStateOf(false) }
     var checkingUpdate by remember { mutableStateOf(false) }
     var availableUpdate by remember { mutableStateOf<UpdateInfo?>(null) }
-    SettingsPage("关于字隅", "", onBack) {
+    SettingsPage("关于素纸", "", onBack) {
         item {
             Column(
                 androidx.compose.ui.Modifier.fillMaxWidth().padding(vertical = 16.dp),
@@ -1458,7 +1458,7 @@ private fun AboutPage(store: AppStore, onBack: () -> Unit) {
                     Txt("字", size = 34f, color = ui.palette.bgTop, weight = FontWeight.Medium, fontFamily = androidx.compose.ui.text.font.FontFamily.Serif)
                 }
                 Spacer(androidx.compose.ui.Modifier.height(12.dp))
-                Txt("字隅", size = 23f, weight = FontWeight.SemiBold, letterSpacing = 3f)
+                Txt("素纸", size = 22f, weight = FontWeight.SemiBold, letterSpacing = 2f)
                 Spacer(androidx.compose.ui.Modifier.height(7.dp))
                 Txt(
                     "作者 3Cne · QQ 2503581955",
@@ -1529,7 +1529,7 @@ private fun AboutPage(store: AppStore, onBack: () -> Unit) {
         }
         item {
             Txt(
-                "字隅把书、笔记和提醒都留在你的设备上。没有账号，也不会上传正文。",
+                "素纸把书、笔记和提醒都留在你的设备上。没有账号，也不会上传正文。",
                 size = 10f,
                 color = ui.palette.muted,
                 lineHeight = 17f,

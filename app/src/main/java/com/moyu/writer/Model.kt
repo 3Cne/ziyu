@@ -134,7 +134,7 @@ data class AppSettings(
     val showWordCount: Boolean = true,
     val showStats: Boolean = true,
     val haptics: Boolean = true,
-    val appName: String = "字隅",
+    val appName: String = "素纸",
     val showFps: Boolean = false,
     val autoUpdate: Boolean = true,
     val paperStyle: String = "plain",
@@ -680,7 +680,9 @@ class AppStore(context: Context) {
             // ("墨屿", "笔滞", "3Cne") was meant to rename legacy defaults once,
             // but normalize runs on every launch, so picking any of those names
             // silently reverted to 字隅 the next time the app started.
-            appName = data.settings.appName.ifBlank { "字隅" },
+            // 改名迁移：旧默认值「字隅」跟到新默认「素纸」，别让桌面与设置里两个名字。
+            appName = data.settings.appName.ifBlank { "素纸" }
+                .let { if (it == "字隅") "素纸" else it },
         )
         if (settings.paperStyle !in setOf("plain", "ruled", "solid")) {
             settings = settings.copy(paperStyle = "plain")
@@ -1032,7 +1034,7 @@ private fun decodeSettings(o: JSONObject?) = AppSettings(
     showWordCount = o?.optBoolean("showWordCount", true) ?: true,
     showStats = o?.optBoolean("showStats", true) ?: true,
     haptics = o?.optBoolean("haptics", true) ?: true,
-    appName = o?.optString("appName", "字隅") ?: "字隅",
+    appName = o?.optString("appName", "素纸") ?: "素纸",
     showFps = o?.optBoolean("showFps", false) ?: false,
     autoUpdate = o?.optBoolean("autoUpdate", true) ?: true,
     paperStyle = when (o?.optString("paperStyle", "plain")) {

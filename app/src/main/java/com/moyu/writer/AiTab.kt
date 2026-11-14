@@ -310,8 +310,10 @@ private fun ThoughtBlock(id: String, reasoning: String) {
 /**
  * 输入框上方的工具气泡：只有图标，没有文字。
  *
- * 展开时以左下角为原点，横向从 0 抽出来（带一点过冲）、纵向轻微压扁后回正；
- * 里面的图标按 18ms 错开，从左 14dp 滑入。收回反向缩回。
+ * 展开/收起只有两件事：透明度 0↔1、整块在下方 8dp 与落点之间移动（收起反向）。
+ * 宽度固定、5 个图标整排同时出现——之前「宽度从 5px 拉幕 + 每个图标错开 18ms
+ * 滑入 14dp」三层一起演，读起来太夸张；删掉后玻璃只按最终尺寸栅格化一次，
+ * 边缘也不会每帧重新采样。
  */
 @Composable
 private fun ToolsBubble(
@@ -325,9 +327,9 @@ private fun ToolsBubble(
     onWeb: () -> Unit,
     onMemory: () -> Unit,
 ) {
-    // 只在「从无到有」那一刻重组一次；之后宽度/透明度都在组合里读，
-    // 每帧重新布局这块玻璃——这是关键：玻璃必须按最终尺寸栅格化，
-    // 不能再被 graphicsLayer 缩放，否则最后几十毫秒边缘会重新采样。
+    // 只在「从无到有」那一刻重组一次；之后透明度/位移在组合里读，
+    // 但宽度从第一帧就是最终尺寸——玻璃只按最终尺寸栅格化一次，
+    // 展开过程中不再重排，边缘也不会因为宽度变了又重采样一次。
     val visible by remember(open) { derivedStateOf { open.value > .001f } }
     if (!visible) return
     // 5 颗 42dp 图标 + 4 个 2dp 间隔 + 左右各 7dp 内边距。
@@ -335,9 +337,12 @@ private fun ToolsBubble(
     val t = open.value.coerceIn(0f, 1f)
     Box(
         modifier
-            .width(bubbleWidth * t.coerceAtLeast(.02f))
-            .clipToBounds()
-            .graphicsLayer { alpha = t }
+            .width(bubbleWidth)
+            .graphicsLayer {
+                // 一次克制的出现：只有淡入和 8dp 上移，没有幕布、没有逐图标进位。
+                alpha = t
+                translationY = (1f - t) * 8.dp.toPx()
+            }
     ) {
         GlassField(
             Modifier.fillMaxWidth(),
@@ -346,27 +351,23 @@ private fun ToolsBubble(
             kind = "button",
         ) {
             Row(
-                // requiredWidth：气泡宽度在长，但这行图标必须保持 232dp
-                // 原尺寸被左边缘裁出来，不能被窄约束挤扁。
-                Modifier.requiredWidth(bubbleWidth).padding(7.dp),
+                Modifier.padding(7.dp),
                 horizontalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                ToolIcon(Glyph.File, 0, open, onClick = onFile)
-                ToolIcon(Glyph.Link, 1, open, onClick = onQuote)
-                ToolIcon(Glyph.Sparkles, 2, open, selected = deepThink, onClick = onDeep)
-                ToolIcon(Glyph.Search, 3, open, selected = webOn, onClick = onWeb)
-                ToolIcon(Glyph.Book, 4, open, onClick = onMemory)
+                ToolIcon(Glyph.File, onClick = onFile)
+                ToolIcon(Glyph.Link, onClick = onQuote)
+                ToolIcon(Glyph.Sparkles, selected = deepThink, onClick = onDeep)
+                ToolIcon(Glyph.Search, selected = webOn, onClick = onWeb)
+                ToolIcon(Glyph.Book, onClick = onMemory)
             }
         }
     }
 }
 
-/** 气泡里的一颗图标按钮；打开时按序号错开从左滑入。 */
+/** 气泡里的一颗图标按钮；跟随气泡一起出现，不再逐个错开滑入。 */
 @Composable
 private fun ToolIcon(
     glyph: Glyph,
-    index: Int,
-    open: Animatable<Float, AnimationVector1D>,
     selected: Boolean = false,
     onClick: () -> Unit,
 ) {
@@ -391,11 +392,6 @@ private fun ToolIcon(
     Box(
         Modifier
             .size(42.dp)
-            .graphicsLayer {
-                val t = ((open.value - index * .06f) / .72f).coerceIn(0f, 1f)
-                alpha = t
-                translationX = (1f - t) * 14.dp.toPx()
-            }
             .clip(CircleShape)
             .bouncy(scale = .90f) { onClick() },
         contentAlignment = Alignment.Center,
@@ -506,6 +502,10 @@ fun AiScreen(
     var lastPrompt by remember { mutableStateOf<AiPrompt?>(null) }
     // Tool writes wait here until the writer taps 采纳.
     var pending by remember { mutableStateOf<List<AiPending>>(emptyList()) }
+    // 2026-11-14 用户定：除删除/覆盖外，写操作直接落地，不再排队。
+    // 落地时拍一张整库快照，给一步撤销用；只保留最近一轮。
+    var undoSnapshot by remember { mutableStateOf<AppData?>(null) }
+    var undoCount by remember { mutableIntStateOf(0) }
     // Deletions are queued like everything else, but the writer gets one more
     // question before they run: 「采纳」 alone is too small a click for an
     // irreversible action.
@@ -550,8 +550,7 @@ fun AiScreen(
         }
     }
 
-    fun applyPending() {
-        val queue = pending
+    fun applyQueue(queue: List<AiPending>) {
         if (queue.isEmpty()) return
         var bookFacts = memo.facts
         var bookDirty = false
@@ -792,14 +791,38 @@ fun AiScreen(
             globalFacts = globalList
             MemoStore.saveGlobal(ctx, MemoStore.loadGlobal(ctx).copy(facts = globalList))
         }
-        pending = emptyList()
-        if (!restoredNow) ToastBus.show("已采纳 " + queue.size + " 处")
+        if (!restoredNow) ToastBus.show("已写入 " + queue.size + " 处")
     }
 
-    /** 采纳 either runs now or asks once more when the queue deletes something. */
+    /** 直接落地：删除与整库恢复以外的写操作，一次回答结束就生效。 */
+    fun applyDirectly(queue: List<AiPending>) {
+        if (queue.isEmpty()) return
+        val direct = ArrayList<AiPending>()
+        val rest = ArrayList<AiPending>()
+        for (p in queue) {
+            if (p.danger || p.kind == AiPendingKind.Restore) rest += p else direct += p
+        }
+        if (direct.isNotEmpty()) {
+            undoSnapshot = store.data
+            undoCount = direct.size
+            applyQueue(direct)
+        }
+        pending = rest
+    }
+
+    /** 一步撤销：整库回到本轮写入前那一刻。 */
+    fun undoDirect() {
+        val snap = undoSnapshot ?: return
+        store.replaceAll(snap)
+        undoSnapshot = null
+        undoCount = 0
+        ToastBus.show("已撤销")
+    }
+
+    /** 剩下的只有删除/覆盖类，落地前再问一次。 */
     fun requestApply() {
         if (pending.isEmpty()) return
-        if (pending.any { it.danger }) confirmDanger = true else applyPending()
+        confirmDanger = true
     }
 
     fun persist(m: BookMemo) {
@@ -813,6 +836,10 @@ fun AiScreen(
     }
 
     fun send(text: String, echo: Boolean = true) {
+        // 新一轮开始：上一轮的撤销口子作废（只保最近一轮）。
+        undoCount = 0
+        undoSnapshot = null
+        pending = emptyList()
         // Picking a passage and pressing send IS the request; do not swallow it
         // just because the writer did not type a question on top of it.
         val q = text.trim().ifBlank {
@@ -1095,6 +1122,8 @@ fun AiScreen(
                     " deep=" + deepThink,
             )
             pending = queue
+            // 除删除/覆盖外的写操作，这里就落地，不等「采纳」。
+            applyDirectly(queue)
             if (last.error != null) {
                 error = last.error
                 errorModel = last.modelHint
@@ -1109,7 +1138,7 @@ fun AiScreen(
                 streamText = cleanReply(
                     text.ifBlank {
                         if (queue.isNotEmpty()) {
-                            "已排好 " + queue.size + " 处改动，点下面的「采纳」写入。"
+                            "这次有 " + queue.size + " 处删除或覆盖，等你在下面确认。"
                         } else {
                             "模型这次没给出内容（工具往返 " + rounds + " 轮）。再发一次，或换个说法。"
                         }
@@ -1311,6 +1340,8 @@ fun AiScreen(
                     pending = pending,
                     onApplyPending = { requestApply() },
                     onDropPending = { pending = emptyList() },
+                    onUndoDirect = { undoDirect() },
+                    undoCount = undoCount,
                     suggestions = suggestions.ifEmpty { FALLBACK_SUGGESTIONS },
                     onSend = { send(question) },
                     onSample = { send(it) },
@@ -1492,7 +1523,9 @@ fun AiScreen(
             destructive = true,
             onConfirm = {
                 confirmDanger = false
-                applyPending()
+                val danger = pending
+                pending = emptyList()
+                applyQueue(danger)
             },
             onDismiss = { confirmDanger = false },
         )
@@ -1568,6 +1601,8 @@ private fun ChatPane(
     pending: List<AiPending>,
     onApplyPending: () -> Unit,
     onDropPending: () -> Unit,
+    onUndoDirect: () -> Unit,
+    undoCount: Int,
     suggestions: List<String>,
     onSend: () -> Unit,
     onSample: (String) -> Unit,
@@ -1597,6 +1632,10 @@ private fun ChatPane(
 
     // 输入框左边的工具气泡：开合只存本次页面内存，不写 moyu.json。
     var toolsOpen by remember { mutableStateOf(false) }
+    // 输入区（chip 行 + 输入行）的实测高度。工具泡的落点读它，不再写死 58dp：
+    // 有引用/附件 chip 时整块变高，泡自动抬到 chip 上方；无 chip 时也只差 6dp。
+    // 之前写死 58dp 只够 46dp 输入行，chip 行正好被压在泡底下。
+    var inputBlockH by remember { mutableStateOf(0.dp) }
     // 长按强调的唯一时间源：菜单真正出现（arm delay 之后）才从 0 走到 1。
     // 气泡延展、其余消息压暗/后退三者读同一个值，所以开启和取消都同一帧起步。
     var menuOpen by remember { mutableStateOf(false) }
@@ -1642,20 +1681,16 @@ private fun ChatPane(
         if (ui.settings.motion == "none") {
             toolsT.snapTo(if (toolsOpen) 1f else 0f)
         } else {
+            // 一次克制的出现：200ms 展开、150ms 收起，缓入缓出、没有过冲。
+            // 之前是 spring(1/420) 叠在「宽度拉幕 + 逐图标进位」上，整段
+            // 350–400ms 三层同时演，读起来太夸张。
             toolsT.animateTo(
                 targetValue = if (toolsOpen) 1f else 0f,
-                animationSpec = spring(
-                    // 临界阻尼：气泡只向外长、不过 1。以前 .62 会冲过 1 再
-                    // 退回来，玻璃边缘带被放大又缩回，最后就「边缘变一下」。
-                    dampingRatio = 1f,
-                    stiffness = 420f,
-                    visibilityThreshold = .0002f,
+                animationSpec = tween(
+                    durationMillis = if (toolsOpen) 200 else 150,
+                    easing = FastOutSlowInEasing,
                 ),
             )
-            // 弹簧是渐近的，最后 0.0002 的无尽尾巴会让两端玻璃边缘一直
-            // 有亚像素级的缩放。落到精确值只差 0.02%（<0.1dp），直接收口，
-            // 把「还在动」的那一帧去掉。
-            toolsT.snapTo(if (toolsOpen) 1f else 0f)
         }
     }
     BackHandler(enabled = toolsOpen) { toolsOpen = false }
@@ -2128,7 +2163,7 @@ private fun ChatPane(
                                                     .background(p.ink, SmoothCorner(999.dp))
                                                     .padding(horizontal = 13.dp, vertical = 6.dp),
                                             ) {
-                                                Txt("采纳", size = 11.5f, color = p.paper, weight = FontWeight.SemiBold)
+                                                Txt("确认", size = 11.5f, color = p.paper, weight = FontWeight.SemiBold)
                                             }
                                             Spacer(Modifier.width(6.dp))
                                             // No outline: a 1 dp border on a 6 dp
@@ -2143,7 +2178,41 @@ private fun ChatPane(
                                                     )
                                                     .padding(horizontal = 13.dp, vertical = 6.dp),
                                             ) {
-                                                Txt("别改", size = 11.5f, color = p.ink)
+                                                Txt("算了", size = 11.5f, color = p.ink)
+                                            }
+                                        }
+                                    }
+                                    // 直接写入的那一条：改完就在这条回答里留一个撤销口子。
+                                    if (!running && pending.isEmpty() && undoCount > 0 &&
+                                        msg.id == messages.lastOrNull { it.role != "user" }?.id
+                                    ) {
+                                        Box(
+                                            Modifier
+                                                .fillMaxWidth()
+                                                .padding(start = 14.dp, end = 10.dp, bottom = 10.dp)
+                                                .height(1.dp)
+                                                .background(p.line.copy(alpha = .5f))
+                                        )
+                                        Row(
+                                            Modifier
+                                                .fillMaxWidth()
+                                                .padding(start = 14.dp, end = 10.dp, top = 9.dp, bottom = 10.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                        ) {
+                                            Txt(
+                                                "已写入 " + undoCount + " 处",
+                                                size = 11f,
+                                                color = p.muted,
+                                                modifier = Modifier.weight(1f),
+                                            )
+                                            Spacer(Modifier.width(10.dp))
+                                            Box(
+                                                Modifier
+                                                    .bouncy { onUndoDirect() }
+                                                    .background(p.ink, SmoothCorner(999.dp))
+                                                    .padding(horizontal = 13.dp, vertical = 6.dp),
+                                            ) {
+                                                Txt("撤销", size = 11.5f, color = p.paper, weight = FontWeight.SemiBold)
                                             }
                                         }
                                     }
@@ -2216,7 +2285,14 @@ private fun ChatPane(
             ToolsBubble(
                 modifier = Modifier
                     .align(Alignment.BottomStart)
-                    .padding(start = 20.dp, bottom = bottomGap + 58.dp),
+                    // 落点 = 输入区实测高度 + 12dp，不再写死 58dp：chip 行出现的
+                    // 那一帧起，泡就跟着抬到它上方，不再压住 chip。
+                    // 52dp 是没有 chip 时的最小高度（6dp 上间距 + 46dp 输入行），
+                    // 首帧还没量到时用它兜底。
+                    .padding(
+                        start = 20.dp,
+                        bottom = bottomGap + maxOf(inputBlockH, 52.dp) + 12.dp,
+                    ),
                 open = toolsT,
                 deepThink = deepThink,
                 webOn = webOn,
@@ -2257,6 +2333,9 @@ private fun ChatPane(
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
                 .padding(bottom = bottomGap)
+                // 量的是 padding 内侧的内容高度（chip 行 + 输入行），
+                // bottomGap 之外的落点由它换算，工具泡因此永远贴在整块输入区上方。
+                .onGloballyPositioned { inputBlockH = with(density) { it.size.height.toDp() } }
         ) {
             if (pending.isNotEmpty()) {
 

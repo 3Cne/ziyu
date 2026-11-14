@@ -24,7 +24,7 @@ object AppUpdater {
         if (android.os.Build.VERSION.SDK_INT >= 26 &&
             !context.packageManager.canRequestPackageInstalls()
         ) {
-            printToast("请允许字隅安装未知应用，然后重试")
+            printToast("请允许素纸安装未知应用，然后重试")
             context.startActivity(
                 Intent(
                     Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
@@ -36,7 +36,7 @@ object AppUpdater {
         val name = info.apkName.ifBlank { "ziyu-${info.tag}.apk" }
         val relative = "updates/$name"
         val request = DownloadManager.Request(Uri.parse(info.apkUrl))
-            .setTitle("字隅 ${info.tag}")
+            .setTitle("素纸 ${info.tag}")
             .setMimeType("application/vnd.android.package-archive")
             .setDestinationInExternalFilesDir(context, Environment.DIRECTORY_DOWNLOADS, relative)
             .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)

@@ -47,6 +47,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateDpAsState
@@ -512,6 +513,10 @@ fun WritingScreen(
     var proofStatus by remember { mutableStateOf<String?>(null) }
     /** The passage the panel was opened for; closing puts the selection back. */
     var proofSelection by remember { mutableStateOf(0 to 0) }
+    /** 浮窗此刻承载哪件事：校核（本地规则 + 可选 AI）还是修饰（只出顺句版本）。 */
+    var polishMode by remember { mutableStateOf(false) }
+    /** 校核打开后自动发一次请求（本地规则已停用，改成 AI 全量查）。 */
+    var proofAutoAsk by remember { mutableStateOf(false) }
 
     fun startProof() {
         val a = min(body.selection.start, body.selection.end).coerceIn(0, body.text.length)
@@ -527,24 +532,20 @@ fun WritingScreen(
         }
         proofText = text
         proofSelection = a to b
+        polishMode = false
         // Two right-side panels never stack: the notes window gives way, and the
         // body keeps its scroll position while the writing column re-wraps.
         floatNotePanel = false
         bodyEditor?.captureScrollAnchor()
-        var found = Proofing.local(text)
-        if (proofBookId != null) {
-            runCatching {
-                val memo = MemoStore.load(context, proofBookId)
-                val global = MemoStore.loadGlobal(context)
-                found = found + Proofing.names(text, memo.facts + global.facts)
-            }
-        }
-        proofIssues = found
+        // 本地规则不再跑（2026-11-14 用户定：本地一条都不命中，等于没用，全交给 AI）。
+        proofIssues = emptyList()
         proofBusy = false
         proofAsked = false
         proofError = null
+        proofStatus = null
         proofOpen = true
         bodyEditor?.collapseSelection()
+        proofAutoAsk = true
     }
 
     fun askAiProof() {
@@ -611,7 +612,108 @@ fun WritingScreen(
         }
     }
 
+    /** 修饰的 AI 请求：只顺句，出 1–2 个版本，等作者点一个才替换。 */
+    fun askPolish() {
+        val key = AiKey.load(context)
+        if (!settings.aiEnabled || key.isNullOrBlank()) {
+            proofError = "还没配置 AI：设置 → AI 与记忆"
+            return
+        }
+        if (proofBusy) return
+        proofBusy = true
+        proofError = null
+        proofAsked = true
+        val text = proofText
+        val versions = Polishing.versionCount(text.length)
+        scope.launch {
+            val (sys, usr) = Polishing.prompt(text, versions)
+            var r = AiClient.chat(
+                baseUrl = settings.aiBaseUrl,
+                model = settings.aiModel,
+                key = key,
+                temperature = .3f,
+                system = sys,
+                user = usr,
+                maxTokens = if (versions > 1) 6000 else 4000,
+                disableThinking = true,
+            )
+            // 和校核同一个坑：思考模型把预算吃空时 content 为空，再给一次大预算。
+            if (!r.ok && r.error?.contains("空内容") == true) {
+                r = AiClient.chat(
+                    baseUrl = settings.aiBaseUrl,
+                    model = settings.aiModel,
+                    key = key,
+                    temperature = .3f,
+                    system = sys,
+                    user = usr,
+                    maxTokens = 9000,
+                    disableThinking = true,
+                )
+            }
+            if (r.ok) {
+                val found = Polishing.parse(r.text, text)
+                proofIssues = found
+                if (found.isEmpty() && proofError == null) ToastBus.show("这段读着已经顺了")
+            } else {
+                proofError = r.error ?: "没拿到结果，再试一次"
+            }
+            proofBusy = false
+        }
+    }
+
+    /** 修饰：同一段选区、同一套右侧浮窗，只是换成「顺句」的版本。 */
+    fun startPolish() {
+        val a = min(body.selection.start, body.selection.end).coerceIn(0, body.text.length)
+        val b = max(body.selection.start, body.selection.end).coerceIn(0, body.text.length)
+        if (b - a < 4) {
+            ToastBus.show("先选中一段正文再修饰")
+            return
+        }
+        val text = body.text.substring(a, b)
+        if (text.length > Polishing.MAX_INPUT) {
+            ToastBus.show("修饰一次最多 " + Polishing.MAX_INPUT + " 字，先选小一段")
+            return
+        }
+        proofText = text
+        proofSelection = a to b
+        polishMode = true
+        // 两块右侧浮窗不叠：打开修饰先让笔记窗退场，正文保持滚动位置。
+        floatNotePanel = false
+        bodyEditor?.captureScrollAnchor()
+        proofIssues = emptyList()
+        proofBusy = false
+        proofAsked = false
+        proofError = null
+        proofStatus = null
+        proofOpen = true
+        bodyEditor?.collapseSelection()
+        askPolish()
+    }
+
     fun acceptProof(issue: ProofIssue) {
+        // 修饰是整段替换：按打开浮窗时记下的区间改。按 quote 搜会在
+        // 同一句出现两次时改错地方。
+        if (polishMode) {
+            val (a, b) = proofSelection
+            val src = body.text
+            if (b <= a || b > src.length) {
+                proofOpen = false
+                polishMode = false
+                return
+            }
+            val editor = bodyEditor
+            if (editor != null) {
+                editor.replaceKeepingViewport(a, b, issue.suggestion)
+            } else {
+                pushUndo()
+                body = body.copy(text = src.replaceRange(a, b, issue.suggestion))
+            }
+            proofOpen = false
+            polishMode = false
+            proofIssues = emptyList()
+            bodyEditor?.collapseSelection()
+            return
+        }
         val src = body.text
         val at = src.indexOf(issue.quote)
         if (at < 0) {
@@ -1030,7 +1132,7 @@ fun WritingScreen(
                     Box(Modifier.size(4.dp).clip(CircleShape).background(ui.accent.copy(alpha = .7f)))
                     Spacer(Modifier.width(7.dp))
                     Txt(
-                        if (isNote) "字隅笔记" else heading,
+                        if (isNote) "素纸笔记" else heading,
                         size = 9.5f,
                         color = p.muted,
                         maxLines = 1,
@@ -1392,6 +1494,13 @@ fun WritingScreen(
             }
             // 校核浮窗：和「本章笔记」同一套右侧浮窗（平卡、20 圆角、标题行、
             // 竖排建议卡、可拖宽）。打开时笔记窗让位，关闭把选区放回去。
+            // 本地规则已停用：打开即发一次 AI 请求。
+            LaunchedEffect(proofAutoAsk, proofOpen) {
+                if (proofAutoAsk && proofOpen && !polishMode) {
+                    proofAutoAsk = false
+                    askAiProof()
+                }
+            }
             ProofSidePanel(
                 visible = proofOpen && !sideOfNotes,
                 issues = proofIssues,
@@ -1401,7 +1510,13 @@ fun WritingScreen(
                 asked = proofAsked,
                 chars = proofText.length,
                 canAsk = settings.aiEnabled,
-                onAsk = { if (!proofAsked) askAiProof() },
+                // 同一套浮窗承载两件事：校核给问题清单，修饰给顺句版本。
+                heading = if (polishMode) "修饰" else "校核",
+                askLabel = if (polishMode) "再改一版 · " + proofText.length + " 字"
+                    else "重新查一遍 · " + proofText.length + " 字",
+                emptyText = if (polishMode) "没找到可以加强的描写。" else "没挑出问题。",
+                headingIcon = if (polishMode) Glyph.Sparkles else Glyph.Check,
+                onAsk = { if (polishMode) askPolish() else askAiProof() },
                 onAccept = { acceptProof(it) },
                 onIgnore = { proofIssues = proofIssues - it },
                 onLocate = { locateProof(it) },
@@ -1438,7 +1553,9 @@ fun WritingScreen(
                         .graphicsLayer {
                             // 同柔展开/收回：整块能力栏从左下角的球里长出来，
                             // 收回时缩回球里。左下锚定，形状跟着缩放，曲率连续。
-                            val ball = 56.dp.toPx()
+                            // 落点 = 球本身的大小（38dp）：以前缩到 56dp 的团，
+                            // 与 40dp 的球本来就不重合，收尾两帧对不上。
+                            val ball = 38.dp.toPx()
                             val sx = ball / maxOf(1f, size.width)
                             val sy = ball / maxOf(1f, size.height)
                             val t = abilityT.value
@@ -1554,6 +1671,7 @@ fun WritingScreen(
                         selectionMenu = null
                     },
                     onProof = { startProof() },
+                    onPolish = { startPolish() },
                     backdrop = editorBodyBackdrop,
                     epoch = bodyScrollTick.intValue,
                     scrollTick = bodyScrollTick,
@@ -1568,9 +1686,12 @@ fun WritingScreen(
                         .align(Alignment.BottomStart)
                         .padding(start = 12.dp)
                         .navigationBarsPadding()
-                        .padding(bottom = 9.dp)
-                        .size(40.dp)
-                        .clip(CircleShape)
+                        // 与符号行同一格：底 10dp（列内 vertical padding 也是 10dp）、
+                        // 38dp、11dp 连续曲率。展开时它就是符号行第一格，不再是
+                        // 一个圆脑袋挂在左边；收起时同一形状留在原处。
+                        .padding(bottom = 10.dp)
+                        .size(38.dp)
+                        .clip(SmoothCorner(11.dp))
                         .background(dockTone(ui))
                         .bouncy {
                             abilityOpen = !abilityOpen
@@ -4051,6 +4172,8 @@ private fun EditorDock(
     onCancelSelection: () -> Unit,
     /** The selection toolbar's「校核」entry: checks the selected passage. */
     onProof: (() -> Unit)? = null,
+    /** AI 入口里的「修饰」：只顺句，出改写版本；点一个才替换正文。 */
+    onPolish: (() -> Unit)? = null,
     /** 1型玻璃 sampling source. Pass the body's software backdrop so the real
      *  EditText text shows through the dock; null falls back to a paper bar. */
     backdrop: Backdrop? = null,
@@ -4130,12 +4253,42 @@ private fun EditorDock(
                     label = "dockSelection",
                 ) { selecting ->
                     if (selecting) {
+                        // AI 入口：点开横向展开成「校核 | 修饰」两格。这份 state
+                        // 随选框行一起销毁——选择结束时自然收起，不用手动复位。
+                        var aiOpen by remember { mutableStateOf(false) }
                         Row(
                             Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            onProof?.let { DockTool(Glyph.Check, "校核", true, it) }
+                            if (onProof != null || onPolish != null) {
+                                AnimatedContent(
+                                    targetState = aiOpen,
+                                    transitionSpec = {
+                                        (fadeIn(tween(150)) + slideInHorizontally(tween(180)) { -it / 5 }) togetherWith
+                                            (fadeOut(tween(110))) using
+                                            SizeTransform(clip = true) { _, _ ->
+                                                spring(dampingRatio = .84f, stiffness = 380f)
+                                            }
+                                    },
+                                    label = "aiTool",
+                                ) { open ->
+                                    if (!open) {
+                                        DockTool(Glyph.Sparkles, "AI", true, onClick = { aiOpen = true })
+                                    } else {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            DockTool(Glyph.Check, "校核", true, onClick = {
+                                                aiOpen = false
+                                                onProof?.invoke()
+                                            })
+                                            DockTool(Glyph.Edit, "修饰", true, onClick = {
+                                                aiOpen = false
+                                                onPolish?.invoke()
+                                            })
+                                        }
+                                    }
+                                }
+                            }
                             DockTool(Glyph.Share, "复制", true, onCopy)
                             DockTool(Glyph.Check, "全选", true, onSelectAll)
                             DockTool(Glyph.Edit, "剪切", true, onCut)
@@ -4207,8 +4360,9 @@ private fun EditorDock(
                     Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(1.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    // 左下角常驻球占的宽度，符号从球右边开始。
-                    contentPadding = PaddingValues(start = 48.dp),
+                    // 左下角那一格（展开/收起球）占的宽度：38dp + 1dp 间隔，
+                    // 符号从它右边接上，中间不再留 48dp 的空槽。
+                    contentPadding = PaddingValues(start = 39.dp),
                 ) {
                     items(symbols) { symbol ->
                         Box(

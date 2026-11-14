@@ -111,7 +111,7 @@ fun buildTxt(book: Book, includeSynopsis: Boolean): ByteArray {
         if (body.isBlank()) sb.append("（本章尚未落笔）\n") else sb.append(body).append("\n")
         sb.append("\n\n")
     }
-    sb.append("—— 由字隅导出 ——\n")
+    sb.append("—— 由素纸导出 ——\n")
     return sb.toString().toByteArray(Charsets.UTF_8)
 }
 
@@ -190,7 +190,7 @@ fun buildEpub(context: Context, book: Book, includeSynopsis: Boolean, out: Outpu
     <dc:title>${xmlEscape(title)}</dc:title>
     <dc:creator>${xmlEscape(author)}</dc:creator>
     <dc:language>zh-CN</dc:language>
-    <dc:publisher>字隅</dc:publisher>
+    <dc:publisher>素纸</dc:publisher>
     <dc:description>${xmlEscape(if (includeSynopsis) book.synopsis else "")}</dc:description>
     <meta property="dcterms:modified">$modified</meta>
     <meta name="cover" content="cover-image"/>
@@ -850,7 +850,7 @@ object CoverArt {
         val credit = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             this.color = inkColor; alpha = 95; textSize = 21f; typeface = Typeface.create("sans", Typeface.NORMAL); letterSpacing = .2f
         }
-        canvas.drawText("字隅", 74f, h - 54f, credit)
+        canvas.drawText("素纸", 74f, h - 54f, credit)
         return bitmap
     }
 

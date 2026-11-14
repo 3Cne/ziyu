@@ -92,6 +92,11 @@ fun ProofSidePanel(
     /** 开始拖宽度前再抓一次锚点。 */
     onResizeStart: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
+    // 同一套浮窗也承载「修饰」：标题与 AI 按钮文案由调用方给，默认仍是校核。
+    heading: String = "校核",
+    askLabel: String? = null,
+    emptyText: String? = null,
+    headingIcon: Glyph = Glyph.Check,
 ) {
     val ui = LocalInk.current
     val p = ui.palette
@@ -227,9 +232,9 @@ fun ProofSidePanel(
                             .padding(start = 14.dp, end = 8.dp, top = 11.dp, bottom = 7.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        LineIcon(Glyph.Check, ui.accent, 12.dp)
+                        LineIcon(headingIcon, ui.accent, 12.dp)
                         Spacer(Modifier.width(5.dp))
-                        Txt("校核", size = 10.5f, color = p.muted, weight = FontWeight.Medium)
+                        Txt(heading, size = 10.5f, color = p.muted, weight = FontWeight.Medium)
                         if (issues.isNotEmpty()) {
                             Spacer(Modifier.width(6.dp))
                             Txt(
@@ -289,7 +294,7 @@ fun ProofSidePanel(
                             )
                             error != null -> ProofStatusText(text = error, top = 14.dp)
                             else -> ProofStatusText(
-                                text = if (asked) "没挑出问题。" else "本地没挑出问题。",
+                                text = emptyText ?: if (asked) "没挑出问题。" else "本地没挑出问题。",
                                 top = 14.dp,
                             )
                         }
@@ -331,7 +336,7 @@ fun ProofSidePanel(
                                     contentAlignment = Alignment.Center,
                                 ) {
                                     Txt(
-                                        if (busy) "正在读…" else "让 AI 查语义 · $chars 字",
+                                        if (busy) "正在读…" else (askLabel ?: "让 AI 查语义 · $chars 字"),
                                         size = 11f,
                                         color = if (canAsk) p.ink else p.muted,
                                         maxLines = 1,
