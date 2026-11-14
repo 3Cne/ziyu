@@ -72,7 +72,7 @@ class AiToolEnv(
 
 /**
  * The tools the writer's assistant may call. Reads are free; writes are only
- * ever *queued* — the model gets "已排队" back, and the actual edit happens when
+ * ever *queued* — the model gets "已写入" back, and the actual edit happens at the end of
  * the writer taps 采纳. A model that could silently rewrite the manuscript
  * would be worse than no assistant at all.
  *
@@ -133,7 +133,7 @@ object AiTools {
       {"type":"function","function":{"name":"import_attachment","description":"把附件导入成一本新书或一条新笔记；要等作者确认","parameters":{"type":"object","properties":{"name":{"type":"string"},"as":{"type":"string","enum":["book","note"]}},"required":["name"]}}},
       {"type":"function","function":{"name":"set_reminder","description":"给某条笔记里的待办设提醒；要等作者确认","parameters":{"type":"object","properties":{"note_title":{"type":"string"},"todo_text":{"type":"string"},"at":{"type":"string","description":"本地时间，如 2026-11-13 09:00"}},"required":["note_title","todo_text","at"]}}},
       {"type":"function","function":{"name":"set_daily_goal","description":"改每日写作目标（100–100000 字）；要等作者确认","parameters":{"type":"object","properties":{"words":{"type":"integer"}},"required":["words"]}}},
-      {"type":"function","function":{"name":"restore_backup","description":"用某份备份覆盖当前全部数据；不可撤销。作者明确同意后才排队，采纳时还会再确认一次","parameters":{"type":"object","properties":{"name":{"type":"string","description":"list_backups 返回的文件名"}},"required":["name"]}}}
+      {"type":"function","function":{"name":"restore_backup","description":"用某份备份覆盖当前全部数据；不可撤销。作者明确同意后才会执行，执行前还会再确认一次","parameters":{"type":"object","properties":{"name":{"type":"string","description":"list_backups 返回的文件名"}},"required":["name"]}}}
     ]
     """.trimIndent()
 
@@ -184,6 +184,29 @@ object AiTools {
         "set_daily_goal" -> "改目标"
         "restore_backup" -> "恢复备份"
         else -> name
+    }
+
+    /**
+     * 把 AI 写来的正文套进目标章已有的排版：每段补回该章的段首前缀，段间只留一个换行。
+     * 2026-11-14 用户报「直接让问书修改正文时也不会读格式，会乱加换行」——
+     * 写入路径原来是把模型给的原样塞进正文，模型的硬换行就成了正文的换行。
+     */
+    private fun fitToChapter(template: String, incoming: String, autoIndent: Boolean): String {
+        val paras = template.split('\n').filter { it.isNotBlank() }
+        val prefix = paras
+            .map { line -> line.takeWhile { it.isWhitespace() } }
+            .filter { it.isNotEmpty() }
+            .groupingBy { it }
+            .eachCount()
+            .maxByOrNull { it.value }?.key
+            ?: if (autoIndent) "\u3000\u3000" else ""
+        val blocks = incoming
+            .replace("\r\n", "\n")
+            .split('\n')
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+        if (blocks.isEmpty()) return incoming.trim()
+        return blocks.joinToString("\n") { prefix + it }
     }
 
     suspend fun run(
@@ -307,7 +330,7 @@ object AiTools {
                         put("synopsis", args.optString("synopsis"))
                     }.toString(),
                 )
-                "已排队，等作者点采纳才新建"
+                "已新建"
             }
         }
 
@@ -329,7 +352,7 @@ object AiTools {
                         bookTitle = b.title,
                         payload = changes.toString(),
                     )
-                    "已排队，等作者点采纳才改"
+                    "已修改"
                 }
             }
         }
@@ -345,7 +368,7 @@ object AiTools {
                     bookTitle = b.title,
                     danger = true,
                 )
-                "已排队，删除不可恢复，采纳时会再确认一次"
+                "已记下这次删除，等你在下面确认；删掉不可恢复"
             }
         }
 
@@ -361,7 +384,7 @@ object AiTools {
                     bookTitle = b.title,
                     chapterTitle = title,
                 )
-                "已排队，等作者点采纳才新建"
+                "已新建"
             }
         }
 
@@ -380,7 +403,7 @@ object AiTools {
                         chapterId = c.id,
                         text = newTitle,
                     )
-                    "已排队，等作者点采纳才改"
+                    "已修改"
                 }
             }
         }
@@ -398,7 +421,7 @@ object AiTools {
                     chapterTitle = c.title,
                     danger = true,
                 )
-                "已排队，删除不可恢复，采纳时会再确认一次"
+                "已记下这次删除，等你在下面确认；删掉不可恢复"
             }
         }
 
@@ -410,15 +433,18 @@ object AiTools {
             if (c == null) {
                 "《" + b.title + "》没有叫「" + want + "」的章节"
             } else {
+                // 2026-11-14 用户报：直接让问书写正文时也不读格式、乱加换行。
+                // 追加前先按这一章已有的排版（段首前缀 + 段间单换行）规整一遍。
+                val fitted = fitToChapter(c.content, text, store.data.settings.indent)
                 pending += AiPending(
-                    label = "在「" + c.title + "」末尾加 " + countWords(text) + " 字",
+                    label = "在「" + c.title + "」末尾加 " + countWords(fitted) + " 字",
                     kind = AiPendingKind.Append,
                     bookId = b.id,
                     chapterId = c.id,
-                    text = text,
+                    text = fitted,
                     noteTitle = c.title,
                 )
-                "已排队，等作者点采纳才写入「" + c.title + "」"
+                "已在「" + c.title + "」末尾写入 " + countWords(fitted) + " 字（排版按这一章现有的段落与缩进）"
             }
         }
 
@@ -437,8 +463,9 @@ object AiTools {
                         n == 0 -> "「" + c.title + "」里没有这段原文。把它原样抄一遍（标点、换行都要一样），或者换更短、更有辨识度的一段"
                         n > 1 -> "这段在「" + c.title + "」里出现了 " + n + " 次，给更长的上下文，只改一处"
                         else -> {
+                            val fitted = fitToChapter(c.content, repl, store.data.settings.indent)
                             pending += AiPending(
-                                label = "改正文：" + c.title + " · 原 " + find.length + " 字 → 新 " + repl.length + " 字",
+                                label = "改正文：" + c.title + " · 原 " + find.length + " 字 → 新 " + fitted.length + " 字",
                                 kind = AiPendingKind.Replace,
                                 bookId = b.id,
                                 chapterId = c.id,
@@ -446,7 +473,7 @@ object AiTools {
                                 findText = find,
                                 noteTitle = c.title,
                             )
-                            "已排队，等作者点采纳才改「" + c.title + "」"
+                            "已改「" + c.title + "」"
                         }
                     }
                 }
@@ -464,7 +491,7 @@ object AiTools {
                 noteTitle = title,
                 groupName = group,
             )
-            "已排队，等作者点采纳才写入"
+            "已写入"
         }
 
         "edit_note" -> {
@@ -485,7 +512,7 @@ object AiTools {
                         noteTitle = n.title,
                         payload = changes.toString(),
                     )
-                    "已排队，等作者点采纳才改"
+                    "已修改"
                 }
             }
         }
@@ -501,7 +528,7 @@ object AiTools {
                     noteTitle = n.title,
                     danger = true,
                 )
-                "已排队，删除不可恢复，采纳时会再确认一次"
+                "已记下这次删除，等你在下面确认；删掉不可恢复"
             }
         }
 
@@ -522,7 +549,7 @@ object AiTools {
                         chapterId = c.id,
                         text = if (on) "1" else "0",
                     )
-                    "已排队，等作者点采纳才" + (if (on) "绑定" else "解绑")
+                    "已" + (if (on) "绑定" else "解绑")
                 }
             }
         }
@@ -538,7 +565,7 @@ object AiTools {
                     groupKind = kind,
                     groupName = name,
                 )
-                "已排队，等作者点采纳才新建"
+                "已新建"
             }
         }
 
@@ -558,7 +585,7 @@ object AiTools {
                         groupId = g.id,
                         groupName = newName,
                     )
-                    "已排队，等作者点采纳才改"
+                    "已修改"
                 }
             }
         }
@@ -577,7 +604,7 @@ object AiTools {
                     groupName = g.name,
                     danger = true,
                 )
-                "已排队，采纳时会再确认一次"
+                "已记下，等你在下面确认后才会执行"
             }
         }
 
@@ -601,7 +628,7 @@ object AiTools {
                         noteId = if (kind == "note") (target as Note).id else "",
                         bookTitle = item,
                     )
-                    "已排队，等作者点采纳才移动"
+                    "已移动"
                 }
             }
         }
@@ -619,7 +646,7 @@ object AiTools {
                         noteId = n.id,
                         text = text,
                     )
-                    "已排队，等作者点采纳才写入"
+                    "已写入"
                 }
             }
         }
@@ -638,7 +665,7 @@ object AiTools {
                         noteId = n.id,
                         text = hit.id,
                     )
-                    "已排队，等作者点采纳才勾上"
+                    "已标记完成"
                 }
             }
         }
@@ -663,7 +690,7 @@ object AiTools {
                     kind = AiPendingKind.Style,
                     payload = changes.toString(),
                 )
-                "已排队，等作者点采纳才生效"
+                "已生效"
             }
         }
 
@@ -683,7 +710,7 @@ object AiTools {
                     memoName = nm,
                     memoDetail = detail,
                 )
-                "已排队，等作者点采纳才写入记忆"
+                "已写入记忆"
             }
         }
 
@@ -710,7 +737,7 @@ object AiTools {
                         memoKind = hit.kind,
                         memoDetail = hit.detail,
                     )
-                    "已排队，等作者点采纳才停用「" + hit.name + "」"
+                    "已停用「" + hit.name + "」"
                 }
             }
         }
@@ -916,7 +943,7 @@ object AiTools {
                                 .put("name", n.title.ifBlank { "无标题笔记" })
                                 .toString(),
                         )
-                        "已排队，等作者点采纳才导出到 下载/字隅"
+                        "已导出到 下载/字隅"
                     }
                 }
             } else {
@@ -935,7 +962,7 @@ object AiTools {
                                 .put("name", b.title)
                                 .toString(),
                         )
-                        "已排队，等作者点采纳才导出到 下载/字隅"
+                        "已导出到 下载/字隅"
                     }
                 }
             }
@@ -943,7 +970,7 @@ object AiTools {
 
         "backup_now" -> {
             pending += AiPending(label = "导出 JSON 备份", kind = AiPendingKind.Backup)
-            "已排队，等作者点采纳才写文件"
+            "已写入文件"
         }
 
         "import_attachment" -> {
@@ -971,7 +998,7 @@ object AiTools {
                             .put("text", a.text)
                             .toString(),
                     )
-                    "已排队，等作者点采纳才导入"
+                    "已导入"
                 }
             }
         }
@@ -1001,7 +1028,7 @@ object AiTools {
                             .put("text", hit.text)
                             .toString(),
                     )
-                    "已排队，等作者点采纳才设提醒"
+                    "已设好提醒"
                 }
             }
         }
@@ -1016,7 +1043,7 @@ object AiTools {
                     kind = AiPendingKind.Goal,
                     payload = JSONObject().put("words", w).toString(),
                 )
-                "已排队，等作者点采纳才改"
+                "已修改"
             }
         }
 
@@ -1041,7 +1068,7 @@ object AiTools {
                             payload = JSONObject().put("name", name).toString(),
                             danger = true,
                         )
-                        "已排队。这会覆盖当前全部数据，采纳时还要再确认一次"
+                        "已记下这次恢复，等你在下面确认；它会覆盖当前全部数据"
                     }
                 }
             }

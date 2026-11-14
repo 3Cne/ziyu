@@ -612,7 +612,7 @@ fun WritingScreen(
         }
     }
 
-    /** 修饰的 AI 请求：只顺句，出 1–2 个版本，等作者点一个才替换。 */
+    /** 修饰的 AI 请求：优化描写，出 1–2 个版本，等作者点一个才替换。 */
     fun askPolish() {
         val key = AiKey.load(context)
         if (!settings.aiEnabled || key.isNullOrBlank()) {
@@ -651,7 +651,7 @@ fun WritingScreen(
                 )
             }
             if (r.ok) {
-                val found = Polishing.parse(r.text, text)
+                val found = Polishing.parse(r.text, text, settings.indent)
                 proofIssues = found
                 if (found.isEmpty() && proofError == null) ToastBus.show("这段读着已经顺了")
             } else {

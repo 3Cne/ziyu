@@ -500,7 +500,7 @@ fun AiScreen(
     var shown by remember { mutableIntStateOf(0) }
     val follow = remember { ScrollFollow() }
     var lastPrompt by remember { mutableStateOf<AiPrompt?>(null) }
-    // Tool writes wait here until the writer taps 采纳.
+    // 只剩危险操作（删除/覆盖）排在这里，等下面那个确认；安全写入走 applyDirectly。
     var pending by remember { mutableStateOf<List<AiPending>>(emptyList()) }
     // 2026-11-14 用户定：除删除/覆盖外，写操作直接落地，不再排队。
     // 落地时拍一张整库快照，给一步撤销用；只保留最近一轮。
@@ -970,12 +970,16 @@ fun AiScreen(
             // (`finish=length`, 768 chars, "…如果不是" and nothing after).
             // 深度思考要先把问题拆开、逐条核对，1800 token 留不出思考的余地；
             // 普通模式保持原样，短答手感不变。
-            var budget = if (deepThink) 4_000 else 1800
-            // A cross-chapter question needs search + a few reads, which does not
-            // fit in five steps. The hard stop is now the token spend, so a cheap
-            // question still ends in one round and an expensive one gets room.
+            // 2026-11-14 用户定：按「看账 / 写账」两本账跑。
+            //   第 1 轮：开思考（规划这一趟要干什么），4000；
+            //   2–8 轮：只用来读材料/调工具，**关思考**、1500；
+            //   写轮：关掉工具、开思考、6000，**不计入工具账**。
+            // 之前 9 轮共用 30000 且全开思考，一次 4574 字推理就把首轮撑爆、
+            // 读到第 8 轮又没粮写正文（真机日志 rounds=8 calls=2 text=0 tokens=32000）。
+            var budget = 0
             var spentTokens = 0
-            val tokenCeiling = if (deepThink) 30_000 else 24_000
+            val toolCeiling = if (deepThink) 20_000 else 16_000
+            val writeBudget = if (deepThink) 6_000 else 3_000
             // One blank-answer rescue per question, whatever round it happens on.
             var retriedBlank = false
             // With an explicit quote the chapter text is already in the prompt;
@@ -999,7 +1003,7 @@ fun AiScreen(
                 }
                 if (out.length() == 0) null else out.toString()
             }.getOrNull()
-            while (rounds < 9 && spentTokens < tokenCeiling) {
+            while (rounds < 9 && (spentTokens < toolCeiling || last.calls.isNotEmpty())) {
                 rounds++
                 val closing = rounds == 9 && toolDefs != null && last.calls.isNotEmpty()
                 if (closing) {
@@ -1012,9 +1016,11 @@ fun AiScreen(
                             )
                         }
                     )
-                    budget = 3_000
                 }
+                // 第 1 轮开思考做规划；之后都是「取材料」，关掉思考省下的正是那 4574 字。
+                budget = if (rounds == 1) (if (deepThink) 4_000 else 1800) else (if (deepThink) 1_500 else 1_200)
                 spentTokens += budget
+                val thinkOff = rounds > 1
                 last = AiClient.chatTools(
                     baseUrl = settings.aiBaseUrl,
                     model = settings.aiModel,
@@ -1024,6 +1030,7 @@ fun AiScreen(
                     tools = if (closing) writeOnlyDefs else toolDefs,
                     maxTokens = budget,
                     readTimeoutMs = if (deepThink) 150_000 else 90_000,
+                    disableThinking = thinkOff,
                 )
                 if (last.error != null) {
                     // Some endpoints/model names reject "tools" outright; a plain
@@ -1112,6 +1119,82 @@ fun AiScreen(
                         chat.setTools(id, traces.toList())
                     }
                 }
+            }
+            // 写轮（2026-11-14 用户定的结构）：
+            // 只要这一趟用过工具（rounds > 1），或者正文是空的，就单独跑一次「写」：
+            // 关工具、开思考、预算 6000，且**不计入工具账**。
+            // 工具轮关掉思考后产出的是「该读哪章」这种判断，正文要在写轮里认真写。
+            if (last.error == null && (text.isBlank() || rounds > 1)) {
+                messages.put(
+                    JSONObject().apply {
+                        put("role", "user")
+                        put(
+                            "content",
+                            "材料都在上面了。不要调用任何工具，直接把最终结果写出来：" +
+                                "该回答就完整回答，该写正文就完整写正文，不要复述过程、不要解释你查了什么。",
+                        )
+                    }
+                )
+                last = AiClient.chatTools(
+                    baseUrl = settings.aiBaseUrl,
+                    model = settings.aiModel,
+                    key = key,
+                    temperature = settings.aiTemperature,
+                    messages = messages,
+                    tools = null,
+                    maxTokens = writeBudget,
+                    readTimeoutMs = if (deepThink) 150_000 else 90_000,
+                )
+                if (last.error == null && last.text.isNotBlank()) text = last.text
+                if (deepThink) chat.setReasoning(id, last.reasoning)
+                android.util.Log.d(
+                    "MOYU_AI",
+                    "stage=write budget=" + writeBudget + " text=" + text.length +
+                        " rounds=" + rounds + " finish=" + last.finishReason + " err=" + last.error,
+                )
+            }
+            // 被截断（2026-11-14 用户报「输出被截到一半就不输出了」）：
+            // finish=length 表示这一轮的 max_tokens 用完了，正文停在一半。
+            // 以前的补丁只处理「正文为空」，写了一半的反而被当成完成。
+            // 这里续写而不是重发：把已写的当上文，只让它接后半段。
+            var cont = 0
+            while (text.isNotBlank() && last.finishReason == "length" && cont < 2) {
+                cont++
+                messages.put(
+                    JSONObject().apply {
+                        put("role", "assistant")
+                        put("content", text)
+                    }
+                )
+                messages.put(
+                    JSONObject().apply {
+                        put("role", "user")
+                        put(
+                            "content",
+                            "上一段写到「" + text.takeLast(20) + "」就到长度上限断掉了。" +
+                                "从断点直接接着往后写：不要重复已经写过的任何句子，不要重新开头，不要解释，不要加小标题。",
+                        )
+                    }
+                )
+                last = AiClient.chatTools(
+                    baseUrl = settings.aiBaseUrl,
+                    model = settings.aiModel,
+                    key = key,
+                    temperature = settings.aiTemperature,
+                    messages = messages,
+                    tools = null,
+                    maxTokens = if (deepThink) 4_000 else 2_500,
+                    readTimeoutMs = if (deepThink) 150_000 else 90_000,
+                )
+                if (last.error != null) break
+                val more = last.text.trim()
+                if (more.isEmpty()) break
+                text = text.trimEnd() + more
+                android.util.Log.d(
+                    "MOYU_AI",
+                    "continue after length: +" + more.length + " total=" + text.length +
+                        " finish=" + last.finishReason,
+                )
             }
             sending = false
             android.util.Log.d(

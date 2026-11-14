@@ -33,14 +33,42 @@ object Polishing {
 不要写成华丽散文：宁可具体，不要漂亮；不堆比喻，不抒情总结，不在段尾升华，不用「仿佛」「宛如」起头的比喻。
 判断标准是「读完能看见那个场面」，不是「文笔好不好」。
 输出 JSON 数组，$versions 个版本，从改动小到大；每项：{"suggestion":"改写后的整段","why":"一句为什么这么改"}。
+规则：不要自己加换行——段落之间只用一个换行，行首不要加空格或全角空格（缩进由程序按原文补回）；
+不要用 markdown，不要代码块。
 没有可改的就输出 []。不要解释，不要代码块。
 """.trimIndent()
         val user = "原文：\n$text\n\n请输出 JSON 数组。"
         return system to user
     }
 
+    /**
+     * 把模型输出套回原文的格式（2026-11-14 用户报：修饰擅自加换行、行首缩进全丢）。
+     *
+     * 原文一段 → 全部并回一段，消灭句中硬换行；
+     * 原文多段 → 保留模型的分段，但每段补回原文的行首前缀（通常是两个全角空格）；
+     * 原文没有统一前缀时，按「自动缩进」设置决定补 `　　` 还是什么都不补。
+     */
+    fun fitFormat(original: String, suggestion: String, autoIndent: Boolean): String {
+        val origParas = original.split('\n').filter { it.isNotBlank() }
+        val prefix = origParas
+            .map { line -> line.takeWhile { it.isWhitespace() } }
+            .filter { it.isNotEmpty() }
+            .groupingBy { it }
+            .eachCount()
+            .maxByOrNull { it.value }?.key
+            ?: if (autoIndent) "\u3000\u3000" else ""
+        val blocks = suggestion
+            .replace("\r\n", "\n")
+            .split('\n')
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+        if (blocks.isEmpty()) return suggestion.trim()
+        val paras = if (origParas.size <= 1) listOf(blocks.joinToString("")) else blocks
+        return paras.joinToString("\n") { prefix + it }
+    }
+
     /** 把模型输出变成浮窗里的卡片；quote 一律是原文整段，采纳时整段替换。 */
-    fun parse(raw: String, original: String): List<ProofIssue> {
+    fun parse(raw: String, original: String, autoIndent: Boolean = false): List<ProofIssue> {
         val start = raw.indexOf('[')
         val end = raw.lastIndexOf(']')
         if (start < 0 || end <= start) return emptyList()
@@ -48,8 +76,10 @@ object Polishing {
         val out = ArrayList<ProofIssue>()
         for (i in 0 until arr.length()) {
             val o = arr.optJSONObject(i) ?: continue
-            val suggestion = o.optString("suggestion").trim()
-            if (suggestion.isEmpty()) continue
+            val rawSuggestion = o.optString("suggestion").trim()
+            if (rawSuggestion.isEmpty()) continue
+            // 先套回原文格式，再算长度比例：换行与缩进不该影响「有没有被截断」的判断。
+            val suggestion = fitFormat(original, rawSuggestion, autoIndent)
             if (suggestion == original.trim()) continue
             // 长度闸门：只拦「截断」。描写优化本来就会变长，所以上限放到 3 倍；
             // 下限 0.5 是防模型只交半段（那会吃掉正文）。
