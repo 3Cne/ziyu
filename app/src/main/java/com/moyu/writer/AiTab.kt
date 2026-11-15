@@ -794,6 +794,68 @@ fun AiScreen(
         if (!restoredNow) ToastBus.show("已写入 " + queue.size + " 处")
     }
 
+    /** 把一条已落地的写操作变成回答下面的一张卡；正文改动带 before / after。 */
+    fun editFor(p: AiPending): ChatEdit {
+        val id = java.util.UUID.randomUUID().toString().take(8)
+        if (p.kind != AiPendingKind.Append && p.kind != AiPendingKind.Replace) {
+            // 改名 / 建章 / 待办 / 记忆：只留一行说明，没有单条撤销。
+            return ChatEdit(id = id, label = p.label, kind = "info")
+        }
+        val target = store.books.firstOrNull { it.id == p.bookId.ifBlank { book.id } }
+            ?: store.books.firstOrNull { it.id == book.id }
+        val chapter = target?.chapters?.firstOrNull { it.id == p.chapterId }
+        val append = p.kind == AiPendingKind.Append
+        val size = if (append) p.text.length else p.findText.length
+        return ChatEdit(
+            id = id,
+            label = (chapter?.title ?: "这一章") +
+                (if (append) " · 追加 " else " · 改写 ") + size + " 字",
+            kind = if (append) "append" else "replace",
+            bookId = target?.id ?: "",
+            chapterId = p.chapterId,
+            before = if (append) "" else p.findText,
+            after = p.text,
+        )
+    }
+
+    /**
+     * 逐条撤销一处正文改动。
+     *
+     * 用「局部反向替换」而不是整库快照：两条卡改同一章时，先撤哪条都对。
+     * 只有「现在这一章里找不到当初写进去的那段」才拒绝——那说明后面又改过了，
+     * 静默覆盖会吃掉作者的新内容，所以让它走整轮撤销。
+     */
+    fun undoEdit(edit: ChatEdit): Boolean {
+        if (edit.kind != "append" && edit.kind != "replace") return false
+        if (edit.after.isEmpty()) return false
+        val b = store.books.firstOrNull { it.id == edit.bookId } ?: return false
+        val c = b.chapters.firstOrNull { it.id == edit.chapterId } ?: return false
+        val content = c.content
+        val next = when (edit.kind) {
+            "append" -> when {
+                // 原来这一章是空白：整章就是这段追加。
+                content == edit.after -> ""
+                content.endsWith("\n\n" + edit.after) -> content.dropLast(edit.after.length + 2)
+                else -> return false
+            }
+            else -> {
+                val first = content.indexOf(edit.after)
+                if (first < 0) return false
+                if (content.indexOf(edit.after, first + edit.after.length) >= 0) return false
+                content.replaceRange(first, first + edit.after.length, edit.before)
+            }
+        }
+        store.updateBook(b.id) { bb ->
+            bb.copy(
+                chapters = bb.chapters.map {
+                    if (it.id != c.id) it
+                    else it.copy(content = next, updatedAt = System.currentTimeMillis())
+                },
+            )
+        }
+        return true
+    }
+
     /** 直接落地：删除与整库恢复以外的写操作，一次回答结束就生效。 */
     fun applyDirectly(queue: List<AiPending>) {
         if (queue.isEmpty()) return
@@ -805,7 +867,13 @@ fun AiScreen(
         if (direct.isNotEmpty()) {
             undoSnapshot = store.data
             undoCount = direct.size
+            // 卡片要在 applyQueue 之前造：标题读的是改动前的书，before/after 来自队列本身。
+            val cards = direct.map { editFor(it) }
             applyQueue(direct)
+            val target = answerId.ifBlank {
+                chat.messages.lastOrNull { it.role != "user" }?.id ?: ""
+            }
+            if (cards.isNotEmpty()) chat.addEdits(target, cards)
         }
         pending = rest
     }
@@ -1425,6 +1493,14 @@ fun AiScreen(
                     onDropPending = { pending = emptyList() },
                     onUndoDirect = { undoDirect() },
                     undoCount = undoCount,
+                    onUndoEdit = { msgId, edit ->
+                        if (undoEdit(edit)) {
+                            chat.markEditUndone(msgId, edit.id)
+                            ToastBus.show("已撤销")
+                        } else {
+                            ToastBus.show("这一段后面又改过了，只能整轮撤销")
+                        }
+                    },
                     suggestions = suggestions.ifEmpty { FALLBACK_SUGGESTIONS },
                     onSend = { send(question) },
                     onSample = { send(it) },
@@ -1647,6 +1723,82 @@ fun AiScreen(
 /** 长消息判定：气泡超过列表可视高度的这个比例就不做 1.02 缩放。 */
 private const val LongBubbleFraction = .40f
 
+/**
+ * 一轮回答下面列出的改动卡片。
+ *
+ * 正文改动（追加 / 改写）带「原文 → 改后」和单条撤销；其余操作只留一行说明。
+ * 没有新控件：行 + 药丸按钮都是这本 App 已有的画法。
+ */
+@Composable
+private fun ChatEditList(
+    msgId: String,
+    edits: List<ChatEdit>,
+    onUndo: (String, ChatEdit) -> Unit,
+) {
+    val ui = LocalInk.current
+    val p = ui.palette
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(start = 14.dp, end = 10.dp, bottom = 9.dp),
+        verticalArrangement = Arrangement.spacedBy(9.dp),
+    ) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(1.dp)
+                .background(p.line.copy(alpha = .5f)),
+        )
+        edits.forEach { e ->
+            Column(Modifier.fillMaxWidth()) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Txt(
+                        e.label + if (e.undone) " · 已撤销" else "",
+                        size = 10.5f,
+                        color = p.muted.copy(alpha = if (e.undone) .55f else 1f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (e.kind != "info" && !e.undone) {
+                        Spacer(Modifier.width(8.dp))
+                        Box(
+                            Modifier
+                                .bouncy { onUndo(msgId, e) }
+                                .background(p.ink, SmoothCorner(999.dp))
+                                .padding(horizontal = 11.dp, vertical = 5.dp),
+                        ) {
+                            Txt("撤销", size = 11f, color = p.paper, weight = FontWeight.SemiBold)
+                        }
+                    }
+                }
+                if (e.before.isNotBlank()) {
+                    Spacer(Modifier.height(3.dp))
+                    Txt(
+                        "原文：" + e.before,
+                        size = 11f,
+                        color = p.muted.copy(alpha = if (e.undone) .55f else 1f),
+                        lineHeight = 15f,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                if (e.after.isNotBlank()) {
+                    Spacer(Modifier.height(3.dp))
+                    Txt(
+                        "改后：" + e.after,
+                        size = 11.5f,
+                        color = p.ink.copy(alpha = if (e.undone) .5f else 1f),
+                        lineHeight = 16f,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ChatPane(
@@ -1686,6 +1838,8 @@ private fun ChatPane(
     onDropPending: () -> Unit,
     onUndoDirect: () -> Unit,
     undoCount: Int,
+    /** 逐条撤销一处正文改动（msgId, edit）。 */
+    onUndoEdit: (String, ChatEdit) -> Unit,
     suggestions: List<String>,
     onSend: () -> Unit,
     onSample: (String) -> Unit,
@@ -2178,6 +2332,14 @@ private fun ChatPane(
                                     )
                                     if (toolTrace && msg.tools.isNotEmpty()) {
                                         ToolTraceStrip(msg.tools, ui, p, msg.id)
+                                    }
+                                    // 这一轮改了什么：逐条列卡，正文改动可单独撤销。
+                                    // 只挂在最后一条回答上——发下一条消息时就一起消失，
+                                    // 和整轮撤销的口子同寿（只保最近一轮）。
+                                    if (msg.edits.isNotEmpty() && !running &&
+                                        msg.id == messages.lastOrNull { it.role != "user" }?.id
+                                    ) {
+                                        ChatEditList(msg.id, msg.edits, onUndoEdit)
                                     }
                                     // The confirm strip lives INSIDE the bubble
                                     // that asked for the change: it belongs to

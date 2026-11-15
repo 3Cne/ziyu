@@ -8,6 +8,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,6 +22,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items as lazyItems
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -52,9 +54,260 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import java.time.LocalDateTime
 
+/**
+ * 笔记 tab 的第一层：笔记夹列表。
+ *
+ * 2026-11-15 用户定：笔记先按夹分，进夹以后才看得到笔记本身，点笔记才进正文。
+ * 「笔记夹」就是原来的笔记分组（`noteGroups`，一条数据都没换），只是从一条筛选
+ * 条件升级成进入笔记的必经一层。`folderId == null` 是常驻的「未归类」。
+ */
 @Composable
 fun NotesScreen(
     store: AppStore,
+    onOpenFolder: (String?) -> Unit,
+    onCreateNote: (String) -> Unit,
+) {
+    val ui = LocalInk.current
+    val p = ui.palette
+    val notes = store.notes
+    val folders = store.noteGroups
+    var createFolderOpen by remember { mutableStateOf(false) }
+    var menuFolder by remember { mutableStateOf<Group?>(null) }
+    var deleteFolder by remember { mutableStateOf<Group?>(null) }
+    var renameFolder by remember { mutableStateOf<Group?>(null) }
+
+    fun countOf(folderId: String?): Int = notes.count { it.groupId == folderId }
+
+    Box(Modifier.fillMaxSize()) {
+        AmbientBackground()
+        LazyColumn(
+            Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(start = 20.dp, top = 0.dp, end = 20.dp, bottom = 130.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            item {
+                Column(Modifier.fillMaxWidth().statusBarsPadding().padding(top = 14.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Txt("笔记", size = 34f, weight = FontWeight.SemiBold, letterSpacing = .4f)
+                        }
+                        GlassIconButton(Glyph.Folder, { createFolderOpen = true })
+                        Spacer(Modifier.width(6.dp))
+                        GlassIconButton(Glyph.Plus, {
+                            val note = Note(title = "")
+                            store.addNote(note)
+                            onCreateNote(note.id)
+                            ToastBus.show("新笔记已打开")
+                        })
+                    }
+                    Spacer(Modifier.height(18.dp))
+                }
+            }
+            if (folders.isEmpty() && notes.isEmpty()) {
+                item {
+                    EmptyState(
+                        Glyph.Folder,
+                        "还没有笔记夹",
+                        "先建一个笔记夹，再往里写。笔记夹就是以前的分组，现在要先点夹才看得到笔记。",
+                    )
+                }
+            }
+            item {
+                FolderRow(
+                    name = "未归类",
+                    count = countOf(null),
+                    accent = false,
+                    onClick = { onOpenFolder(null) },
+                )
+            }
+            lazyItems(folders) { folder ->
+                FolderRow(
+                    name = folder.name,
+                    count = countOf(folder.id),
+                    colorDot = folder.color,
+                    onClick = { onOpenFolder(folder.id) },
+                    onMore = { menuFolder = folder },
+                )
+            }
+            item {
+                Spacer(Modifier.height(4.dp))
+                GlassButton("新建笔记夹", { createFolderOpen = true }, Modifier.fillMaxWidth(), glyph = Glyph.Plus)
+            }
+        }
+    }
+
+    if (createFolderOpen) {
+        FolderEditSheet(
+            title = "新建笔记夹",
+            initialName = "",
+            initialColor = groupColors.first(),
+            onDismiss = { createFolderOpen = false },
+            onSave = { name, color ->
+                store.addGroup(GroupKind.NOTE, Group(name = name, color = color))
+                createFolderOpen = false
+                ToastBus.show("笔记夹已建好")
+            },
+        )
+    }
+    renameFolder?.let { folder ->
+        FolderEditSheet(
+            title = "编辑笔记夹",
+            initialName = folder.name,
+            initialColor = folder.color,
+            onDismiss = { renameFolder = null },
+            onSave = { name, color ->
+                store.updateGroup(GroupKind.NOTE, folder.id) { it.copy(name = name, color = color) }
+                renameFolder = null
+            },
+        )
+    }
+    menuFolder?.let { folder ->
+        ModalSheet(onDismiss = { menuFolder = null }) {
+            DialogTitle(folder.name, "${countOf(folder.id)} 条笔记", onClose = { menuFolder = null })
+            Spacer(Modifier.height(12.dp))
+            SettingRow("重命名", "改名和颜色", Glyph.Edit, onClick = {
+                menuFolder = null
+                renameFolder = folder
+            })
+            RowDivider()
+            SettingRow("上移", "排到前一个笔记夹前面", Glyph.ArrowUp, onClick = {
+                store.moveGroup(GroupKind.NOTE, folder.id, -1)
+                menuFolder = null
+            })
+            RowDivider()
+            SettingRow("删除笔记夹", "夹里的笔记回到「未归类」，不会被删", Glyph.Trash, onClick = {
+                menuFolder = null
+                deleteFolder = folder
+            })
+        }
+    }
+    deleteFolder?.let { folder ->
+        ConfirmDialog(
+            "删除笔记夹「${folder.name}」？",
+            "夹里 ${countOf(folder.id)} 条笔记会回到「未归类」，章节对这个夹的链接也会失效。笔记本身不会删。",
+            "删除笔记夹",
+            {
+                store.deleteGroup(GroupKind.NOTE, folder.id)
+                deleteFolder = null
+                ToastBus.show("笔记夹已删除")
+            },
+            { deleteFolder = null },
+            destructive = true,
+        )
+    }
+}
+
+/** 一个笔记夹：名字 + 条数 + 进入；三点只出现在真正的笔记夹上。 */
+@Composable
+private fun FolderRow(
+    name: String,
+    count: Int,
+    accent: Boolean = true,
+    colorDot: Long? = null,
+    onClick: () -> Unit,
+    onMore: (() -> Unit)? = null,
+) {
+    val ui = LocalInk.current
+    val p = ui.palette
+    MoyuSurface(Modifier.fillMaxWidth(), radius = 20f, flat = true) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .bouncy(scale = .985f) { onClick() }
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                Modifier
+                    .size(36.dp)
+                    .clip(SmoothCorner(12.dp))
+                    .background(p.faint),
+                contentAlignment = Alignment.Center,
+            ) {
+                LineIcon(Glyph.Folder, if (accent) ui.accent else p.muted, 18.dp, 1.5f)
+                if (colorDot != null) {
+                    Box(
+                        Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(3.dp)
+                            .size(7.dp)
+                            .clip(CircleShape)
+                            .background(Color(colorDot))
+                    )
+                }
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Txt(name, size = 15.5f, weight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.height(2.dp))
+                Txt("$count 条笔记", size = 10f, color = p.muted)
+            }
+            if (onMore != null) {
+                Box(
+                    Modifier
+                        .size(30.dp)
+                        .bouncy { onMore() },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    LineIcon(Glyph.More, p.muted.copy(alpha = .7f), 17.dp)
+                }
+                Spacer(Modifier.width(2.dp))
+            }
+            LineIcon(Glyph.Chevron, p.muted.copy(alpha = .55f), 14.dp)
+        }
+    }
+}
+
+/** 新建 / 改名笔记夹：名字 + 颜色，一次问完。 */
+@Composable
+private fun FolderEditSheet(
+    title: String,
+    initialName: String,
+    initialColor: Long,
+    onDismiss: () -> Unit,
+    onSave: (String, Long) -> Unit,
+) {
+    val ui = LocalInk.current
+    var name by remember { mutableStateOf(initialName) }
+    var color by remember { mutableStateOf(initialColor) }
+    ModalSheet(onDismiss = onDismiss, imeAware = true) {
+        DialogTitle(title, "名字和颜色随时可以再改。", onClose = onDismiss)
+        Spacer(Modifier.height(14.dp))
+        Txt("名字", size = 10.5f, color = ui.palette.muted, modifier = Modifier.padding(start = 4.dp, bottom = 6.dp))
+        InkField(name, { name = it.take(16) }, "例如：素材、灵感、大纲", onDone = {})
+        Spacer(Modifier.height(13.dp))
+        Txt("颜色", size = 10.5f, color = ui.palette.muted, modifier = Modifier.padding(start = 4.dp, bottom = 8.dp))
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+            lazyItems(groupColors) { c ->
+                Box(
+                    Modifier
+                        .size(28.dp)
+                        .clip(CircleShape)
+                        .background(Color(c))
+                        .then(if (color == c) Modifier.border(2.dp, ui.palette.ink, CircleShape) else Modifier)
+                        .clickable { color = c }
+                )
+            }
+        }
+        Spacer(Modifier.height(20.dp))
+        PrimaryButton("保存", {
+            val clean = name.trim()
+            if (clean.isBlank()) ToastBus.show("先给笔记夹起个名字") else onSave(clean, color)
+        }, Modifier.fillMaxWidth())
+        Spacer(Modifier.height(8.dp))
+    }
+}
+
+/**
+ * 夹内：这一夹的笔记。列表/网格、筛选都沿用原来的笔记页，只是不再有「分组」层，
+ * 因为已经在夹里了。
+ */
+@Composable
+fun NoteFolderScreen(
+    store: AppStore,
+    folderId: String?,
+    folderName: String,
+    onBack: () -> Unit,
     onOpenNote: (String) -> Unit,
     onCreateNote: (String) -> Unit,
 ) {
@@ -64,30 +317,25 @@ fun NotesScreen(
     val notes = store.notes
     val noteMode = ui.settings.noteMode
     var filter by remember { mutableStateOf("全部") }
-    var selectedGroup by remember { mutableStateOf<String?>(null) }
-    var groupManagerOpen by remember { mutableStateOf(false) }
     var menuNote by remember { mutableStateOf<Note?>(null) }
     var deleteNote by remember { mutableStateOf<Note?>(null) }
-    var groupPickerNote by remember { mutableStateOf<Note?>(null) }
+    var folderPickerNote by remember { mutableStateOf<Note?>(null) }
     var exportingNote by remember { mutableStateOf<Note?>(null) }
     var controlsOpen by remember { mutableStateOf(false) }
     // Hide a just-created note while the editor push animation is running.
     // Otherwise the new card is visible behind the incoming page.
     var hiddenNewNote by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(store.noteGroups) {
-        if (selectedGroup != null && selectedGroup != "" && store.noteGroups.none { it.id == selectedGroup }) {
-            selectedGroup = null
-        }
-    }
-    val groupFiltered = notes.filter { n ->
-        selectedGroup == null || (selectedGroup == "" && n.groupId == null) || (selectedGroup != "" && n.groupId == selectedGroup)
-    }
+    // 笔记夹页是 depth 1：根 BackHandler 只接管 depth 0，这里必须自己接，
+    // 否则系统返回键会直接退出应用。
+    androidx.activity.compose.BackHandler { onBack() }
+
+    val inFolder = notes.filter { it.groupId == folderId }
     val filtered = when (filter) {
-        "待办" -> groupFiltered.filter { n -> n.todos.any { !it.done } }
-        "提醒" -> groupFiltered.filter { n -> n.todos.any { !it.done && it.remindAt != null } }
-        "置顶" -> groupFiltered.filter { it.pinned }
-        else -> groupFiltered
+        "待办" -> inFolder.filter { n -> n.todos.any { !it.done } }
+        "提醒" -> inFolder.filter { n -> n.todos.any { !it.done && it.remindAt != null } }
+        "置顶" -> inFolder.filter { it.pinned }
+        else -> inFolder
     }.filter { it.id != hiddenNewNote }
 
     LaunchedEffect(hiddenNewNote) {
@@ -96,15 +344,13 @@ fun NotesScreen(
             hiddenNewNote = null
         }
     }
-    val totalTodos = notes.sumOf { n -> n.todos.count { !it.done } }
-    val totalReminders = notes.sumOf { n -> n.todos.count { !it.done && it.remindAt != null } }
 
     fun create() {
         val note = Note(
             // Empty on purpose: the editor draws "无标题笔记" as a muted hint, the
             // same as other placeholder text, instead of real title content.
             title = "",
-            groupId = selectedGroup?.takeIf { it.isNotEmpty() },
+            groupId = folderId,
         )
         hiddenNewNote = note.id
         store.addNote(note)
@@ -124,30 +370,31 @@ fun NotesScreen(
             item(span = { GridItemSpan(maxLineSpan) }) {
                 Column(Modifier.fillMaxWidth().statusBarsPadding().padding(top = 14.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Txt("笔记", size = 34f, weight = FontWeight.SemiBold, letterSpacing = .4f)
+                        Box(
+                            Modifier
+                                .size(38.dp)
+                                .clip(CircleShape)
+                                .bouncy { onBack() },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            LineIcon(Glyph.Back, p.ink, 21.dp)
                         }
+                        Spacer(Modifier.width(6.dp))
+                        Column(Modifier.weight(1f)) {
+                            Txt(
+                                folderName,
+                                size = 26f,
+                                weight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Txt("${inFolder.size} 条笔记", size = 10f, color = p.muted)
+                        }
+                        GlassIconButton(Glyph.List, { controlsOpen = true })
+                        Spacer(Modifier.width(6.dp))
                         GlassIconButton(Glyph.Plus, { create() })
                     }
-                    Spacer(Modifier.height(18.dp))
-                    val groupName = when (selectedGroup) {
-                        null -> "全部分组"
-                        "" -> "未分组"
-                        else -> store.noteGroups.firstOrNull { it.id == selectedGroup }?.name ?: "全部分组"
-                    }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        GlassChip("筛选", false) { controlsOpen = true }
-                        Spacer(Modifier.width(9.dp))
-                        Txt(
-                            "$filter · $groupName · ${if (noteMode == "grid") "网格" else "列表"}",
-                            size = 10.5f,
-                            color = p.muted,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f),
-                        )
-                    }
-                    Spacer(Modifier.height(14.dp))
+                    Spacer(Modifier.height(16.dp))
                 }
             }
             if (filtered.isEmpty()) {
@@ -158,7 +405,7 @@ fun NotesScreen(
                             "待办" -> "没有未完成的待办"
                             "提醒" -> "还没有设定提醒"
                             "置顶" -> "没有置顶笔记"
-                            else -> "还没有笔记"
+                            else -> "这个笔记夹还是空的"
                         },
                         when (filter) {
                             "待办", "提醒" -> "在笔记里加一条待办，选一个提醒时间。"
@@ -171,7 +418,6 @@ fun NotesScreen(
                     Box(Modifier.animateItem()) {
                         NoteCard(
                             note = note,
-                            groupName = store.noteGroups.firstOrNull { it.id == note.groupId }?.name,
                             chapterBadge = noteChapterBadge(store, note),
                             onClick = { _ -> onOpenNote(note.id) },
                             onMore = { menuNote = note },
@@ -197,12 +443,12 @@ fun NotesScreen(
             })
             RowDivider()
             SettingRow(
-                "移动到分组",
-                store.noteGroups.firstOrNull { it.id == note.groupId }?.name ?: "未分组",
-                Glyph.Layers,
+                "移动到笔记夹",
+                store.noteGroups.firstOrNull { it.id == note.groupId }?.name ?: "未归类",
+                Glyph.Folder,
                 onClick = {
                     menuNote = null
-                    groupPickerNote = note
+                    folderPickerNote = note
                 },
             )
             RowDivider()
@@ -217,12 +463,9 @@ fun NotesScreen(
             })
         }
     }
-    if (groupManagerOpen) {
-        GroupManagerSheet(GroupKind.NOTE, store) { groupManagerOpen = false }
-    }
     if (controlsOpen) {
         ModalSheet(onDismiss = { controlsOpen = false }) {
-            DialogTitle("筛选与排布", "状态、分组和布局集中在这里。", onClose = { controlsOpen = false })
+            DialogTitle("筛选与排布", "状态和布局集中在这里。", onClose = { controlsOpen = false })
             Spacer(Modifier.height(14.dp))
             Txt("状态", size = 10f, color = p.muted)
             Spacer(Modifier.height(7.dp))
@@ -232,23 +475,11 @@ fun NotesScreen(
                 }
             }
             Spacer(Modifier.height(15.dp))
-            Txt("分组", size = 10f, color = p.muted)
-            Spacer(Modifier.height(7.dp))
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                item { GlassChip("全部分组", selectedGroup == null) { selectedGroup = null } }
-                item { GlassChip("未分组", selectedGroup == "") { selectedGroup = "" } }
-                lazyItems(store.noteGroups, key = { it.id }) { group ->
-                    GlassChip(group.name, selectedGroup == group.id) { selectedGroup = group.id }
-                }
-            }
-            Spacer(Modifier.height(15.dp))
             Txt("排布", size = 10f, color = p.muted)
             Spacer(Modifier.height(7.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 GlassChip("列表", noteMode != "grid") { store.updateSettings { it.copy(noteMode = "list") } }
                 GlassChip("网格", noteMode == "grid") { store.updateSettings { it.copy(noteMode = "grid") } }
-                Spacer(Modifier.weight(1f))
-                GlassChip("管理分组", false) { controlsOpen = false; groupManagerOpen = true }
             }
             Spacer(Modifier.height(10.dp))
         }
@@ -256,19 +487,18 @@ fun NotesScreen(
     exportingNote?.let { note ->
         NoteExportSheet(note, onDismiss = { exportingNote = null })
     }
-    groupPickerNote?.let { note ->
-        GroupPickerSheet(
-            kind = GroupKind.NOTE,
+    folderPickerNote?.let { note ->
+        NoteFolderPickerSheet(
             current = note.groupId,
             store = store,
             onSelect = { group -> store.setNoteGroup(note.id, group) },
-            onDismiss = { groupPickerNote = null },
+            onDismiss = { folderPickerNote = null },
         )
     }
     if (deleteNote != null) {
         val note = deleteNote!!
         ConfirmDialog(
-            "删除「${note.title}」？",
+            "删除「${note.title.ifBlank { "无标题笔记" }}」？",
             "正文和 ${note.todos.size} 项待办会被删除，无法恢复。",
             "删除",
             {
@@ -283,10 +513,54 @@ fun NotesScreen(
     }
 }
 
+/** 笔记换夹：未归类 + 每个笔记夹。 */
+@Composable
+internal fun NoteFolderPickerSheet(
+    current: String?,
+    store: AppStore,
+    onSelect: (String?) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val ui = LocalInk.current
+    val p = ui.palette
+    ModalSheet(onDismiss = onDismiss) {
+        DialogTitle("移动到笔记夹", "笔记只能在一个夹里。", onClose = onDismiss)
+        Spacer(Modifier.height(12.dp))
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clip(SmoothCorner(14.dp))
+                .clickable { onSelect(null); onDismiss() }
+                .padding(vertical = 13.dp, horizontal = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            LineIcon(Glyph.Folder, p.muted, 16.dp)
+            Spacer(Modifier.width(10.dp))
+            Txt("未归类", size = 14f, weight = FontWeight.Medium, modifier = Modifier.weight(1f))
+            if (current == null) LineIcon(Glyph.Check, p.ink, 16.dp)
+        }
+        store.noteGroups.forEach { g ->
+            RowDivider()
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(SmoothCorner(14.dp))
+                    .clickable { onSelect(g.id); onDismiss() }
+                    .padding(vertical = 13.dp, horizontal = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                GroupDot(g.color, 10)
+                Spacer(Modifier.width(10.dp))
+                Txt(g.name, size = 14f, weight = FontWeight.Medium, modifier = Modifier.weight(1f))
+                if (current == g.id) LineIcon(Glyph.Check, p.ink, 16.dp)
+            }
+        }
+    }
+}
+
 @Composable
 private fun NoteCard(
     note: Note,
-    groupName: String?,
     chapterBadge: String? = null,
     onClick: (androidx.compose.ui.layout.LayoutCoordinates?) -> Unit,
     onMore: () -> Unit,
@@ -352,14 +626,11 @@ private fun NoteCard(
                     LineIcon(Glyph.More, p.muted.copy(alpha = .7f), 17.dp)
                 }
             }
-            if (note.todos.isNotEmpty() || next != null || groupName != null || chapterBadge != null) {
+            if (note.todos.isNotEmpty() || next != null || chapterBadge != null) {
                 Spacer(Modifier.height(12.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                     if (chapterBadge != null) {
                         NoteBadge(glyph = Glyph.Link, text = chapterBadge, accent = false)
-                    }
-                    if (groupName != null) {
-                        NoteBadge(glyph = Glyph.Layers, text = groupName, accent = false)
                     }
                     if (note.todos.isNotEmpty()) {
                         NoteBadge(
@@ -398,4 +669,3 @@ private fun NoteBadge(glyph: Glyph, text: String, accent: Boolean) {
         Txt(text, size = 8.5f, color = if (accent) ui.palette.ink else ui.palette.muted)
     }
 }
-

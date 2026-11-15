@@ -14,6 +14,10 @@ data class ProofIssue(
     val suggestion: String,
     val why: String,
     val local: Boolean,
+    /** 修饰切块在正文里的绝对范围（含端点，end 不含）；校核的卡为 -1。
+     *  只在本轮会话里有效：正文一改，后面的位置就旧了，采纳时按 quote 回退。 */
+    val start: Int = -1,
+    val end: Int = -1,
     val id: String = java.util.UUID.randomUUID().toString().take(8),
 )
 
@@ -31,9 +35,7 @@ data class ProofIssue(
  * 定位仍是本地：每条建议带着要替换的原文，编辑器只改能找到且唯一的那一处。
  */
 object Proofing {
-    /** One model request covers a passage of this size (the design's 1500–2500;
-     *  the writer's own chapters run to ~2900, so the whole chapter fits). */
-    const val MAX_INPUT = 3000
+    // 不再有字数上限（2026-11-15 用户定）：整章选进来也照样跑，`chunks()` 按 1500 字切段。
 
     private val HAN = '\u4e00'..'\u9fa5'
     private val DUP = Regex("([，。、；：])\\1+")

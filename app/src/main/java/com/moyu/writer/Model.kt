@@ -1,4 +1,4 @@
-package com.moyu.writer
+﻿package com.moyu.writer
 
 import android.content.Context
 import android.graphics.Color as AndroidColor
@@ -28,6 +28,15 @@ data class Chapter(
     val updatedAt: Long = System.currentTimeMillis(),
     /** Notes bound to this chapter. The other direction lives in [Note.chapterIds]. */
     val noteIds: List<String> = emptyList(),
+    /**
+     * 笔记夹 linked to this chapter. Everything inside them counts as bound to
+     * this chapter too, including notes added to the folder later — the writer
+     * asked for「章节不仅能链接笔记，也能链接整个笔记夹」. The reverse edge is not
+     * stored on the folder: a folder is just a [Group], and keeping the links
+     * on one side only means deleting a folder cannot leave a dangling edge in
+     * two places. [notesOfChapter] is the single place that resolves it.
+     */
+    val folderIds: List<String> = emptyList(),
 )
 
 data class Book(
@@ -105,6 +114,9 @@ data class AppSettings(
     val cardScale: Float = 1f,
     val coverRadius: Float = 18f,
     val showTabLabels: Boolean = true,
+    /** 能力栏（工具行 + 符号行）上次是展开还是收起；首次与旧备份默认收起。
+     *  2026-11-15 用户要求「能力栏的展开和关闭要有记忆性」，默认收起。 */
+    val dockOpen: Boolean = false,
     // Liquid-glass knobs, two independent sets: the whole tab bar and the
     // selected lens inside it.
     val tabBlur: Float = 8f,
@@ -291,6 +303,15 @@ class AppStore(context: Context) {
                 d.copy(
                     noteGroups = d.noteGroups.filterNot { it.id == id },
                     notes = d.notes.map { if (it.groupId == id) it.copy(groupId = null) else it },
+                    // 章节可能把整个笔记夹链接过去了；夹没了，这条链接也失效。
+                    // 夹里的笔记本身不删，只是回到「未归类」。
+                    books = d.books.map { b ->
+                        if (b.chapters.none { id in it.folderIds }) b else b.copy(
+                            chapters = b.chapters.map {
+                                if (id in it.folderIds) it.copy(folderIds = it.folderIds.filterNot { f -> f == id }) else it
+                            },
+                        )
+                    },
                 )
             }
         }
@@ -448,6 +469,32 @@ class AppStore(context: Context) {
                 )
             }
             d.copy(notes = nextNotes, books = nextBooks)
+        }
+    }
+
+    /**
+     * Link or unlink a whole 笔记夹 to a chapter. Resolving the link into actual
+     * notes happens in `notesOfChapter()`, so a note added to the folder later
+     * is bound to the chapter without touching the chapter again.
+     */
+    fun setChapterFolder(bookId: String, chapterId: String, folderId: String, linked: Boolean) {
+        mutate { d ->
+            d.copy(
+                books = d.books.map { b ->
+                    if (b.id != bookId) b else b.copy(
+                        chapters = b.chapters.map { c ->
+                            if (c.id != chapterId) c else {
+                                val next = if (linked) {
+                                    (c.folderIds + folderId).distinct()
+                                } else {
+                                    c.folderIds.filterNot { it == folderId }
+                                }
+                                if (next == c.folderIds) c else c.copy(folderIds = next)
+                            }
+                        },
+                    )
+                },
+            )
         }
     }
 
@@ -671,7 +718,19 @@ class AppStore(context: Context) {
             .mapIndexed { i, g -> g.copy(order = i) }
         val bookIds = bookGroups.map { it.id }.toSet()
         val noteIds = noteGroups.map { it.id }.toSet()
-        val fixedBooks = data.books.map { if (it.groupId != null && it.groupId !in bookIds) it.copy(groupId = null) else it }
+        val fixedBooks = data.books.map { b ->
+            val cleanBook = if (b.groupId != null && b.groupId !in bookIds) b.copy(groupId = null) else b
+            // A chapter may be linked to a whole 笔记夹. If that folder is gone
+            // the link must go too, otherwise the chapter would keep counting
+            // notes that no longer have a folder to belong to.
+            if (cleanBook.chapters.none { c -> c.folderIds.any { it !in noteIds } }) cleanBook
+            else cleanBook.copy(
+                chapters = cleanBook.chapters.map { c ->
+                    val kept = c.folderIds.filter { it in noteIds }
+                    if (kept == c.folderIds) c else c.copy(folderIds = kept)
+                },
+            )
+        }
         val fixedNotesWithGroups = fixedNotes.map {
             if (it.groupId != null && it.groupId !in noteIds) it.copy(groupId = null) else it
         }
@@ -856,6 +915,7 @@ private fun encodeData(data: AppData): String {
                 put("id", c.id); put("title", c.title); put("content", c.content)
                 put("createdAt", c.createdAt); put("updatedAt", c.updatedAt)
                 put("noteIds", JSONArray(c.noteIds))
+                put("folderIds", JSONArray(c.folderIds))
             })
         }
         books.put(JSONObject().apply {
@@ -927,6 +987,7 @@ private fun encodeSettings(s: AppSettings): JSONObject = JSONObject().apply {
     put("librarySort", s.librarySort); put("columns", s.columns)
     put("cardScale", s.cardScale.toDouble()); put("coverRadius", s.coverRadius.toDouble())
     put("showTabLabels", s.showTabLabels)
+            put("dockOpen", s.dockOpen)
     put("tabBlur", s.tabBlur.toDouble()); put("tabRefraction", s.tabRefraction.toDouble())
     put("tabDispersion", s.tabDispersion); put("tabShadow", s.tabShadow.toDouble())
     put("tabBarOpacity", s.tabBarOpacity.toDouble()); put("tabLensOpacity", s.tabLensOpacity.toDouble())
@@ -1008,6 +1069,7 @@ private fun decodeSettings(o: JSONObject?) = AppSettings(
     cardScale = (o?.optDouble("cardScale", 1.0) ?: 1.0).toFloat(),
     coverRadius = (o?.optDouble("coverRadius", 18.0) ?: 18.0).toFloat(),
     showTabLabels = o?.optBoolean("showTabLabels", true) ?: true,
+            dockOpen = o?.optBoolean("dockOpen", false) ?: false,
     tabBlur = (o?.optDouble("tabBlur", 8.0) ?: 8.0).toFloat(),
     tabRefraction = (o?.optDouble("tabRefraction", 30.0) ?: 30.0).toFloat(),
     tabDispersion = o?.optBoolean("tabDispersion", true) ?: true,
@@ -1104,6 +1166,7 @@ private fun decodeData(text: String): AppData {
                 createdAt = c.optLong("createdAt", now()),
                 updatedAt = c.optLong("updatedAt", now()),
                 noteIds = decodeStringList(c, "noteIds"),
+                folderIds = decodeStringList(c, "folderIds"),
             )
         }
         books += Book(

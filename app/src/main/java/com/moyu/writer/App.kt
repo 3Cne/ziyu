@@ -108,7 +108,9 @@ sealed class Screen(val depth: Int, val tabIndex: Int? = null) {
     data object Settings : Screen(0, 4)
     data class BookDetail(val bookId: String) : Screen(1)
     data class ChapterEditor(val bookId: String, val chapterId: String) : Screen(2)
-    data class NoteEditor(val noteId: String) : Screen(1)
+    /** 笔记夹里的一页；folderId 为 null 是「未归类」。 */
+    data class NoteFolder(val folderId: String?) : Screen(1)
+    data class NoteEditor(val noteId: String) : Screen(2)
     data class SettingPage(val page: String) : Screen(1)
 }
 
@@ -173,6 +175,9 @@ private fun MoyuRoot(store: AppStore, initialNote: String?, consumeInitialNote: 
     // buffer, so its own icons cannot appear inside the capsule as ghosts.
     val tabBarBackdrop = rememberLayerBackdrop()
     var stack by remember { mutableStateOf(listOf<Screen>(Screen.Library)) }
+    // 长按标签栏拖动镜片时的连续位置（可见页序列），松手回 null。
+    // 页面与镜片读同一个值，所以「镜片到哪、页面跟到哪」不会脱位。
+    var tabDrag by remember { mutableStateOf<Float?>(null) }
     // Rapid back presses used to start a second page transition before the
     // first one had finished, so the same detail page was composed twice and
     // both copies slid off together. One pop per transition window keeps a
@@ -320,6 +325,7 @@ DepthStack(
             pageCount = visibleScreens.size,
             perPageMs = perPage,
             motion = store.data.settings.pageMotion,
+            dragOffset = tabDrag,
         ) { i ->
             CompositionLocalProvider(LocalHazeHandle provides if (hazeSupported) haze else null) {
                 when (visibleScreens[i]) {
@@ -333,8 +339,8 @@ DepthStack(
                     )
                     Screen.Notes -> NotesScreen(
                         store = store,
-                        onOpenNote = { stack = stack + Screen.NoteEditor(it) },
-                        onCreateNote = { stack = stack + Screen.NoteEditor(it) },
+                        onOpenFolder = { folderId -> stack = stack + Screen.NoteFolder(folderId) },
+                        onCreateNote = { noteId -> stack = stack + Screen.NoteEditor(noteId) },
                     )
                     Screen.Stats -> StatsScreen(store)
                     Screen.Ai -> AiScreen(
@@ -364,8 +370,8 @@ DepthStack(
                 )
                 Screen.Notes -> NotesScreen(
                     store = store,
-                    onOpenNote = { stack = stack + Screen.NoteEditor(it) },
-                    onCreateNote = { stack = stack + Screen.NoteEditor(it) },
+                    onOpenFolder = { folderId -> stack = stack + Screen.NoteFolder(folderId) },
+                    onCreateNote = { noteId -> stack = stack + Screen.NoteEditor(noteId) },
                 )
                 Screen.Stats -> StatsScreen(store)
                 Screen.Ai -> AiScreen(
@@ -395,6 +401,16 @@ DepthStack(
                         // Keep the chapter underneath so back returns to writing.
                         stack = stack + Screen.NoteEditor(noteId)
                     },
+                )
+                is Screen.NoteFolder -> NoteFolderScreen(
+                    store = store,
+                    folderId = screen.folderId,
+                    folderName = screen.folderId?.let { id ->
+                        store.noteGroups.firstOrNull { it.id == id }?.name
+                    } ?: "未归类",
+                    onBack = { pop() },
+                    onOpenNote = { noteId -> stack = stack + Screen.NoteEditor(noteId) },
+                    onCreateNote = { noteId -> stack = stack + Screen.NoteEditor(noteId) },
                 )
                 is Screen.NoteEditor -> NoteEditorScreen(
                     store = store,
@@ -454,6 +470,7 @@ DepthStack(
                 onSelect = { index ->
                     stack = listOf(barScreens.getOrElse(index) { Screen.Settings })
                 },
+                onDrag = { tabDrag = it },
                 backdrop = tabBarBackdrop,
             )
         }

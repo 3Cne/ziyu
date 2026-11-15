@@ -35,6 +35,27 @@ data class ToolTrace(
     val elapsedMs: Long,
 )
 
+/**
+ * 一条已经落地的改动，挂在产生它的那条回答下面。
+ *
+ * 只活在会话内存里：不进 MemoTurn、不进 moyu.json。`kind` 为 "info" 的只是
+ * 一行说明（改名 / 建章 / 待办 / 记忆），没有撤销；"append"/"replace" 才是正文
+ * 改动，带原文与改后，可以单独退回。
+ */
+data class ChatEdit(
+    val id: String,
+    val label: String,
+    /** "append" | "replace" | "info" */
+    val kind: String,
+    val bookId: String = "",
+    val chapterId: String = "",
+    /** replace：被换掉的原文片段；append：空。 */
+    val before: String = "",
+    /** 写进去的片段。 */
+    val after: String = "",
+    val undone: Boolean = false,
+)
+
 data class ChatMsg(
     val id: String,
     val role: String,
@@ -45,6 +66,8 @@ data class ChatMsg(
     val tools: List<ToolTrace> = emptyList(),
     /** 深度思考的 reasoning 原文；只在本次会话里保留，不进历史。 */
     val reasoning: String = "",
+    /** 这一轮落地的改动（只活在本会话内存里）。 */
+    val edits: List<ChatEdit> = emptyList(),
 )
 
 /**
@@ -101,6 +124,22 @@ class ChatSession {
     fun settle(id: String, refs: List<String>) {
         val i = messages.indexOfFirst { it.id == id }
         if (i >= 0) messages[i] = messages[i].copy(status = ChatStatus.Settled, refs = refs)
+    }
+
+    /** 这一轮落地的改动挂到这条回答下面。 */
+    fun addEdits(id: String, edits: List<ChatEdit>) {
+        if (edits.isEmpty()) return
+        val i = messages.indexOfFirst { it.id == id }
+        if (i >= 0) messages[i] = messages[i].copy(edits = messages[i].edits + edits)
+    }
+
+    /** 逐条撤销后把那一张卡标成已撤销（不删卡：作者看得见自己退过哪一条）。 */
+    fun markEditUndone(id: String, editId: String) {
+        val i = messages.indexOfFirst { it.id == id }
+        if (i < 0) return
+        messages[i] = messages[i].copy(
+            edits = messages[i].edits.map { if (it.id == editId) it.copy(undone = true) else it },
+        )
     }
 
     fun fail(id: String, message: String) {

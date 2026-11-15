@@ -9,8 +9,11 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -113,9 +116,28 @@ fun AppData.noteChapterRefs(note: Note): List<NoteChapterRef> {
     return out
 }
 
-fun AppData.notesOfChapter(chapter: Chapter): List<Note> =
-    if (chapter.noteIds.isEmpty()) emptyList()
+/**
+ * Every note a chapter carries: the ones bound one by one, plus everything that
+ * currently sits in a linked 笔记夹. This is the single resolution point — the
+ * notes panel count, the floating card and the AI readers all go through it, so
+ * a note dropped into a linked folder shows up everywhere without extra wiring.
+ */
+fun AppData.notesOfChapter(chapter: Chapter): List<Note> {
+    val folderIds = chapter.folderIds.toSet()
+    val direct = if (chapter.noteIds.isEmpty()) emptyList()
     else chapter.noteIds.mapNotNull { id -> notes.firstOrNull { it.id == id } }
+    if (folderIds.isEmpty()) return direct
+    val fromFolders = notes.filter { it.groupId != null && it.groupId in folderIds }
+    val seen = HashSet<String>(direct.size + fromFolders.size)
+    return buildList {
+        direct.forEach { if (seen.add(it.id)) add(it) }
+        fromFolders.forEach { if (seen.add(it.id)) add(it) }
+    }
+}
+
+/** Notes that belong to one 笔记夹. 未归类 (folderId 为 null) 不在任何夹里。 */
+fun AppData.notesOfFolder(folderId: String?): List<Note> =
+    notes.filter { it.groupId == folderId }
 
 fun AppData.noteCountOfChapter(chapter: Chapter): Int = notesOfChapter(chapter).size
 
@@ -139,16 +161,20 @@ fun ChapterNotesSheet(
         LaunchedEffect(Unit) { onDismiss() }
         return
     }
-    var query by remember { mutableStateOf("") }
     var showCreate by remember { mutableStateOf(false) }
     var newTitle by remember { mutableStateOf("") }
+    // 3.24.1：链接改成两步——先只出「笔记夹」这一层，点整行链接整个夹、点右侧箭头
+    // 进夹再挑单条。原来把「笔记夹 chips + 已绑定 + 可选笔记」三块同时摊开，
+    // 菜单一下就撑满了（用户报「菜单会很大」），而且夹和笔记混在一屏里分不清。
+    var picking by remember { mutableStateOf(false) }
+    var browsing by remember { mutableStateOf(false) }
+    var browseId by remember { mutableStateOf<String?>(null) }
 
-    val linked = chapter.noteIds.mapNotNull { id -> data.notes.firstOrNull { it.id == id } }
-    val linkedIds = linked.map { it.id }.toSet()
-    val candidates = data.notes
-        .filter { it.id !in linkedIds }
-        .filter { query.isBlank() || it.title.contains(query.trim(), ignoreCase = true) }
-        .sortedByDescending { it.updatedAt }
+    // 单条绑定的 + 链接夹里的，都算「这一章的笔记」。
+    val linked = data.notesOfChapter(chapter)
+    val linkedFolderIds = chapter.folderIds.toSet()
+    val folders = data.noteGroups
+    val singleIds = chapter.noteIds.toSet()
     val floatOn = ui.settings.noteFloat
 
     fun setLinked(noteId: String, on: Boolean) {
@@ -162,6 +188,19 @@ fun ChapterNotesSheet(
         newTitle = ""
         showCreate = false
         ToastBus.show("已绑定新笔记")
+    }
+
+    /** 解除一条已绑定的笔记：单条绑定的直接解；来自笔记夹的只能去解那个夹。 */
+    fun unlink(note: Note) {
+        if (note.id in singleIds) {
+            setLinked(note.id, false)
+            return
+        }
+        val folder = folders.firstOrNull { it.id == note.groupId && it.id in linkedFolderIds }
+        ToastBus.show(
+            if (folder != null) "这条在《${folder.name}》里，取消链接整个夹才会移出"
+            else "这条笔记不在单条绑定里"
+        )
     }
 
     InlineModalSheet(onDismiss = onDismiss) { close ->
@@ -183,54 +222,197 @@ fun ChapterNotesSheet(
             },
         )
         RowDivider()
-        Spacer(Modifier.height(14.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            SectionLabel("已绑定")
-            Spacer(Modifier.weight(1f))
-            GlassChip(if (showCreate) "取消新建" else "新建笔记", showCreate) {
-                showCreate = !showCreate
-            }
-        }
-        if (linked.isEmpty()) {
-            Spacer(Modifier.height(8.dp))
-            Txt(
-                "还没有绑定笔记。选一条已有笔记，或新建一条只属于这一章的笔记。",
-                size = 10.5f,
-                color = p.muted,
-                lineHeight = 16f,
-            )
-        } else {
-            Spacer(Modifier.height(6.dp))
-            linked.forEach { note ->
-                RowDivider()
-                NotePickRow(note, checked = true) { setLinked(note.id, false) }
-            }
-        }
-        if (showCreate) {
-            Spacer(Modifier.height(10.dp))
-            NoteTitleField(newTitle, { newTitle = it }, onConfirm = { createAndBind() })
-        }
-        Spacer(Modifier.height(16.dp))
-        SectionLabel("可选笔记")
-        Spacer(Modifier.height(6.dp))
-        NoteTitleField(query, { query = it }, onConfirm = null)
-        Spacer(Modifier.height(6.dp))
-        if (candidates.isEmpty()) {
-            Spacer(Modifier.height(8.dp))
-            Txt(
-                if (query.isBlank()) "没有其他笔记了。" else "没有匹配「${query.trim()}」的笔记。",
-                size = 10f,
-                color = p.muted.copy(alpha = .8f),
-            )
-        } else {
-            Column(Modifier.heightInForLinks()) {
-                candidates.forEach { note ->
+        Spacer(Modifier.height(12.dp))
+        AnimatedContent(
+            targetState = Triple(picking, browsing, browseId),
+            transitionSpec = {
+                val forward = targetState.first &&
+                    (!initialState.first || (targetState.second && !initialState.second))
+                if (forward) {
+                    (slideInHorizontally(tween(180)) { it / 3 } + fadeIn(tween(150))) togetherWith
+                        (slideOutHorizontally(tween(140)) { -it / 3 } + fadeOut(tween(120)))
+                } else {
+                    (slideInHorizontally(tween(180)) { -it / 3 } + fadeIn(tween(150))) togetherWith
+                        (slideOutHorizontally(tween(140)) { it / 3 } + fadeOut(tween(120)))
+                }
+            },
+            label = "linkPicker",
+        ) { state ->
+            val isPicking = state.first
+            val inFolder = state.second
+            val folderId = state.third
+            when {
+                !isPicking -> Column {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        SectionLabel("已绑定")
+                        Spacer(Modifier.weight(1f))
+                        GlassChip(if (showCreate) "取消新建" else "新建", showCreate) {
+                            showCreate = !showCreate
+                        }
+                        Spacer(Modifier.width(6.dp))
+                        GlassChip("+ 链接", false) { picking = true; browsing = false }
+                    }
+                    if (linked.isEmpty()) {
+                        Spacer(Modifier.height(8.dp))
+                        Txt(
+                            "还没有绑定的笔记或笔记夹。点「+ 链接」去挑。",
+                            size = 10.5f,
+                            color = p.muted,
+                            lineHeight = 16f,
+                        )
+                    } else {
+                        Spacer(Modifier.height(6.dp))
+                        linked.forEach { note ->
+                            RowDivider()
+                            NotePickRow(note, checked = true) { unlink(note) }
+                        }
+                    }
+                    if (showCreate) {
+                        Spacer(Modifier.height(10.dp))
+                        NoteTitleField(newTitle, { newTitle = it }, onConfirm = { createAndBind() })
+                    }
+                }
+
+                !inFolder -> Column {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        GlassChip("取消", false) { picking = false }
+                        Spacer(Modifier.weight(1f))
+                        Txt("点夹链接整个夹", size = 9.5f, color = p.muted)
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    folders.forEach { folder ->
+                        RowDivider()
+                        FolderPickRow(
+                            name = folder.name,
+                            count = data.notesOfFolder(folder.id).size,
+                            linked = folder.id in linkedFolderIds,
+                            onToggle = {
+                                store.setChapterFolder(book.id, chapter.id, folder.id, folder.id !in linkedFolderIds)
+                            },
+                            onEnter = { browseId = folder.id; browsing = true },
+                        )
+                    }
+                    // 「未归类」不是夹，不能整夹链接，只能进去挑单条。
                     RowDivider()
-                    NotePickRow(note, checked = false) { setLinked(note.id, true) }
+                    FolderPickRow(
+                        name = "未归类",
+                        count = data.notesOfFolder(null).size,
+                        linked = null,
+                        onToggle = null,
+                        onEnter = { browseId = null; browsing = true },
+                    )
+                }
+
+                else -> Column {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        GlassChip("‹ 笔记夹", false) { browsing = false }
+                        Spacer(Modifier.width(9.dp))
+                        Txt(
+                            folders.firstOrNull { it.id == folderId }?.name ?: "未归类",
+                            size = 13f,
+                            weight = FontWeight.Medium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    val inThis = data.notesOfFolder(folderId)
+                    // 进夹后，夹已整体链接时每条都应显示「已包含」，否则用户会以为
+                    // 勾选没生效（计数据本来就没涨——它们已经在里面了）。
+                    val folderLinked = folderId != null && folderId in linkedFolderIds
+                    if (inThis.isEmpty()) {
+                        Spacer(Modifier.height(8.dp))
+                        Txt("这个笔记夹还是空的。", size = 10.5f, color = p.muted)
+                    } else {
+                        inThis.forEach { note ->
+                            RowDivider()
+                            val single = note.id in singleIds
+                            NotePickRow(note, checked = single || folderLinked) { on ->
+                                if (folderLinked && !single) {
+                                    ToastBus.show("这一夹已经链接了，取消夹才会移出")
+                                } else {
+                                    setLinked(note.id, on)
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
         Spacer(Modifier.height(14.dp))
+    }
+}
+
+/**
+ * 一个笔记夹：点整行 = 链接/取消整个夹，点右侧箭头 = 进夹挑单条。
+ * `linked = null` 表示这条不能整夹链接（「未归类」），整行只用来进夹。
+ */
+@Composable
+private fun FolderPickRow(
+    name: String,
+    count: Int,
+    linked: Boolean?,
+    onToggle: (() -> Unit)?,
+    onEnter: () -> Unit,
+) {
+    val ui = LocalInk.current
+    val p = ui.palette
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Row(
+            Modifier
+                .weight(1f)
+                .clip(SmoothCorner(14.dp))
+                .then(
+                    if (onToggle != null) Modifier.bouncy(scale = .99f) { onToggle() }
+                    else Modifier
+                )
+                .padding(vertical = 10.dp, horizontal = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                Modifier
+                    .size(30.dp)
+                    .clip(SmoothCorner(10.dp))
+                    .background(if (linked == true) ui.accent.copy(alpha = .12f) else p.faint),
+                contentAlignment = Alignment.Center,
+            ) {
+                LineIcon(Glyph.Folder, if (linked == true) ui.accent else p.muted, 15.dp)
+            }
+            Spacer(Modifier.width(11.dp))
+            Column(Modifier.weight(1f)) {
+                Txt(name, size = 13.5f, weight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.height(2.dp))
+                Txt("$count 条笔记", size = 9.5f, color = p.muted)
+            }
+            if (linked != null) {
+                Box(
+                    Modifier
+                        .size(28.dp)
+                        .clip(CircleShape)
+                        .background(if (linked) ui.accent else p.faint),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    LineIcon(
+                        if (linked) Glyph.Check else Glyph.Plus,
+                        if (linked) (if (p.isDark) p.bgTop else Color.White) else p.muted,
+                        14.dp,
+                    )
+                }
+            }
+        }
+        Box(
+            Modifier
+                .size(40.dp)
+                .bouncy(scale = .92f) { onEnter() },
+            contentAlignment = Alignment.Center,
+        ) {
+            LineIcon(Glyph.Chevron, p.muted.copy(alpha = .6f), 15.dp)
+        }
     }
 }
 
@@ -357,7 +539,10 @@ private fun NoteTitleField(value: String, onChange: (String) -> Unit, onConfirm:
 }
 
 /**
- * Read-only chapter labels under a note's title. Tapping one opens that chapter.
+ * Read-only chapter labels for a note. Tapping one opens that chapter.
+ *
+ * 2026-11-15：这排 chip 从正文上方移到顶栏右侧按钮下方，所以不再自己占一整行
+ * 宽度，也不再带「绑定章节」那行小标签字（删掉不影响使用，§J）。
  */
 @Composable
 fun NoteChapterTags(
@@ -366,28 +551,12 @@ fun NoteChapterTags(
     onOpen: (NoteChapterRef) -> Unit,
 ) {
     if (refs.isEmpty()) return
-    val ui = LocalInk.current
-    val p = ui.palette
-    Column(modifier.fillMaxWidth()) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            LineIcon(Glyph.Link, p.muted, 11.dp)
-            Spacer(Modifier.width(5.dp))
-            Txt(
-                if (refs.size == 1) "绑定章节" else "绑定 ${refs.size} 个章节",
-                size = 8.5f,
-                color = p.muted,
-            )
-        }
-        Spacer(Modifier.height(6.dp))
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            refs.forEach { ref ->
-                NoteChapterTag(ref) { onOpen(ref) }
-            }
+    Row(
+        modifier.horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        refs.forEach { ref ->
+            NoteChapterTag(ref) { onOpen(ref) }
         }
     }
 }
@@ -525,9 +694,13 @@ fun NoteSidePanel(
                 .fillMaxHeight()
                 .graphicsLayer {
                     // 抽出 / 收回：从右侧滑入，左缘横向轻拉 3%；收起反向。
+                    // 粘滞水滴（局部动效档）：横向比纵向的时间点再滞后 15%，
+                    // 中间帧宽度先冲出去、再收平 —— 读作被从右边拽出来，
+                    // 而不是一个规规矩矩的宽度 tween。幅度控制在 4.5% 内，文字不糊。
+                    val revealLag = ViscousDrop.lagged(reveal)
                     alpha = reveal
                     translationX = (1f - reveal) * 22.dp.toPx()
-                    scaleX = 1f + .03f * (1f - reveal)
+                    scaleX = 1f + .03f * (1f - reveal) + .30f * (reveal - revealLag)
                     transformOrigin = androidx.compose.ui.graphics.TransformOrigin(1f, .5f)
                 },
         ) {

@@ -1,5 +1,6 @@
 package com.moyu.writer
 
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.layout.Box
@@ -16,7 +17,9 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -37,19 +40,55 @@ internal fun TabPager(
     pageCount: Int,
     perPageMs: Int,
     motion: String = "slide",
+    /**
+     * 长按标签栏拖动镜片时的连续位置（0..pageCount-1）。非空时页面直接跟手，
+     * 手一松回 null，从当前位置继续弹到 `index`（不会跳）。
+     */
+    dragOffset: Float? = null,
     modifier: Modifier = Modifier,
     page: @Composable (Int) -> Unit,
 ) {
-    val offset by animateFloatAsState(
-        targetValue = index.toFloat(),
-        // Spring instead of tween: damping is fixed at 1.0, stiffness follows
-        // the motion preset. The distance already carries the "how far" part.
-        animationSpec = spring(MOYU_DAMPING, pageStiffness(perPageMs), PAGE_THRESHOLD),
-        // This parameter, not the spec's threshold, is what animateFloatAsState
-        // actually uses. Its default 0.01 snapped the page ~13px on the last frame.
-        visibilityThreshold = PAGE_THRESHOLD,
-        label = "tabPager",
-    )
+    // Animatable instead of animateFloatAsState: the strip must be able to
+    // follow a finger and then continue the same spring from wherever it left.
+    val anim = remember { Animatable(index.toFloat()) }
+    // 拖动中直接用 dragOffset（1:1 跟手，不留动画延迟）；松手才交给弹簧。
+    // 原来把每帧的 dragOffset 都 snapTo 进 Animatable，等于每帧重启一次协程。
+    val dragging = dragOffset != null
+    val lastDrag = remember { mutableFloatStateOf(index.toFloat()) }
+    // 只有「刚松开拖动」这一下才需要把弹簧对齐到手指停下的位置；
+    // 普通点击不能对齐，否则页面会先跳回上次拖动的落点再弹过去。
+    val wasDragging = remember { mutableStateOf(false) }
+    if (dragOffset != null) {
+        lastDrag.floatValue = dragOffset
+        wasDragging.value = true
+    }
+    LaunchedEffect(index, dragging, pageCount) {
+        if (!dragging) {
+            // 拖动落定不过冲：.52 阻尼会让页面先冲过目标再回来，读作「抽动一下」。
+            // 点击切页仍保留回弹（灵动感来自那里，不来自落定）。
+            val fromDrag = wasDragging.value
+            if (fromDrag) {
+                anim.snapTo(lastDrag.floatValue.coerceIn(0f, (pageCount - 1).coerceAtLeast(0).toFloat()))
+                wasDragging.value = false
+            }
+            // Spring instead of tween: stiffness follows the motion preset.
+            // The distance already carries the "how far" part.
+            anim.animateTo(
+                index.toFloat(),
+                spring(
+                    dampingRatio = if (fromDrag) 1f else MOYU_DAMPING,
+                    stiffness = pageStiffness(perPageMs),
+                    visibilityThreshold = PAGE_THRESHOLD,
+                ),
+            )
+        }
+    }
+    // 松手那一帧 dragOffset 变 null，但上面的 effect 还没跑、anim 仍停在旧 index。
+    // 直接 `dragOffset ?: anim.value` 会让页面先渲染回旧页，下一帧再弹到新页——
+    // 用户看到的就是「拖完页面抽动一下」。所以在 wasDragging 撤销之前继续用
+    // 手指放下的位置，交接期间 offset 连续。
+    val offset = dragOffset
+        ?: if (wasDragging.value) lastDrag.floatValue else anim.value
     // For fade/scale only the two ends are shown: intermediate tabs must not
     // appear, so we remember where the strip came from.
     var fromIndex by remember { mutableIntStateOf(index) }

@@ -1,4 +1,4 @@
-package com.moyu.writer
+﻿package com.moyu.writer
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -165,9 +165,13 @@ fun ProofSidePanel(
                 .fillMaxHeight()
                 .graphicsLayer {
                     // 抽出 / 收回：从右侧滑入，左缘横向轻拉 3%；收起反向。
+                    // 粘滞水滴（局部动效档）：横向比纵向的时间点再滞后 15%，
+                    // 中间帧宽度先冲出去、再收平 —— 读作被从右边拽出来，
+                    // 而不是一个规规矩矩的宽度 tween。幅度控制在 4.5% 内，文字不糊。
+                    val revealLag = ViscousDrop.lagged(reveal)
                     alpha = reveal
                     translationX = (1f - reveal) * 22.dp.toPx()
-                    scaleX = 1f + .03f * (1f - reveal)
+                    scaleX = 1f + .03f * (1f - reveal) + .30f * (reveal - revealLag)
                     transformOrigin = androidx.compose.ui.graphics.TransformOrigin(1f, .5f)
                 },
         ) {

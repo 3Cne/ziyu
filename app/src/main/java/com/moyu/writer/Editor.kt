@@ -140,6 +140,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.graphics.Color
@@ -257,6 +258,18 @@ data class SelectionGeometry(
     val endBottom: Float,
     val endHandle: HandleBox,
     val active: Boolean,
+    /** 正在被拖的那只（0 起点 / 1 终点 / -1 没有）。 */
+    val dragSide: Int = -1,
+    /** 被拖那只的水滴形变强度：0 = 原形，越大拉得越长。 */
+    val dragPull: Float = 0f,
+    /**
+     * 手指移动方向（单位向量）。水滴沿这条轴拉长、垂直方向收窄——
+     * 2026-11-15 用户报「怎么都是一个形变形状」，根因是以前不管往哪拖都写死
+     * `scaleX=1+.55p / scaleY=1-.22p`（永远横向拉长）。现在方向由手指决定：
+     * 竖直拖就竖直拉长，斜拖按分量混合。
+     */
+    val dragDirX: Float = 0f,
+    val dragDirY: Float = 0f,
 )
 
 @Composable
@@ -266,32 +279,72 @@ private fun SelectionOverlay(
     color: Color,
     onTopInWindow: (Int) -> Unit,
 ) {
-    if (geometry == null || !geometry.active) return
+    val active = geometry != null && geometry.active
+    // 手柄收起也要有过渡：几何一变成 null 就立刻不画的话，看起来是「瞬消」（用户报的手感）。
+    var last by remember { mutableStateOf<SelectionGeometry?>(null) }
+    LaunchedEffect(active, geometry) {
+        if (active && geometry != null) last = geometry
+    }
+    val vis = remember { Animatable(0f) }
+    LaunchedEffect(active) {
+        if (active) vis.animateTo(1f, spring(dampingRatio = .52f, stiffness = 300f))
+        else vis.animateTo(0f, tween(150))
+    }
+    val g: SelectionGeometry = geometry?.takeIf { it.active } ?: last ?: return
+    val v = vis.value
+    if (!active && v <= .01f) return
     Canvas(
         Modifier
             .fillMaxSize()
-            .clipToBounds()
+            // 不裁：手柄要能画到正文容器上边界之外（用户报「上端被挤压」）。
+            // 层级仍在正文之上，只是不再受正文高度约束。
             .onGloballyPositioned { onTopInWindow(it.boundsInWindow().top.toInt()) },
     ) {
         val stroke = 2.5.dp.toPx()
-        drawLine(
-            color = color,
-            start = Offset(geometry.startCaretX, geometry.startTop),
-            end = Offset(geometry.startCaretX, geometry.startBottom),
-            strokeWidth = stroke,
-            cap = StrokeCap.Round,
-        )
-        drawLine(
-            color = color,
-            start = Offset(geometry.endCaretX, geometry.endTop),
-            end = Offset(geometry.endCaretX, geometry.endBottom),
-            strokeWidth = stroke,
-            cap = StrokeCap.Round,
-        )
+        val lineAlpha = v.coerceIn(0f, 1f)
+        if (lineAlpha > .02f) {
+            drawLine(
+                color = color,
+                start = Offset(g.startCaretX, g.startTop),
+                end = Offset(g.startCaretX, g.startBottom),
+                strokeWidth = stroke,
+                cap = StrokeCap.Round,
+                alpha = lineAlpha,
+            )
+            drawLine(
+                color = color,
+                start = Offset(g.endCaretX, g.endTop),
+                end = Offset(g.endCaretX, g.endBottom),
+                strokeWidth = stroke,
+                cap = StrokeCap.Round,
+                alpha = lineAlpha,
+            )
+        }
         val d = handleDrawable ?: return@Canvas
-        fun drawHandle(box: HandleBox, flipVertically: Boolean) {
+        // 弹簧会出现轻微过冲（v 略大于 1），手柄据此弹一下再落定。
+        val scale = (.55f + .45f * v).coerceIn(0f, 1.25f)
+        // 沿手指位移方向拉长、垂直方向收窄（体积守恒的读感）。
+        // 纯水平拖 → 1+.55p / 1-.22p（旧手感）；纯竖直拖 → 竖直拉长；
+        // 斜拖按 |dx|、|dy| 分量混合。锚点是水滴尖端，所以身体总是拖在指尖后面。
+        val pull = g.dragPull.coerceIn(0f, 1f)
+        val wx = kotlin.math.abs(g.dragDirX).coerceIn(0f, 1f)
+        val wy = kotlin.math.abs(g.dragDirY).coerceIn(0f, 1f)
+        // 粘滞水滴（ViscousDrop）：与标签栏镜片同一套读数——沿运动方向最多拉长
+        // 75%、垂直压 28%，松手后指数衰减（不再一帧切回圆形）。
+        val dirScaleX = ViscousDrop.scaleX(pull * wx, pull * wy)
+        val dirScaleY = ViscousDrop.scaleY(pull * wx, pull * wy)
+        fun drawHandle(box: HandleBox, flipVertically: Boolean, ax: Float, ay: Float) {
+            if (v <= .02f) return
             drawIntoCanvas { canvas ->
                 val native = canvas.nativeCanvas
+                val cx = (box.left + box.right) / 2f
+                // 水滴的「尖」贴着字：起点柄在上方、尖朝下；终点柄在下方、尖朝上。
+                val cy = if (flipVertically) box.bottom else box.top
+                native.save()
+                native.scale(scale * ax, scale * ay, cx, cy)
+                // 用 alpha 让「正浮现的手柄」不靠描边硬出现。
+                val oldAlpha = d.alpha
+                d.alpha = (255 * v.coerceIn(0f, 1f)).toInt()
                 if (flipVertically) {
                     native.save()
                     // Mirror around the handle's own horizontal centre so the
@@ -307,10 +360,24 @@ private fun SelectionOverlay(
                 )
                 d.draw(native)
                 if (flipVertically) native.restore()
+                d.alpha = oldAlpha
+                native.restore()
             }
         }
-        drawHandle(geometry.startHandle, flipVertically = true)
-        drawHandle(geometry.endHandle, flipVertically = false)
+        val dragStart = g.dragSide == 0
+        val dragEnd = g.dragSide == 1
+        drawHandle(
+            g.startHandle,
+            flipVertically = true,
+            ax = if (dragStart) dirScaleX else 1f,
+            ay = if (dragStart) dirScaleY else 1f,
+        )
+        drawHandle(
+            g.endHandle,
+            flipVertically = false,
+            ax = if (dragEnd) dirScaleX else 1f,
+            ay = if (dragEnd) dirScaleY else 1f,
+        )
     }
 }
 
@@ -332,6 +399,8 @@ fun WritingScreen(
     onTodosChange: ((List<Todo>) -> Unit)? = null,
     metaPrefix: String = "",
     noteLinks: NoteLinkUi? = null,
+    /** 笔记所在的笔记夹名：顶栏第一行（用户 2026-11-15 定）。 */
+    noteFolderName: String = "",
     chapterTags: (@Composable () -> Unit)? = null,
     /** Book whose memory supplies name-consistency checks; null for a note. */
     proofBookId: String? = null,
@@ -394,7 +463,9 @@ fun WritingScreen(
     // may be shown, not whether it is already open.
     var floatNotePanel by remember(seedKey) { mutableStateOf(false) }
     // 能力栏（工具 + 符号栏）的展开态：左下角的球收起/展开整块能力栏。
-    var abilityOpen by remember { mutableStateOf(false) }
+    // 2026-11-15 用户要求「展开和关闭要有记忆性」：初值取设置里的 dockOpen
+    // （首次与旧备份默认收起），每次开合写回设置。
+    var abilityOpen by remember { mutableStateOf(settings.dockOpen) }
     val abilityT = remember { Animatable(1f) }
     LaunchedEffect(abilityOpen) {
         abilityT.animateTo(
@@ -402,10 +473,41 @@ fun WritingScreen(
             spring(dampingRatio = .52f, stiffness = 300f),
         )
     }
+    // 记忆：开合一变就写回设置；同值不重写，避免每次进编辑器都落盘。
+    LaunchedEffect(abilityOpen) {
+        store.updateSettings { if (it.dockOpen == abilityOpen) it else it.copy(dockOpen = abilityOpen) }
+    }
     // The editor dock overlays the body instead of sitting below it. The body
     // layer is recorded separately so the dock can sample the real text under
     // its glass, and dockHeight keeps the caret/last line above the dock.
     var dockHeightPx by remember { mutableIntStateOf(0) }
+    // 能力栏的**实际占位**：收起时只剩左下角那个球（0），展开时才是整块高度。
+    // 浮窗让位必须跟这个值，不能直接用 dockHeightPx——收起只是 graphicsLayer 缩放，
+    // 布局高度不变，dockHeightPx 永远是展开时的值，于是「关掉能力栏后浮窗不回位」
+    // （2026-11-15 用户报的第四条）。
+    // 必须 coerce 到 0..1：abilityT 是 spring(.52) 会过冲，收起时会冲到 0 以下，
+    // 乘出来的负 Dp 会让 padding 抛 "Padding must be non-negative" 直接闪退
+    // （2026-11-15 实测崩在 Editor.kt:1588）。
+    val densityNow = androidx.compose.ui.platform.LocalDensity.current
+    val dockReserve = with(densityNow) { dockHeightPx.toDp() } *
+        abilityT.value.coerceIn(0f, 1f)
+    // 章节头收起（2026-11-15 用户定）：收起比例**实时跟着正文滚动量走**（不是过阈值跳变）。
+    // 只有标题正在编辑时保持展开。
+    var bodyScrollY by remember { mutableIntStateOf(0) }
+    var titleFocused by remember { mutableStateOf(false) }
+    val headerRangePx = with(androidx.compose.ui.platform.LocalDensity.current) { 72.dp.roundToPx() }
+    // 2026-11-16 用户最终定：章节头**不再随滚动收起**，固定展开。
+    // 试过的三条路都留了副作用，全部作废：
+    //   ① 标题只缩放 + 正文整块上移 → 底部跟着被抬（用户录屏 1192→1156）；
+    //   ② 标题区真变矮 → 正文容器高度变 → 原生 EditText 重排，历史三次弹跳；
+    //   ③ 正文区向上长（layout 溢出）→ 可视范围确实变大，但溢出量与标题收缩量对不齐，
+    //      正文压到章名上。
+    // 现在一条位移/缩放都不做，所以底部绝对稳定；代价是不再「一屏多两行」。
+    // 保留常量而不是删字段：正文区和标题区都还在读它，删了要牵一串。
+    val chapterCollapse = if (titleFocused) 0f
+    else (bodyScrollY.toFloat() / headerRangePx.coerceAtLeast(1)).coerceIn(0f, 1f)
+    // 标题框的实测高度：用来算正文要往上让多少，纯位移、不改布局。
+    var titleBoxH by remember { mutableIntStateOf(0) }
 
     // A Compose layerBackdrop records Compose draw content only, so it cannot
     // see the native BodyEditText (AndroidView). This backdrop draws the real
@@ -525,11 +627,9 @@ fun WritingScreen(
             ToastBus.show("先选中一段正文再校核")
             return
         }
+        // 2026-11-15 用户定：校核也不限字数。`askAiProof` 本来就按 1500 字切段、
+        // 逐段累加、每段自带 quote，所以整章直接进来就行，不需要在门口拦。
         val text = body.text.substring(a, b)
-        if (text.length > Proofing.MAX_INPUT) {
-            ToastBus.show("这段 " + text.length + " 字，先选到 " + Proofing.MAX_INPUT + " 字以内")
-            return
-        }
         proofText = text
         proofSelection = a to b
         polishMode = false
@@ -612,7 +712,12 @@ fun WritingScreen(
         }
     }
 
-    /** 修饰的 AI 请求：优化描写，出 1–2 个版本，等作者点一个才替换。 */
+    /**
+     * 修饰的 AI 请求：按块切，一块一次请求、一块一张卡。
+     *
+     * 2026-11-14 v3.20.0：和校核同一条流水线（分段读、逐条出卡），但每张卡的
+     * quote 是这一块的原文，采纳只替换它自己那块——所以不再需要 600 字上限。
+     */
     fun askPolish() {
         val key = AiKey.load(context)
         if (!settings.aiEnabled || key.isNullOrBlank()) {
@@ -623,45 +728,63 @@ fun WritingScreen(
         proofBusy = true
         proofError = null
         proofAsked = true
-        val text = proofText
-        val versions = Polishing.versionCount(text.length)
+        val base = proofSelection.first
+        val source = proofText
+        val parts = Polishing.chunks(source)
         scope.launch {
-            val (sys, usr) = Polishing.prompt(text, versions)
-            var r = AiClient.chat(
-                baseUrl = settings.aiBaseUrl,
-                model = settings.aiModel,
-                key = key,
-                temperature = .3f,
-                system = sys,
-                user = usr,
-                maxTokens = if (versions > 1) 6000 else 4000,
-                disableThinking = true,
-            )
-            // 和校核同一个坑：思考模型把预算吃空时 content 为空，再给一次大预算。
-            if (!r.ok && r.error?.contains("空内容") == true) {
-                r = AiClient.chat(
+            var any = false
+            for ((index, part) in parts.withIndex()) {
+                proofStatus = if (parts.size == 1) null
+                    else "正在改第 " + (index + 1) + "/" + parts.size + " 段…"
+                val (sys, usr) = Polishing.prompt(part.text)
+                var r = AiClient.chat(
                     baseUrl = settings.aiBaseUrl,
                     model = settings.aiModel,
                     key = key,
                     temperature = .3f,
                     system = sys,
                     user = usr,
-                    maxTokens = 9000,
+                    maxTokens = 4000,
                     disableThinking = true,
                 )
-            }
-            if (r.ok) {
-                val found = Polishing.parse(r.text, text, settings.indent)
-                proofIssues = found
-                if (found.isEmpty() && proofError == null) ToastBus.show("这段读着已经顺了")
-            } else {
-                proofError = r.error ?: "没拿到结果，再试一次"
+                // 和校核同一个坑：思考模型把预算吃空时 content 为空，再给一次大预算。
+                if (!r.ok && r.error?.contains("空内容") == true) {
+                    r = AiClient.chat(
+                        baseUrl = settings.aiBaseUrl,
+                        model = settings.aiModel,
+                        key = key,
+                        temperature = .3f,
+                        system = sys,
+                        user = usr,
+                        maxTokens = 8000,
+                        disableThinking = true,
+                    )
+                }
+                if (r.ok) {
+                    val found = Polishing.parse(r.text, part.text, settings.indent).map {
+                        it.copy(
+                            start = base + part.start,
+                            end = base + part.start + part.text.length,
+                        )
+                    }
+                    if (found.isNotEmpty()) {
+                        proofIssues = proofIssues + found
+                        any = true
+                    }
+                } else {
+                    // 单块失败就停在这块：已出的卡留着，作者可以先采纳。
+                    proofError = r.error ?: "没拿到结果，再试一次"
+                    break
+                }
             }
             proofBusy = false
+            proofStatus = null
+            if (!any && proofError == null) ToastBus.show("这段读着已经顺了")
         }
     }
 
-    /** 修饰：同一段选区、同一套右侧浮窗，只是换成「顺句」的版本。 */
+    /** 修饰：同一段选区、同一套右侧浮窗，只是换成「顺句」的版本。
+     *  2026-11-14 v3.20.0：不再限字数——按块切、一块一张卡，采纳只换那一块。 */
     fun startPolish() {
         val a = min(body.selection.start, body.selection.end).coerceIn(0, body.text.length)
         val b = max(body.selection.start, body.selection.end).coerceIn(0, body.text.length)
@@ -670,10 +793,6 @@ fun WritingScreen(
             return
         }
         val text = body.text.substring(a, b)
-        if (text.length > Polishing.MAX_INPUT) {
-            ToastBus.show("修饰一次最多 " + Polishing.MAX_INPUT + " 字，先选小一段")
-            return
-        }
         proofText = text
         proofSelection = a to b
         polishMode = true
@@ -691,27 +810,34 @@ fun WritingScreen(
     }
 
     fun acceptProof(issue: ProofIssue) {
-        // 修饰是整段替换：按打开浮窗时记下的区间改。按 quote 搜会在
-        // 同一句出现两次时改错地方。
+        // 修饰：一块一张卡，采纳只替换它自己那块。
+        // 位置优先（同一段出现两次时才分得清）；正文已被前一张卡改过 → 位置旧了，
+        // 退回「全文唯一匹配」；仍不确定就跳过，绝不猜着改。
         if (polishMode) {
-            val (a, b) = proofSelection
             val src = body.text
-            if (b <= a || b > src.length) {
-                proofOpen = false
-                polishMode = false
+            var at = -1
+            if (issue.end > issue.start && issue.end <= src.length &&
+                src.substring(issue.start, issue.end) == issue.quote
+            ) {
+                at = issue.start
+            } else {
+                val first = src.indexOf(issue.quote)
+                if (first >= 0 && src.indexOf(issue.quote, first + 1) < 0) at = first
+            }
+            if (at < 0) {
+                proofIssues = proofIssues - issue
+                ToastBus.show("正文里找不到这一块了，已跳过")
                 return
             }
             val editor = bodyEditor
             if (editor != null) {
-                editor.replaceKeepingViewport(a, b, issue.suggestion)
+                editor.replaceKeepingViewport(at, at + issue.quote.length, issue.suggestion)
             } else {
                 pushUndo()
-                body = body.copy(text = src.replaceRange(a, b, issue.suggestion))
+                body = body.copy(text = src.replaceRange(at, at + issue.quote.length, issue.suggestion))
             }
-            proofOpen = false
-            polishMode = false
-            proofIssues = emptyList()
-            bodyEditor?.collapseSelection()
+            // 浮窗留着：作者可以接着采纳下一块。全采纳完空态会说「没找到可以加强的描写。」。
+            proofIssues = proofIssues - issue
             return
         }
         val src = body.text
@@ -1032,12 +1158,10 @@ fun WritingScreen(
                 .windowInsetsPadding(WindowInsets.ime)
         ) {
             EditorTopBar(
-                heading = heading,
-                meta = buildString {
-                    if (metaPrefix.isNotBlank()) append(metaPrefix).append(" · ")
-                    append(if (isNote) "笔记" else "写作中")
-                    if (pendingTodos > 0) append(" · $pendingTodos 项待办")
-                },
+                // 笔记页：上面一行笔记夹，下面一行笔记名，跟着标题框实时变。
+                heading = if (isNote) title.ifBlank { "无标题笔记" } else heading,
+                crumb = if (isNote) noteFolderName else "",
+                chips = chapterTags,
                 words = words,
                 saved = saved,
                 showWords = settings.showWordCount,
@@ -1077,7 +1201,21 @@ fun WritingScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = settings.pageMargin.dp)
-                        .padding(top = 14.dp, bottom = 4.dp)
+                        // 2026-11-15：整体往上贴——上留白 14→10dp，顶部呼吸靠顶栏本身。
+                        .padding(top = 10.dp, bottom = 2.dp)
+                        // 2026-11-16 用户定：回到「只做视觉缩放」这条老路——
+                        // 布局高度**不动**，标题只按收起比例缩小；让出的空间由下面的
+                        // 正文整块上移来吃（见正文区的 graphicsLayer）。
+                        // 试过的两条岔路都作废：
+                        //   ① 改布局高度真变矮 → 会改正文容器高度 → 原生 EditText 重排 → 滚动被重置；
+                        //   ② 不动正文只补滚动上限 → 位移已经发生，补不出来。
+                        .graphicsLayer {
+                            val s = 1f - .54f * chapterCollapse
+                            scaleX = s
+                            scaleY = s
+                            transformOrigin = TransformOrigin(0f, 0f)
+                        }
+                        .onGloballyPositioned { titleBoxH = it.size.height }
                         .pointerInput(Unit) {
                             awaitEachGesture {
                                 awaitFirstDown(requireUnconsumed = false)
@@ -1088,6 +1226,7 @@ fun WritingScreen(
                             }
                         }
                         .onFocusChanged { state ->
+                            titleFocused = state.isFocused
                             if (state.isFocused) {
                                 // The native body owns a separate selection
                                 // overlay. Tapping the title must end that
@@ -1096,7 +1235,8 @@ fun WritingScreen(
                             }
                         },
                     textStyle = TextStyle(
-                        color = p.ink,
+                        // 颜色跟着收起比例走；字号不变（缩放交给图层，避免重排）。
+                        color = lerp(p.ink, ui.accent, chapterCollapse),
                         fontSize = (bodySize * 1.55f).coerceIn(21f, 38f).sp,
                         fontWeight = FontWeight.SemiBold,
                         fontFamily = fontFamilyFor(settings.font),
@@ -1122,39 +1262,8 @@ fun WritingScreen(
                         }
                     },
                 )
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = settings.pageMargin.dp)
-                        .padding(bottom = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Box(Modifier.size(4.dp).clip(CircleShape).background(ui.accent.copy(alpha = .7f)))
-                    Spacer(Modifier.width(7.dp))
-                    Txt(
-                        if (isNote) "素纸笔记" else heading,
-                        size = 9.5f,
-                        color = p.muted,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Spacer(Modifier.weight(1f))
-                    Txt(
-                        if (saved) "已保存" else "保存中…",
-                        size = 8.5f,
-                        color = p.muted.copy(alpha = .75f),
-                    )
-                }
-                if (chapterTags != null) {
-                    Box(
-                        Modifier
-                            .fillMaxWidth()
-                            .padding(start = settings.pageMargin.dp)
-                            .padding(bottom = 8.dp),
-                    ) {
-                        chapterTags()
-                    }
-                }
+                // 2026-11-15：章节链接 chip 移到顶栏右侧按钮下方（用户定），
+                // 不再占正文上方这一行。
                 // Native EditText is the single scroll/caret/IME owner. Compose's
                 // BasicTextField nested inside a custom viewport caused two scrollers
                 // and a caret that could stop at the dock edge. Android's editor has
@@ -1171,6 +1280,12 @@ fun WritingScreen(
                     Modifier
                         .weight(1f)
                         .fillMaxWidth()
+                        // 2026-11-16 用户定的终版（A）：章名保留缩小动画，正文**一步都不动**。
+                        // 于是章名和正文之间会留出一条空白（标题占位不变、视觉缩小让出的那块），
+                        // 用户明确接受这个留白，换底部绝对稳定。
+                        // 作废的三种：翻译位移（底部被抬）、标题区真变矮（EditText 重排弹跳）、
+                        // 正文 layout 向上长（可视范围确实变大，但溢出量与标题收缩量对不齐，
+                        // 正文压到章名上）。
                 ) {
                 AndroidView(
                     factory = { ctx ->
@@ -1208,7 +1323,11 @@ fun WritingScreen(
                             // empty lambda here made every downward drag on a todo
                             // paragraph get consumed (see ACTION_MOVE) with no effect.
                             onTodoSwipe = null,
-                            onBodyScroll = { bodyScrollTick.intValue++ },
+                            onBodyScroll = {
+                                bodyScrollTick.intValue++
+                                val y = bodyEditor?.scrollY ?: 0
+                                if (y != bodyScrollY) bodyScrollY = y
+                            },
                         ).apply {
                             onProofRequest = { startProof() }
                             background = null
@@ -1220,7 +1339,10 @@ fun WritingScreen(
                             // Text must be able to draw under the dock so the glass can sample it.
                             // The last line still stops above the dock because contentMaxScroll()
                             // adds dockBottomInset back to the scroll range.
-                            dockBottomInset = panelBottomInset + dockHeightPx +
+                            // 底部让位只给**能力栏实际占位**：收起时是 0，展开时才是整块。
+                            // 用未加权的 dockHeightPx 会让 dock 收起后正文底部仍留一块空白。
+                            baseDockInset = panelBottomInset +
+                                (dockHeightPx * abilityT.value.coerceIn(0f, 1f)).toInt() +
                                 with(density) { 6.dp.toPx() }.toInt()
                             setPadding(side.toInt(), 0, side.toInt(), 0)
                             gravity = Gravity.TOP or Gravity.START
@@ -1361,7 +1483,8 @@ fun WritingScreen(
                             (et.selectHandleWidth.div(2f)) +
                                 with(density) { 4.dp.toPx() },
                         )
-                        et.dockBottomInset = et.panelBottomInset + dockHeightPx +
+                        et.baseDockInset = et.panelBottomInset +
+                            (dockHeightPx * abilityT.value.coerceIn(0f, 1f)).toInt() +
                             with(density) { 6.dp.toPx() }.toInt()
                         et.setPadding(side.toInt(), 0, side.toInt(), 0)
                         et.setTextColor(p.ink.toArgb())
@@ -1489,7 +1612,7 @@ fun WritingScreen(
                     // panel cut off instead of riding above the keyboard.
                     modifier = Modifier
                         .fillMaxHeight()
-                        .padding(bottom = with(density) { dockHeightPx.toDp() } + 12.dp),
+                        .padding(bottom = dockReserve + 12.dp),
                 )
             }
             // 校核浮窗：和「本章笔记」同一套右侧浮窗（平卡、20 圆角、标题行、
@@ -1533,7 +1656,7 @@ fun WritingScreen(
                 },
                 modifier = Modifier
                     .fillMaxHeight()
-                    .padding(bottom = with(density) { dockHeightPx.toDp() } + 12.dp),
+                    .padding(bottom = dockReserve + 12.dp),
             )
             }
             Box(
@@ -1559,8 +1682,12 @@ fun WritingScreen(
                             val sx = ball / maxOf(1f, size.width)
                             val sy = ball / maxOf(1f, size.height)
                             val t = abilityT.value
+                            // 粘滞水滴（局部动效档）：两轴走同一条过渡的两个时间点，
+                            // 横向先到、纵向滞后 15% —— 中间帧偏扁宽，读作被拉着长出来，
+                            // 而不是一个四四方方的缩放。内容仍是整体缩放，不会糊。
+                            val tLag = ViscousDrop.lagged(t)
                             scaleX = sx + (1f - sx) * t
-                            scaleY = sy + (1f - sy) * t
+                            scaleY = sy + (1f - sy) * tLag
                             alpha = t
                             transformOrigin = TransformOrigin(0f, 1f)
                         },
@@ -2042,6 +2169,162 @@ private class BodyEditText(
     private var selectionBarActive = false
     private var handleDrag = -1
     private var draggingCaretX: Float? = null
+    // ── 手柄的「水滴」跟随（2026-11-15，同柔曲线）─────────────────────────────
+    // 拖手柄时不给 1:1 硬跟手，而是用 spring(.52, 300) 追手指：起步略滞、拖动中被拉着走、
+    // 松手后过冲一次再落到那个字上。位置只算 x，y 由行决定（跨行时按行跳，不硬凑）。
+    private var handleSpringX = Float.NaN
+    private var handleSpringVel = 0f
+    private var handleSpringTarget = Float.NaN
+    private var handleSpringOn = false
+    private var handleSpringSide = 0
+    private var handleSpringLastAt = 0L
+    /** 被拖那只手柄的水滴形变强度（0 = 原形）与方向（单位向量）。 */
+    private var handleDragPull = 0f
+    private var handleDragDirX = 0f
+    private var handleDragDirY = 0f
+    /** 拖动时手指离开边缘后还要继续滚的方向：-1 上，+1 下，0 停。 */
+    private var autoScrollDir = 0
+    private var autoScrollSpeed = 0f
+    private var lastDragX = 0f
+    private var lastDragY = 0f
+
+    private val handleSpringDriver = object : Runnable {
+        override fun run() {
+            val now = android.os.SystemClock.uptimeMillis()
+            val dt = ((now - handleSpringLastAt).coerceIn(1L, 32L)) / 1000f
+            handleSpringLastAt = now
+            if (autoScrollDir != 0 && handleDrag >= 0) stepAutoScroll(dt)
+            if (!handleSpringOn) return
+            if (handleSpringTarget.isNaN()) {
+                // 目标丢了：别把状态挂在那里（会留下一个僵住的形变）。
+                handleSpringOn = false
+                handleDragPull = 0f
+                return
+            }
+            // 跟手要「紧跟不晃」：k=600、ζ=0.86（c≈42）。0.52 的阻尼拖起来会来回摆，
+            // 用户 2026-11-15 报「晃动太大」——同柔的过冲留给出现/收起，拖拽段不许荡。
+            val k = 600f
+            val c = 42f
+            var steps = (dt / 0.004f).toInt().coerceIn(1, 8)
+            val h = dt / steps
+            while (steps-- > 0) {
+                val f = -k * (handleSpringX - handleSpringTarget) - c * handleSpringVel
+                handleSpringVel += f * h
+                handleSpringX += handleSpringVel * h
+            }
+            // 水滴形变强度：被拉着走的时候按滞后距离/速度算，落在目标上就回到 0。
+            // 方向由手指位移决定（见 ACTION_MOVE），这里只给强度。
+            // 2026-11-15：滞后基准 34dp→24dp、速度 5200→4200，让横向拖也能看出
+            // 形状在变（原来只有竖直拖明显，水平拖几乎读不出）。
+            val px = resources.displayMetrics.density
+            val lag = kotlin.math.abs(handleSpringTarget - handleSpringX)
+            val pull = (lag / (24f * px)).coerceIn(0f, 1f)
+                .coerceAtLeast((kotlin.math.abs(handleSpringVel) / 4200f).coerceIn(0f, 1f))
+            handleDragPull = pull
+            val settled = kotlin.math.abs(handleSpringX - handleSpringTarget) < .5f &&
+                kotlin.math.abs(handleSpringVel) < 10f
+            invalidate()
+            emitGeometry()
+            if (!settled || autoScrollDir != 0) {
+                postOnAnimation(this)
+            } else {
+                handleSpringX = handleSpringTarget
+                handleSpringVel = 0f
+                // 粘滞水滴：落定后形变不立刻归零，按 ViscousDrop 的曲线指数衰减
+                // （一帧切回圆形就只剩「弹」，读不出「粘」）。
+                if (handleDragPull > .004f) {
+                    handleDragPull *= ViscousDrop.decayFor(dt * 1000f)
+                    postOnAnimation(this)
+                } else {
+                    handleDragPull = 0f
+                    handleSpringOn = false
+                    invalidate()
+                    emitGeometry()
+                }
+            }
+        }
+    }
+
+    /** 手柄贴到落点：拖动时每帧调一次，松手后也调一次（目标就是最终那个字）。 */
+    private fun trackHandle(offset: Int) {
+        val g = caretGeom(offset) ?: return
+        handleSpringTarget = g.x
+        if (handleSpringX.isNaN()) handleSpringX = g.x
+        if (!handleSpringOn) {
+            handleSpringOn = true
+            handleSpringLastAt = android.os.SystemClock.uptimeMillis()
+            removeCallbacks(handleSpringDriver)
+            postOnAnimation(handleSpringDriver)
+        }
+    }
+
+    /** 抓住手柄：弹簧从它现在的位置起步，不跳。 */
+    private fun beginHandleDrag(index: Int) {
+        handleDrag = index
+        handleSpringSide = index
+        val box = handleBounds(if (index == 0) selectionStart else selectionEnd)
+        handleSpringX = box?.centerX ?: Float.NaN
+        handleSpringTarget = handleSpringX
+        handleSpringVel = 0f
+        handleSpringOn = false
+        autoScrollDir = 0
+        autoScrollSpeed = 0f
+        handleDragPull = 0f
+        lastDragX = downX
+        lastDragY = downY
+        parent?.requestDisallowInterceptTouchEvent(true)
+        invalidate()
+    }
+
+    private fun resetHandleSpring() {
+        handleSpringOn = false
+        handleSpringX = Float.NaN
+        handleSpringVel = 0f
+        handleSpringTarget = Float.NaN
+        handleDragPull = 0f
+        autoScrollDir = 0
+        autoScrollSpeed = 0f
+        removeCallbacks(handleSpringDriver)
+    }
+
+    /** 拖到正文上/下边缘时自己滚：越靠边越快，滚动时手柄继续跟着手指。 */
+    private fun updateAutoScroll(viewY: Float) {
+        val d = resources.displayMetrics.density
+        val band = 56f * d
+        val top = band
+        val bottom = (height - dockBottomInset - band).coerceAtLeast(top + band)
+        autoScrollDir = when {
+            viewY < top -> -1
+            viewY > bottom -> 1
+            else -> 0
+        }
+        autoScrollSpeed = when (autoScrollDir) {
+            -1 -> ((top - viewY) / band).coerceIn(0f, 1f) * 900f + 300f
+            1 -> ((viewY - bottom) / band).coerceIn(0f, 1f) * 900f + 300f
+            else -> 0f
+        }
+        if (autoScrollDir != 0 && !handleSpringOn) {
+            handleSpringLastAt = android.os.SystemClock.uptimeMillis()
+            handleSpringOn = true
+            postOnAnimation(handleSpringDriver)
+        }
+    }
+
+    private fun stepAutoScroll(dt: Float) {
+        val before = scrollY
+        val next = (scrollY + (autoScrollDir * autoScrollSpeed * dt)).toInt()
+            .coerceIn(0, contentMaxScroll())
+        if (next != before) scrollTo(scrollX, next)
+        // 滚动后手指下面的字变了：重新算端点，选区跟着走。
+        val offset = getOffsetForPosition(lastDragX, lastDragY).coerceIn(0, text.length)
+        val s = selectionStart.coerceAtLeast(0)
+        val e = selectionEnd.coerceAtLeast(0)
+        if (handleDrag == 0 && offset < e) setSelection(offset, e)
+        else if (handleDrag == 1 && offset > s) setSelection(s, offset)
+        trackHandle(if (handleDrag == 0) selectionStart else selectionEnd)
+        emitGeometry()
+        invalidate()
+    }
     var handleColor = 0xFF457F85.toInt()
     private var selectionAnchor = 0
     private var selectionPopup: PopupWindow? = null
@@ -2169,12 +2452,21 @@ private class BodyEditText(
     // where it goes, and the clock that interpolates between the two.
     private val flowFrom = HashMap<Int, FloatArray>()
     private val flowTarget = HashMap<Int, FloatArray>()
+    /** 每个字错开多少（0..1，按离编辑点的行距分 3 带，同柔的带状错落）。 */
+    private val flowLag = HashMap<Int, Float>()
     private var flowLayout: android.text.Layout? = null
     private var flowAnimating = false
     private var flowStartAt = -1L
+    /** 一次替换已经拍过快照，等下一次 layout 再起动画（只起一次）。 */
+    private var flowPending = false
+    /** 替换发生的那一行，用来算带状错落。 */
+    private var flowEditLine = 0
     private companion object {
-        /** Character-flow duration in ms. */
+        /** 主段时长（ms）；带延迟最多再占 18%。 */
         const val FLOW_MS = 300f
+        /** 同柔弹簧：ζ=.52、ω=√300。 */
+        const val FLOW_ZETA = .52f
+        const val FLOW_OMEGA = 17.3205f
         /** Temporary fling diagnostics (both scroll directions). */
         const val INFO_FLING = true
     const val INFO_CARET = false
@@ -2258,7 +2550,11 @@ private class BodyEditText(
     var panelBottomInset = 0
     /** Extra scroll room kept below the last line so it stops above the dock;
      *  the view itself has no bottom padding so body text may draw under it. */
-    var dockBottomInset = 0
+    var baseDockInset = 0
+
+    /** 底部让位：Compose 写入基础量，滚动上限（computeVerticalScrollRange）
+     *  与画光标都实时读它。 */
+    val dockBottomInset: Int get() = baseDockInset
     private var inputLocked = false
 
     fun setInputLocked(locked: Boolean) {
@@ -2567,12 +2863,21 @@ private class BodyEditText(
      * moment a box was ticked. The edited line is already on screen; keep the
      * exact scroll offset instead.
      */
-    fun replaceKeepingViewport(from: Int, to: Int, insert: CharSequence) {
+    fun replaceKeepingViewport(from: Int, to: Int, insert: CharSequence, animate: Boolean = true) {
         val editable = editable() ?: return
         val start = from.coerceIn(0, editable.length)
         val end = to.coerceIn(start, editable.length)
         keepViewportY = scrollY
         keepViewportAt = android.os.SystemClock.uptimeMillis()
+        // 替换前拍一遍字形位置，落地后由 onLayout 起一次「水流」重排（2026-11-15）。
+        // 只在程序改写走这里；打字走的不是这条路，所以打字不会带动画。
+        if (animate && layout != null) {
+            flowEditLine = layout?.getLineForOffset(start) ?: 0
+            captureGlyphPositions()
+            flowPending = true
+        } else {
+            flowPending = false
+        }
         editable.replace(start, end, insert)
     }
 
@@ -2582,7 +2887,7 @@ private class BodyEditText(
         if (start < 0 || start >= editable.length) return
         val next = if (editable[start] == '☑') '☐' else '☑'
         val target = next == '☑'
-        replaceKeepingViewport(start, start + 1, next.toString())
+        replaceKeepingViewport(start, start + 1, next.toString(), animate = false)
         box.syncDone(target)
         box.pulse()
         if (todoHaptics) box.performHaptic()
@@ -2749,6 +3054,12 @@ private class BodyEditText(
             // characters instead of text. The anchor above already keeps the
             // line the reader is on; the wrap itself now lands as a clean relayout.
         }
+        // 程序替换落地：只在这里起一次「水流」重排。历史上把这段放进造宽动画里
+        // 每帧重启，结果几百个字挂在旧位置上散成一片；现在只在替换那一次触发。
+        if (flowPending) {
+            flowPending = false
+            beginFlowIfReady()
+        }
         val loc = IntArray(2)
         getLocationInWindow(loc)
         bodyTopInWindow = loc[1]
@@ -2859,6 +3170,7 @@ private class BodyEditText(
         if (flowFrom.isEmpty()) return
         val l = layout ?: return
         flowTarget.clear()
+        flowLag.clear()
         var moved = false
         for ((index, from) in flowFrom) {
             if (index >= (text?.length ?: 0)) continue
@@ -2866,6 +3178,8 @@ private class BodyEditText(
             val x = l.getPrimaryHorizontal(index) + paddingLeft
             val y = l.getLineBaseline(line).toFloat() + paddingTop
             flowTarget[index] = floatArrayOf(x, y)
+            // 带状错落：离编辑点越远，起跑越晚（0 / .06 / .12 / .18）。
+            flowLag[index] = ((line - flowEditLine) / 2).coerceIn(0, 3) * .06f
             if (abs(x - from[0]) > 0.5f || abs(y - from[1]) > 0.5f) moved = true
         }
         if (!moved) {
@@ -2878,20 +3192,37 @@ private class BodyEditText(
         invalidate()
     }
 
-    private fun flowProgress(): Float {
-        if (flowStartAt < 0L) flowStartAt = android.os.SystemClock.uptimeMillis()
-        val t = ((android.os.SystemClock.uptimeMillis() - flowStartAt) / FLOW_MS).coerceIn(0f, 1f)
-        // Ease-out so characters arrive softly instead of snapping at the end.
-        return 1f - (1f - t) * (1f - t)
+    /**
+     * 同柔落位曲线：欠阻尼阶跃响应（ζ=.52、ω=√300），会过冲一次再收回，
+     * 和项目里 spring(.52, 300) 同一套参数，落点回到 1。
+     */
+    private fun flowSpringAt(elapsedMs: Float): Float {
+        val t = (elapsedMs / 1000f).coerceAtLeast(0f)
+        val wd = FLOW_OMEGA * kotlin.math.sqrt(1f - FLOW_ZETA * FLOW_ZETA)
+        val e = kotlin.math.exp(-FLOW_ZETA * FLOW_OMEGA * t)
+        return 1f - e * (
+            kotlin.math.cos(wd * t) + (FLOW_ZETA * FLOW_OMEGA / wd) * kotlin.math.sin(wd * t)
+            )
     }
 
-    private fun drawFlowingText(canvas: Canvas, progress: Float) {
+    /** 主时钟：返回已经过去的毫秒数（延迟算在各字身上）。 */
+    private fun flowElapsed(): Float {
+        if (flowStartAt < 0L) flowStartAt = android.os.SystemClock.uptimeMillis()
+        return (android.os.SystemClock.uptimeMillis() - flowStartAt).toFloat()
+    }
+
+    /** 全部跑完（含最晚那条带）就收工。 */
+    private fun flowDone(elapsed: Float): Boolean = elapsed >= FLOW_MS * 1.25f
+
+    private fun drawFlowingText(canvas: Canvas, elapsed: Float) {
         val textValue = text ?: return
         canvas.save()
         canvas.translate(0f, -scrollY.toFloat())
         for ((index, from) in flowFrom) {
             if (index >= textValue.length) continue
             val to = flowTarget[index] ?: continue
+            val lag = flowLag[index] ?: 0f
+            val progress = flowSpringAt(elapsed - lag * FLOW_MS).coerceIn(0f, 1.12f)
             val x = from[0] + (to[0] - from[0]) * progress
             val y = from[1] + (to[1] - from[1]) * progress
             canvas.drawText(textValue, index, index + 1, x, y, paint)
@@ -2922,6 +3253,7 @@ private class BodyEditText(
     }
 
     override fun onDetachedFromWindow() {
+        resetHandleSpring()
         clearSelectionMenu()
         super.onDetachedFromWindow()
     }
@@ -2994,6 +3326,7 @@ private class BodyEditText(
         selectionBarActive = false
         selectionMenuActive = false
         handleDrag = -1
+        resetHandleSpring()
         invalidate()
         emitGeometry()
     }
@@ -3199,7 +3532,16 @@ private class BodyEditText(
     }
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        // 高度随章节头实时收起而变化时，TextView 会把光标 bring 回视口、
+        // 整页被拽回顶部（2026-11-15 实测「滚不动 + 光标跳回开头」）。
+        // 记住旧的 scrollY，布局落定后放回去。
+        val keepScroll = scrollY
         super.onSizeChanged(w, h, oldw, oldh)
+        if (oldh > 0 && h != oldh && !caretScrollPending && keepScroll > 0) {
+            pendingRestoreY = keepScroll
+            anchorGuardUntil = android.os.SystemClock.uptimeMillis() + 400L
+            post { scrollTo(0, keepScroll.coerceIn(0, contentMaxScroll())) }
+        }
         // One correction after the resize stops, never one per frame: following
         // the keyboard frame by frame is what made the page crawl for 300 ms.
         if (caretScrollPending && h != oldh) {
@@ -3340,6 +3682,47 @@ private class BodyEditText(
         }
     }
 
+    /**
+     * 长按选中一个词（2026-11-15 用户定：「先选一个词，再拖」）。
+     *
+     * 以前按标点切，长句会一下吞一大块（用户报「选中的范围不对」）。改成走系统的
+     * 词边界：中文一次给 2–4 个字的词，落在标点上就退到相邻的词。拖手柄再扩句。
+     */
+    private fun wordRangeAt(offset: Int): Pair<Int, Int> {
+        val value = text?.toString() ?: return offset to offset
+        val len = value.length
+        if (len == 0) return 0 to 0
+        val at = offset.coerceIn(0, len - 1)
+        val delimiters = "，。！？；：、,.!?;:\n\"'“”‘’（）()【】[] \t　"
+        val word = runCatching {
+            val it = android.icu.text.BreakIterator.getWordInstance(java.util.Locale.CHINESE)
+            it.setText(value)
+            var s = it.preceding(at + 1)
+            var e = it.following(at + 1)
+            if (s < 0) s = 0
+            if (e <= s) e = (at + 1).coerceAtMost(len)
+            // 手指落在标点/空白上：词是一个符号，退到它前面那个真词。
+            val token = value.substring(s, e)
+            if (token.all { it in delimiters }) {
+                val ps = it.preceding(s)
+                if (ps >= 0 && ps < s) {
+                    val pe = s
+                    s = ps
+                    e = pe
+                }
+            }
+            s to e
+        }.getOrNull()
+        var (start, end) = word ?: (at to (at + 1).coerceAtMost(len))
+        if (end <= start) {
+            start = at.coerceAtMost(len - 1)
+            end = (start + 1).coerceAtMost(len)
+        }
+        // 兜底：ICU 偶尔把一个长串当单词，收着点，最多 12 字。
+        if (end - start > 12) end = start + 12
+        return start.coerceIn(0, len) to end.coerceIn(0, len)
+    }
+
     private fun performLongPress() {
         android.util.Log.d("SelDebug", "performLongPress drag=$dragging consumed=$longPressConsumed")
         if (dragging || longPressConsumed) return
@@ -3347,15 +3730,7 @@ private class BodyEditText(
         val len = value.length
         if (len == 0) return
         val offset = getOffsetForPosition(downX, downY).coerceIn(0, len)
-        val delimiters = "，。！？；：、,.!?;:\n\"'“”‘’（）()【】[] \t"
-        var start = offset.coerceAtMost(len - 1)
-        var end = offset.coerceAtMost(len)
-        while (start > 0 && value[start - 1] !in delimiters) start--
-        while (end < len && value[end] !in delimiters) end++
-        if (start == end) {
-            start = offset.coerceAtMost(len - 1)
-            end = (start + 1).coerceAtMost(len)
-        }
+        val (start, end) = wordRangeAt(offset)
         selectionAnchor = start
         setSelection(start, end)
         isCursorVisible = true
@@ -3393,8 +3768,11 @@ private class BodyEditText(
         }
         val sg = caretGeom(s) ?: return
         val eg = caretGeom(e) ?: return
-        val sb = buildHandleBox(sg.x, sg.top, sg.bottom, above = true) ?: return
-        val eb = buildHandleBox(eg.x, eg.top, eg.bottom, above = false) ?: return
+        // 手柄可以落后于真实边界（水滴被拉着走），竖线永远画在真位置上。
+        val sx = if (handleSpringOn && !handleSpringX.isNaN() && handleSpringSide == 0) handleSpringX else sg.x
+        val ex = if (handleSpringOn && !handleSpringX.isNaN() && handleSpringSide == 1) handleSpringX else eg.x
+        val sb = buildHandleBox(sx, sg.top, sg.bottom, above = true) ?: return
+        val eb = buildHandleBox(ex, eg.top, eg.bottom, above = false) ?: return
         onGeometry?.invoke(
             SelectionGeometry(
                 startCaretX = sg.x,
@@ -3406,6 +3784,12 @@ private class BodyEditText(
                 endBottom = eg.bottom,
                 endHandle = eb,
                 active = true,
+                // 形变只在「手指还按着手柄」时存在：松手后位置继续弹到落点，
+                // 但形状立刻归位，否则会留下一个被压扁的水滴（2026-11-15 实测）。
+                dragSide = if (handleSpringOn && handleDrag >= 0) handleSpringSide else -1,
+                dragPull = if (handleDrag >= 0) handleDragPull else 0f,
+                dragDirX = handleDragDirX,
+                dragDirY = handleDragDirY,
             ),
         )
     }
@@ -3423,11 +3807,13 @@ private class BodyEditText(
         val d = resources.displayMetrics.density
         val gap = 5f * d
         val left = x - w / 2f
+        // 不再钳进正文容器：选到第一行时手柄本来会坐到文字上（用户报「被挤压、上端位置不对」）。
+        // 允许画到正文上边界之外，由整页浮层接住它。
         val top = if (above) {
             caretTop - h - gap
         } else {
             caretBottom + gap
-        }.coerceIn(0f, (height - h).coerceAtLeast(0).toFloat())
+        }
         return HandleBox(left, top, left + w, top + h)
     }
 
@@ -3462,12 +3848,36 @@ private class BodyEditText(
         invalidate()
     }
 
+    /**
+     * 让光标马上可见（2026-11-15，用户报「光标莫名其妙消失」）。
+     *
+     * 以前各处只写 `isCursorVisible = true`，不重绘；自绘光标的闪烁循环一旦在
+     * 某次早退里停掉，就得等下一次打字/滚动把它叫醒——看起来就是「光标没了」。
+     * 统一走这一个入口：置可见 + 650ms 常亮 + 立刻重绘。
+     */
+    fun revealCaret() {
+        isCursorVisible = true
+        markCaretActive()
+    }
+
     private fun drawSelfCursor(canvas: Canvas) {
-        if (!hasFocus() || !isCursorVisible || selectionStart != selectionEnd) return
-        val layout = layout ?: return
+        // 早退也要排下一次重绘：闪烁循环停摆后没有任何东西能把它叫醒，
+        // 这是「滑动/打字后光标一直不亮」的另一半根因。只在还有焦点时续排，
+        // 免得失焦的编辑器每 500ms 空跑一次。
+        if (!hasFocus() || !isCursorVisible || selectionStart != selectionEnd) {
+            if (hasFocus() && isAttachedToWindow) postInvalidateDelayed(500L)
+            return
+        }
+        val layout = layout ?: run {
+            if (isAttachedToWindow) postInvalidateDelayed(120L)
+            return
+        }
         val offset = selectionStart.coerceIn(0, layout.text.length)
         val line = layout.getLineForOffset(offset)
-        val step = paperLineStep.takeIf { it > 0f } ?: return
+        val step = paperLineStep.takeIf { it > 0f } ?: run {
+            if (isAttachedToWindow) postInvalidateDelayed(120L)
+            return
+        }
         val fm = paint.fontMetrics
         val gap = ((step - (fm.descent - fm.ascent)) * .35f)
             .coerceIn(2f * resources.displayMetrics.density, 6f * resources.displayMetrics.density)
@@ -3508,18 +3918,19 @@ private class BodyEditText(
             // re-wrap reads as flowing text instead of a jump. The caret is not
             // drawn during this window: it would otherwise sit still while its
             // own character slides away from it.
-            val progress = flowProgress()
-            if (progress >= 1f) {
+            val elapsed = flowElapsed()
+            if (flowDone(elapsed)) {
                 flowAnimating = false
                 super.onDraw(canvas)
+                drawSelfCursor(canvas)
             } else {
-                drawFlowingText(canvas, progress)
+                drawFlowingText(canvas, elapsed)
                 postInvalidateOnAnimation()
             }
         } else {
             super.onDraw(canvas)
+            drawSelfCursor(canvas)
         }
-        drawSelfCursor(canvas)
         // Selection carets/handles are drawn by SelectionOverlay, outside the
         // TextView's scroll transform.
     }
@@ -3615,7 +4026,8 @@ private class BodyEditText(
                     )
                     if (a != null && b != null) {
                         val d = resources.displayMetrics.density
-                        val pad = 24f * d
+                        // 命中区 24dp → 40dp：手柄视觉大小不变，但手指偏 1–2 毫米也抓得住。
+                        val pad = 40f * d
                         // handleBounds is in layout/content coordinates. MotionEvent
                         // y is in view coordinates, so add scrollY back before hit
                         // testing; otherwise an IME scroll makes the handles unhittable.
@@ -3626,33 +4038,27 @@ private class BodyEditText(
                             event.x >= r.left - pad && event.x <= r.right + pad &&
                                 hitY >= r.top - pad && hitY <= r.bottom + pad
                         if (hit(a)) {
-                            handleDrag = 0
-                            android.util.Log.d("SelDebug", "HIT start")
-                            parent?.requestDisallowInterceptTouchEvent(true)
+                            beginHandleDrag(0)
                             return true
                         }
                         if (hit(b)) {
-                            handleDrag = 1
-                            android.util.Log.d("SelDebug", "HIT end")
-                            parent?.requestDisallowInterceptTouchEvent(true)
+                            beginHandleDrag(1)
                             return true
                         }
                         val ac = PointF(a.centerX, a.centerY)
                         val bc = PointF(b.centerX, b.centerY)
-                        val halfW = 44f * d
+                        val halfW = 52f * d
                         val above = 64f * d
                         val below = 72f * d
                         fun hitCenter(c: PointF): Boolean =
                             kotlin.math.abs(event.x - c.x) <= halfW &&
                                 event.y >= c.y - above && event.y <= c.y + below
                         if (hitCenter(ac)) {
-                            handleDrag = 0
-                            parent?.requestDisallowInterceptTouchEvent(true)
+                            beginHandleDrag(0)
                             return true
                         }
                         if (hitCenter(bc)) {
-                            handleDrag = 1
-                            parent?.requestDisallowInterceptTouchEvent(true)
+                            beginHandleDrag(1)
                             return true
                         }
                         // A tap inside the selected paragraph should grab the
@@ -3667,11 +4073,11 @@ private class BodyEditText(
                             val top = minOf(sg.top, eg.top) - 10f * d
                             val bottom = maxOf(sg.bottom, eg.bottom) + below
                             if (event.x in minX..maxX && hitY in top..bottom) {
-                                handleDrag = if (
+                                val near = if (
                                     kotlin.math.hypot(event.x - ac.x, event.y - ac.y) <
                                     kotlin.math.hypot(event.x - bc.x, event.y - bc.y)
                                 ) 0 else 1
-                                parent?.requestDisallowInterceptTouchEvent(true)
+                                beginHandleDrag(near)
                                 return true
                             }
                         }
@@ -3727,12 +4133,29 @@ private class BodyEditText(
             }
             MotionEvent.ACTION_MOVE -> {
                 if (handleDrag >= 0) {
-                    android.util.Log.d("SelDebug", "MOVE drag=$handleDrag ${event.x},${event.y}")
                     val offset = getOffsetForPosition(event.x, event.y).coerceIn(0, text.length)
-                    val s = selectionStart.coerceAtLeast(0)
-                    val e = selectionEnd.coerceAtLeast(0)
-                    if (handleDrag == 0) setSelection(minOf(offset, e), maxOf(offset, e))
-                    else setSelection(minOf(s, offset), maxOf(s, offset))
+                    var s = selectionStart.coerceAtLeast(0)
+                    var e = selectionEnd.coerceAtLeast(0)
+                    // 拖过另一端：把手柄身份换到手指这一侧，而不是让手指「抓空」。
+                    if (handleDrag == 0 && offset > e) handleDrag = 1
+                    else if (handleDrag == 1 && offset < s) handleDrag = 0
+                    s = selectionStart.coerceAtLeast(0)
+                    e = selectionEnd.coerceAtLeast(0)
+                    if (handleDrag == 0) setSelection(minOf(offset, e).coerceAtLeast(0), maxOf(offset, e))
+                    else setSelection(minOf(s, offset), maxOf(s, offset).coerceAtMost(text.length))
+                    lastDragX = event.x
+                    lastDragY = event.y
+                    // 水滴往手指走的方向拉长。方向用「相对按下点的位移」算，
+                    // 比逐帧位移稳（逐帧抖动会让形变左右乱晃）。
+                    val dragDx = event.x - downX
+                    val dragDy = event.y - downY
+                    val dragLen = kotlin.math.hypot(dragDx, dragDy)
+                    if (dragLen > 2f) {
+                        handleDragDirX = dragDx / dragLen
+                        handleDragDirY = dragDy / dragLen
+                    }
+                    updateAutoScroll(event.y)
+                    trackHandle(if (handleDrag == 0) selectionStart else selectionEnd)
                     draggingCaretX = event.x.coerceIn(0f, width.toFloat())
                     invalidate()
                     return true
@@ -3810,6 +4233,9 @@ private class BodyEditText(
                 dragging = false
                 removeCallbacks(longPressRunnable)
                 if (handleDrag >= 0) {
+                    // 松手：弹簧继续把手柄送到最后一个字上（过冲一次），自动滚停下。
+                    autoScrollDir = 0
+                    autoScrollSpeed = 0f
                     handleDrag = -1
                     draggingCaretX = null
                     parent?.requestDisallowInterceptTouchEvent(false)
@@ -3837,8 +4263,7 @@ private class BodyEditText(
                         requestFocus()
                         // DOWN hid the caret; a tap that edits the text must not
                         // leave the body without one until the next touch.
-                        isCursorVisible = true
-                        markCaretActive()
+                        revealCaret()
                         return true
                     }
                     val offset = getOffsetForPosition(event.x, event.y).coerceIn(0, text.length)
@@ -3848,7 +4273,7 @@ private class BodyEditText(
                         event.y <= reminderBand.second + touchSlop
                     ) {
                         activeTodoAt(offset)?.let { onReminderTap?.invoke(it) }
-                        isCursorVisible = true
+                        revealCaret()
                         return true
                     }
                 }
@@ -3859,7 +4284,7 @@ private class BodyEditText(
                 todoSwipeConsumed = false
                 if (swipedTodo) {
                     parent?.requestDisallowInterceptTouchEvent(false)
-                    isCursorVisible = true
+                    revealCaret()
                     return true
                 }
                 if (tappedTodo != null && !wasDragging &&
@@ -3870,21 +4295,22 @@ private class BodyEditText(
                     tappedTodo.click()
                     // Ticking a box rewrites the line; the caret used to stay
                     // hidden (DOWN hid it) until the next tap in the body.
-                    isCursorVisible = true
-                    markCaretActive()
+                    revealCaret()
                     return true
                 }
                 if (wasDragging) {
-                    isCursorVisible = false
                     cancelLongPress()
                     val cancel = MotionEvent.obtain(event)
                     cancel.action = MotionEvent.ACTION_CANCEL
                     super.onTouchEvent(cancel)
                     cancel.recycle()
                     startFling(-vy)
+                    // 滚动结束必须把光标请回来：以前这里只置 hidden，之后没人恢复，
+                    // 滑完光标就一直不亮（用户 2026-11-15 报「滑动的时候也是」）。
+                    revealCaret()
                     return true
                 }
-                isCursorVisible = true
+                revealCaret()
                 val moved = kotlin.math.abs(event.y - downY) > 2f
                 // A small move is a scroll attempt, not a tap. Letting super
                 // handle it can start a native long-press/selection and jump the
@@ -3940,13 +4366,35 @@ private class BodyEditText(
                 todoSwipeConsumed = false
                 parent?.requestDisallowInterceptTouchEvent(false)
                 removeCallbacks(longPressRunnable)
+                handleDrag = -1
+                // 手势被上层抢走（例如换到别的页面）：弹簧与自动滚一起停，
+                // 恢复到按下之前的光标状态，而且必须重绘。
+                resetHandleSpring()
                 isCursorVisible = downCursorVisible
+                invalidate()
                 velocity?.recycle()
                 velocity = null
                 return super.onTouchEvent(event)
             }
         }
         return super.onTouchEvent(event)
+    }
+
+    /**
+     * 焦点回来时把光标重新点亮。
+     *
+     * 浮窗 / 标题 / 别的控件把焦点抢走一次之后，闪烁循环早就停在早退里；
+     * 光靠「下次打字」叫醒就是用户看到的「莫名其妙消失」。
+     */
+    override fun onFocusChanged(focused: Boolean, direction: Int, previouslyFocusedRect: Rect?) {
+        super.onFocusChanged(focused, direction, previouslyFocusedRect)
+        if (focused) revealCaret()
+    }
+
+    override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
+        super.onWindowFocusChanged(hasWindowFocus)
+        // 从别的应用切回来：窗口焦点恢复，光标应当立刻在。
+        if (hasWindowFocus && hasFocus()) revealCaret()
     }
 
     private fun startFling(velocityY: Float) {
@@ -4043,7 +4491,6 @@ private class BodyEditText(
 @Composable
 private fun EditorTopBar(
     heading: String,
-    meta: String,
     words: Int,
     saved: Boolean,
     showWords: Boolean,
@@ -4051,81 +4498,107 @@ private fun EditorTopBar(
     onToggleIndent: () -> Unit,
     onBack: () -> Unit,
     onMore: () -> Unit,
+    /** 笔记所在笔记夹。笔记页两行：夹名在上、笔记名在下（2026-11-15 用户定）。 */
+    crumb: String = "",
+    /** 章节链接 chip，放在右侧按钮下方（用户定）。 */
+    chips: (@Composable () -> Unit)? = null,
     /** When set, this bar reports its heading position as the landing point of
      *  the note card that opened this editor. */
     flightKey: String? = null,
 ) {
     val ui = LocalInk.current
     val p = ui.palette
-    Row(
+    Column(
         Modifier
             .fillMaxWidth()
             .background(p.paper)
             .clipToBounds()
             .statusBarsPadding()
-            .padding(horizontal = 12.dp, vertical = 7.dp),
-        verticalAlignment = Alignment.CenterVertically,
+            // 顶栏压薄（7→4dp）：整页上移，但保留基本呼吸。
+            .padding(horizontal = 12.dp, vertical = 4.dp),
     ) {
-        // Solid paper back button: a GlassSurface here could be captured at the
-        // wrong size during the editor push and leave a white rounded ghost.
-        Box(
-            Modifier
-                .size(40.dp)
-                .clip(CircleShape)
-                .background(p.paper)
-                .bouncy { onBack() },
-            contentAlignment = Alignment.Center,
-        ) {
-            LineIcon(Glyph.Back, p.ink, 21.dp)
-        }
-        Spacer(Modifier.width(10.dp))
-        Column(Modifier.weight(1f)) {
-            Txt(
-                heading,
-                modifier = if (flightKey != null) {
-                    Modifier
-                        .onGloballyPositioned { Flight.land(flightKey, it) }
-                        .alpha(if (Flight.isCarrying(flightKey)) 0f else 1f)
-                } else {
-                    Modifier
-                },
-                size = 12.5f,
-                weight = FontWeight.Medium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Spacer(Modifier.height(2.dp))
-            Txt(meta, size = 8.5f, color = p.muted, maxLines = 1)
-        }
-        if (showWords) {
-            Row(
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            // Solid paper back button: a GlassSurface here could be captured at
+            // the wrong size during the editor push and leave a white rounded ghost.
+            Box(
                 Modifier
+                    .size(40.dp)
                     .clip(CircleShape)
-                    .background(p.faint)
-                    .padding(horizontal = 10.dp, vertical = 5.dp),
-                verticalAlignment = Alignment.CenterVertically,
+                    .background(p.paper)
+                    .bouncy { onBack() },
+                contentAlignment = Alignment.Center,
             ) {
-                AnimatedContent(
-                    targetState = saved,
-                    transitionSpec = { fadeIn(tween(200)) togetherWith fadeOut(tween(140)) },
-                    label = "saved",
-                ) { isSaved ->
-                    Box(Modifier.size(4.dp).clip(CircleShape).background(if (isSaved) Color(0xFF4D8A64) else ui.accent))
-                }
-                Spacer(Modifier.width(5.dp))
-                Txt("$words", size = 9.5f, color = p.muted, weight = FontWeight.Medium)
+                LineIcon(Glyph.Back, p.ink, 21.dp)
             }
-            Spacer(Modifier.width(6.dp))
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                if (crumb.isNotBlank()) {
+                    Txt(
+                        crumb,
+                        size = 9.5f,
+                        color = p.muted,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Spacer(Modifier.height(1.dp))
+                }
+                Txt(
+                    heading,
+                    modifier = if (flightKey != null) {
+                        Modifier
+                            .onGloballyPositioned { Flight.land(flightKey, it) }
+                            .alpha(if (Flight.isCarrying(flightKey)) 0f else 1f)
+                    } else {
+                        Modifier
+                    },
+                    size = 12.5f,
+                    weight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (showWords) {
+                Row(
+                    Modifier
+                        .clip(CircleShape)
+                        .background(p.faint)
+                        .padding(horizontal = 10.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    AnimatedContent(
+                        targetState = saved,
+                        transitionSpec = { fadeIn(tween(200)) togetherWith fadeOut(tween(140)) },
+                        label = "saved",
+                    ) { isSaved ->
+                        Box(Modifier.size(4.dp).clip(CircleShape).background(if (isSaved) Color(0xFF4D8A64) else ui.accent))
+                    }
+                    Spacer(Modifier.width(5.dp))
+                    Txt("$words", size = 9.5f, color = p.muted, weight = FontWeight.Medium)
+                }
+                Spacer(Modifier.width(6.dp))
+            }
+            GlassIconButton(
+                Glyph.Indent,
+                onToggleIndent,
+                size = 40.dp,
+                tint = if (indentOn) ui.accent else p.muted,
+                strength = .45f,
+            )
+            Spacer(Modifier.width(5.dp))
+            GlassIconButton(Glyph.More, onMore, size = 40.dp, strength = .45f)
         }
-        GlassIconButton(
-            Glyph.Indent,
-            onToggleIndent,
-            size = 40.dp,
-            tint = if (indentOn) ui.accent else p.muted,
-            strength = .45f,
-        )
-        Spacer(Modifier.width(5.dp))
-        GlassIconButton(Glyph.More, onMore, size = 40.dp, strength = .45f)
+        if (chips != null) {
+            // 呼吸：chip 行与右侧按钮之间留 8dp、与底边留 6dp。
+            // 2026-11-15 用户点名：贴按钮太紧，以后同类位置都要留一点空隙。
+            Spacer(Modifier.height(8.dp))
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+            ) {
+                chips()
+            }
+            Spacer(Modifier.height(6.dp))
+        }
     }
 }
 
@@ -4704,6 +5177,9 @@ fun NoteEditorScreen(
     var pendingMenuAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     val pending = note.todos.count { !it.done }
     val chapterRefs = store.data.noteChapterRefs(note)
+    val folderName = note.groupId?.let { id ->
+        store.noteGroups.firstOrNull { it.id == id }?.name
+    } ?: "未归类"
 
     Box(Modifier.fillMaxSize()) {
         WritingScreen(
@@ -4713,6 +5189,7 @@ fun NoteEditorScreen(
             initialContent = note.content,
             placeholder = "随便写。灵感、片段、今天没说完的话。",
             isNote = true,
+            noteFolderName = folderName,
             inputBlocked = menuOpen || chapterSheetOpen,
             chapterTags = if (chapterRefs.isEmpty()) null else {
                 {
@@ -4767,9 +5244,9 @@ fun NoteEditorScreen(
                 })
                 RowDivider()
                 SettingRow(
-                    "移动到分组",
-                    store.noteGroups.firstOrNull { it.id == note.groupId }?.name ?: "未分组",
-                    Glyph.Layers,
+                    "移动到笔记夹",
+                    store.noteGroups.firstOrNull { it.id == note.groupId }?.name ?: "未归类",
+                    Glyph.Folder,
                     onClick = {
                         pendingMenuAction = { groupPickerOpen = true }
                         close()
@@ -4787,8 +5264,7 @@ fun NoteEditorScreen(
     }
 
     if (groupPickerOpen) {
-        GroupPickerSheet(
-            kind = GroupKind.NOTE,
+        NoteFolderPickerSheet(
             current = note.groupId,
             store = store,
             onSelect = { group -> store.setNoteGroup(note.id, group) },
