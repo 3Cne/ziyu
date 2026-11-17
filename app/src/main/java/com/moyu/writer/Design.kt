@@ -1790,6 +1790,9 @@ fun ConfirmDialog(
 @Composable
 fun InlineModalSheet(
     onDismiss: () -> Unit,
+    /** 面板底色。默认是「纸 + 4% 反色」的卡片色；整块留白为主的面板传 `palette.paper`，
+     *  让它和 `SheetPane` 铺的纸底完全同色，否则内容区会显成一块更暗的矩形。 */
+    tone: Color? = null,
     content: @Composable ColumnScope.(close: () -> Unit) -> Unit,
 ) {
     val ui = LocalInk.current
@@ -1905,6 +1908,7 @@ fun InlineModalSheet(
                     radius = sheetCorner,
                     shape = panelShape,
                     flat = true,
+                    tone = tone,
                 ) {
                     Column(
                         Modifier
@@ -1943,6 +1947,10 @@ fun SheetPane(
     content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit,
 ) {
     val ui = LocalInk.current
+    // 面板内每一层都铺自己的纸底，否则横向切换时两层文字会互相透（3.26.12）。
+    // 注意：这里的纸色比承载它的 MoyuSurface(flat) 暗 4%，所以**只适合内容自带卡片**
+    // 的面板；整块都是留白的「故事」面板要由调用方把 surface 调成同一个纸色
+    // （InlineModalSheet 的 tone 参数），否则会出现一块比面板暗的矩形（用户读作「灰框」）。
     Column(
         Modifier
             .fillMaxWidth()

@@ -72,7 +72,9 @@ fun StorySheet(
     val bible = book.bible
     var tab by remember { mutableIntStateOf(0) }
 
-    InlineModalSheet(onDismiss) { close ->
+    // 这张面板整块是留白（关系图占了大半），所以 surface 也铺纸色：
+    // 与 SheetPane 的纸底同色，中间那块「灰框」才消失，而卡片仍是卡片色。
+    InlineModalSheet(onDismiss, tone = LocalInk.current.palette.paper) { close ->
         DialogTitle(
             "故事",
             subtitle = "${bible.characters.size} 位角色 · ${bible.relations.size} 条关系 · " +
