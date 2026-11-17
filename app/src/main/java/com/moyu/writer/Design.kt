@@ -1951,6 +1951,89 @@ fun SheetPane(
     )
 }
 
+/**
+ * 元素重组图标：同一批线段在两个形态之间线性插值。
+ *
+ * 用户 2026-11-17 录屏里那种「按一下，原来有的元素重新组合变成另一种按钮」：
+ * 不是换图标，而是线段从形态 A 的位置、角度直接走到形态 B 的位置。
+ * 两组线段数量不等时，多出来的那条从中心淡入/淡出（alpha 由 progress 驱动）。
+ * 归一化坐标（0..1）铺满传入的 modifier 尺寸。
+ *
+ * 判定「符合标准」：按钮有**两种形态**（不是选中/未选中）。单态按钮、
+ * TabBar 镜片、InkToggle 不套这个（它们已有 `SelectMark` 的选中动画）。
+ */
+data class MorphStroke(
+    val x1: Float,
+    val y1: Float,
+    val x2: Float,
+    val y2: Float,
+)
+
+@Composable
+fun MorphIcon(
+    progress: Float,
+    a: List<MorphStroke>,
+    b: List<MorphStroke>,
+    modifier: Modifier = Modifier,
+    color: Color,
+    strokeWidthDp: Float = 1.7f,
+) {
+    Canvas(modifier) {
+        val t = progress.coerceIn(0f, 1f)
+        val sw = strokeWidthDp.dp.toPx()
+        val w = size.width
+        val h = size.height
+        val n = maxOf(a.size, b.size)
+        for (i in 0 until n) {
+            val sa = a.getOrNull(i)
+            val sb = b.getOrNull(i)
+            // 缺哪一侧，就用另一侧的位置当起点/终点，配合 alpha 让它原地淡入/淡出。
+            val ax1 = sa?.x1 ?: sb!!.x1
+            val ay1 = sa?.y1 ?: sb!!.y1
+            val ax2 = sa?.x2 ?: sb!!.x2
+            val ay2 = sa?.y2 ?: sb!!.y2
+            val bx1 = sb?.x1 ?: ax1
+            val by1 = sb?.y1 ?: ay1
+            val bx2 = sb?.x2 ?: ax2
+            val by2 = sb?.y2 ?: ay2
+            val alpha = when {
+                sa == null -> t
+                sb == null -> 1f - t
+                else -> 1f
+            }
+            if (alpha <= .01f) continue
+            val sx = (ax1 + (bx1 - ax1) * t) * w
+            val sy = (ay1 + (by1 - ay1) * t) * h
+            val ex = (ax2 + (bx2 - ax2) * t) * w
+            val ey = (ay2 + (by2 - ay2) * t) * h
+            drawLine(
+                color = color.copy(alpha = color.alpha * alpha),
+                start = Offset(sx, sy),
+                end = Offset(ex, ey),
+                strokeWidth = sw,
+                cap = StrokeCap.Round,
+            )
+        }
+    }
+}
+
+/** 「∨」收成两条斜线。 */
+val MorphChevronDown = listOf(
+    MorphStroke(.24f, .40f, .50f, .62f),
+    MorphStroke(.50f, .62f, .76f, .40f),
+)
+
+/** 键盘：外框四边 + 三个键点。前两条与 [MorphChevronDown] 配对做变形，其余淡入。 */
+val MorphKeyboard = listOf(
+    MorphStroke(.20f, .34f, .20f, .72f),
+    MorphStroke(.80f, .72f, .80f, .34f),
+    MorphStroke(.20f, .72f, .80f, .72f),
+    MorphStroke(.80f, .34f, .20f, .34f),
+    MorphStroke(.30f, .47f, .40f, .47f),
+    MorphStroke(.46f, .47f, .56f, .47f),
+    MorphStroke(.38f, .60f, .62f, .60f),
+)
+
 @Composable
 fun ModalSheet(
     onDismiss: () -> Unit,

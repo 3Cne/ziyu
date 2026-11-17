@@ -513,7 +513,7 @@ fun LibraryScreen(
         GroupManagerSheet(GroupKind.BOOK, store) { groupManagerOpen = false }
     }
     if (controlsOpen) {
-        ModalSheet(onDismiss = { controlsOpen = false }) {
+        InlineModalSheet(onDismiss = { controlsOpen = false }) { _ ->
             DialogTitle("书架筛选与排布", "布局、分栏和分组集中在这里。", onClose = { controlsOpen = false })
             Spacer(Modifier.height(14.dp))
             Txt("排布", size = 10f, color = LocalInk.current.palette.muted)

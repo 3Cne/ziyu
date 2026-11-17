@@ -496,8 +496,9 @@ fun WritingScreen(
         val editor = bodyEditor ?: return@LaunchedEffect
         // 用点击那一刻记下的位置，不读当前 scrollY（可能已被重排清零）。
         val keep = abilityScrollKeep
+        android.util.Log.d("MOYU_JUMP", "keep=$keep editorY=${editor.scrollY}")
         val target = if (abilityOpen) 1f else 0f
-        var settle = 6
+        var settle = 40
         while (settle > 0) {
             withFrameNanos { }
             if (editor.scrollY != keep) editor.scrollTo(0, keep)
@@ -1784,12 +1785,12 @@ fun WritingScreen(
                         // 3.26.11：先记住当前滚动位置，再翻状态。
                         // 3.26.9 只翻状态、由钉住 effect 每帧守住，但 effect 启动时
                         // 读到的 scrollY 已经被重排清零（滚到后段时必现回顶）。
-                        abilityScrollKeep = bodyScrollY
+                        abilityScrollKeep = maxOf(bodyScrollY, bodyEditor?.scrollY ?: 0)
                         abilityOpen = false
                     },
                     onSymbol = { insertRaw(it) },
                     onExpand = {
-                        abilityScrollKeep = bodyScrollY
+                        abilityScrollKeep = maxOf(bodyScrollY, bodyEditor?.scrollY ?: 0)
                         abilityOpen = true
                     },
                     selectionMode = body.selection.start != body.selection.end,
@@ -1843,15 +1844,24 @@ fun WritingScreen(
                         .clip(SmoothCorner(11.dp))
                         .background(dockTone(ui))
                         .bouncy {
-                            abilityScrollKeep = bodyScrollY
+                            abilityScrollKeep = maxOf(bodyScrollY, bodyEditor?.scrollY ?: 0)
                             abilityOpen = !abilityOpen
                         },
                     contentAlignment = Alignment.Center,
                 ) {
-                    LineIcon(
-                        if (abilityOpen) Glyph.ChevronDown else Glyph.Keyboard,
-                        p.ink,
-                        18.dp,
+                    // 3.26.13：球的两态（键盘 / ∨）不再换图标，改成线段重组
+                    // （用户 2026-11-17 点名的那种动效）。
+                    val morphT by animateFloatAsState(
+                        targetValue = if (abilityOpen) 1f else 0f,
+                        animationSpec = spring(dampingRatio = .52f, stiffness = 420f),
+                        label = "ballMorph",
+                    )
+                    MorphIcon(
+                        progress = morphT,
+                        a = MorphKeyboard,
+                        b = MorphChevronDown,
+                        modifier = Modifier.size(18.dp),
+                        color = p.ink,
                     )
                 }
             }
@@ -4983,7 +4993,7 @@ private fun TypographySheet(store: AppStore, onDismiss: () -> Unit) {
     val ui = LocalInk.current
     val s = ui.settings
     val themes = listOf("paper" to "纸白", "mist" to "雾灰", "white" to "纯白", "sepia" to "茶褐", "night" to "夜黑")
-    ModalSheet(onDismiss) {
+    InlineModalSheet(onDismiss) { _ ->
         DialogTitle("排版", "改动会立刻作用到编辑器和提笔的手感。", onClose = onDismiss)
         Spacer(Modifier.height(16.dp))
         MoyuSurface(Modifier.fillMaxWidth(), radius = 20f, flat = true) {
@@ -5424,7 +5434,7 @@ fun TodoSheet(store: AppStore, noteId: String, onDismiss: () -> Unit) {
         ToastBus.show(if (todo.remindAt != null) "待办已添加，提醒已设置" else "待办已添加")
     }
 
-    ModalSheet(onDismiss, imeAware = true) {
+    InlineModalSheet(onDismiss) { _ ->
         DialogTitle("待办与提醒", "和正文一起保存，到点会在手机上提醒。", onClose = onDismiss)
         Spacer(Modifier.height(15.dp))
         Row(verticalAlignment = Alignment.Bottom) {

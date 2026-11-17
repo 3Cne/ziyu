@@ -145,7 +145,7 @@ fun GroupManagerSheet(
     var deleteTarget by remember { mutableStateOf<Group?>(null) }
     val label = if (kind == GroupKind.BOOK) "书籍分组" else "笔记分组"
 
-    ModalSheet(onDismiss = onDismiss, imeAware = true) {
+    InlineModalSheet(onDismiss) { _ ->
         DialogTitle(
             if (creating) "新建分组" else if (editing != null) "编辑分组" else label,
             if (creating || editing != null) "名字和颜色随时可以再改。" else "点分组可改名、换色、排序；删除只移回未分组。",
@@ -278,7 +278,7 @@ fun GroupPickerSheet(
             body()
         }
     } else {
-        ModalSheet(onDismiss = onDismiss) {
+        InlineModalSheet(onDismiss) { _ ->
             DialogTitle("移动到分组", subtitle, onClose = onDismiss)
             Spacer(Modifier.height(12.dp))
             body()

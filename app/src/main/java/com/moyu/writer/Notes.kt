@@ -556,7 +556,7 @@ fun NoteFolderScreen(
         }
     }
     if (controlsOpen) {
-        ModalSheet(onDismiss = { controlsOpen = false }) {
+        InlineModalSheet(onDismiss = { controlsOpen = false }) { _ ->
             DialogTitle("筛选与排布", "状态和布局集中在这里。", onClose = { controlsOpen = false })
             Spacer(Modifier.height(14.dp))
             Txt("状态", size = 10f, color = p.muted)

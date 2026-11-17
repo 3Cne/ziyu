@@ -119,16 +119,18 @@ internal fun Modifier.liquidGlassBar(
             drawRect(tint)
             if (veil > 0f) drawRect(paperVeil)
             if (edgeStrength > 0f) {
-                // 3.26.9：1 型玻璃的边缘反射带加宽、提亮（用户报「不够明显、很窄」）。
-                // 只对玻璃条生效；镜片与开关的小圆仍用默认 4.6dp——它们尺寸小，
+                // 3.26.13：再放宽一档（用户第二次报「太窄，根本看不出来」）。
+                // 6.4dp 在 1220px 宽的条上只有 ~17px，而且 blur 3.2 把它糊平了，
+                // 读不出玻璃厚度。现在 11dp + blur 5.5 让带成为一条看得见的光，
+                // 亮度拉到 1.5。镜片与开关的小圆仍用默认 4.6dp——它们尺寸小，
                 // 跟着加宽会糊成厚边框。
                 glassEdgeBand(
                     shape,
                     palette,
                     edgeStrength,
-                    bandDp = 6.4f,
-                    blurDp = 3.2f,
-                    brightness = 1.25f,
+                    bandDp = 11f,
+                    blurDp = 5.5f,
+                    brightness = 1.5f,
                 )
             }
         },
@@ -153,8 +155,10 @@ internal fun androidx.compose.ui.graphics.drawscope.DrawScope.glassEdgeBand(
     val s = strength.coerceIn(0f, 1f)
     if (s <= 0f) return
     val b = brightness.coerceIn(0f, 1.6f)
-    val topAlpha = ((if (palette.isDark) .16f else .40f) * s * b).coerceIn(0f, 1f)
-    val bottomAlpha = ((if (palette.isDark) .08f else .10f) * s * b).coerceIn(0f, 1f)
+    // 3.26.14：深色主题下这条带几乎看不见（暗底 + 白 0.16×1.5 = 0.24）。
+    // 两端都抬一档：深色 .26 / .12，浅色 .48 / .12。
+    val topAlpha = ((if (palette.isDark) .26f else .48f) * s * b).coerceIn(0f, 1f)
+    val bottomAlpha = ((if (palette.isDark) .12f else .12f) * s * b).coerceIn(0f, 1f)
     val hairline = (bandDp / 4.6f * 1.1f).dp
     val outline = shape.createOutline(size, layoutDirection, this)
     val path = Path().apply { addOutline(outline) }
