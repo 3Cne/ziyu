@@ -487,37 +487,72 @@ fun NoteFolderScreen(
 
     if (menuNote != null) {
         val note = notes.firstOrNull { it.id == menuNote!!.id } ?: menuNote!!
-        ModalSheet(onDismiss = { menuNote = null }) {
-            DialogTitle(note.title, "${formatWords(note.words)} 字 · ${relativeTime(note.updatedAt)}", onClose = { menuNote = null })
-            Spacer(Modifier.height(13.dp))
-            SettingRow("打开笔记", "继续写正文", Glyph.Edit, onClick = {
-                menuNote = null
-                onOpenNote(note.id)
-            })
-            RowDivider()
-            SettingRow("固定到顶部", if (note.pinned) "已固定" else "按更新时间排序", Glyph.Pin, trailing = {
-                InkToggle(note.pinned) { on -> store.updateNote(note.id) { it.copy(pinned = on) } }
-            })
-            RowDivider()
-            SettingRow(
-                "移动到笔记夹",
-                store.noteGroups.firstOrNull { it.id == note.groupId }?.name ?: "未归类",
-                Glyph.Folder,
-                onClick = {
-                    menuNote = null
-                    folderPickerNote = note
+        // 3.26.10：笔记菜单 → 移动到笔记夹 / 导出笔记 收进同一个面板，
+        // 横向弹簧切换；关闭时再执行删除（居中 Dialog）。
+        var level by remember(note.id) { mutableIntStateOf(0) }
+        var pending by remember(note.id) { mutableStateOf<(() -> Unit)?>(null) }
+        InlineModalSheet(onDismiss = {
+            menuNote = null
+            val action = pending
+            pending = null
+            action?.invoke()
+        }) { close ->
+            AnimatedContent(
+                targetState = level,
+                transitionSpec = {
+                    val forward = targetState > initialState
+                    (slideInHorizontally(spring(MOYU_DAMPING, 380f)) { w ->
+                        if (forward) w / 3 else -w / 3
+                    } + fadeIn(tween(140))) togetherWith
+                        (slideOutHorizontally(spring(MOYU_DAMPING, 380f)) { w ->
+                            if (forward) -w / 3 else w / 3
+                        } + fadeOut(tween(110)))
                 },
-            )
-            RowDivider()
-            SettingRow("导出笔记", "TXT / Markdown / JSON", Glyph.Export, onClick = {
-                menuNote = null
-                exportingNote = note
-            })
-            RowDivider()
-            SettingRow("删除笔记", "正文和待办会一并删除", Glyph.Trash, onClick = {
-                menuNote = null
-                deleteNote = note
-            })
+                label = "noteSheet",
+            ) { step ->
+                when (step) {
+                    0 -> Column(Modifier.fillMaxWidth()) {
+                        DialogTitle(note.title, "${formatWords(note.words)} 字 · ${relativeTime(note.updatedAt)}", onClose = { close() })
+                        Spacer(Modifier.height(13.dp))
+                        SettingRow("打开笔记", "继续写正文", Glyph.Edit, onClick = {
+                            pending = { onOpenNote(note.id) }
+                            close()
+                        })
+                        RowDivider()
+                        SettingRow("固定到顶部", if (note.pinned) "已固定" else "按更新时间排序", Glyph.Pin, trailing = {
+                            InkToggle(note.pinned) { on -> store.updateNote(note.id) { it.copy(pinned = on) } }
+                        })
+                        RowDivider()
+                        SettingRow(
+                            "移动到笔记夹",
+                            store.noteGroups.firstOrNull { it.id == note.groupId }?.name ?: "未归类",
+                            Glyph.Folder,
+                            onClick = { level = 1 },
+                        )
+                        RowDivider()
+                        SettingRow("导出笔记", "TXT / Markdown / JSON", Glyph.Export, onClick = { level = 2 })
+                        RowDivider()
+                        SettingRow("删除笔记", "正文和待办会一并删除", Glyph.Trash, onClick = {
+                            pending = { deleteNote = note }
+                            close()
+                        })
+                    }
+                    1 -> NoteFolderPickerSheet(
+                        current = note.groupId,
+                        store = store,
+                        onSelect = { group -> store.setNoteGroup(note.id, group) },
+                        onDismiss = { close() },
+                        embedded = true,
+                        onBack = { level = 0 },
+                    )
+                    else -> NoteExportSheet(
+                        note = note,
+                        onDismiss = { close() },
+                        embedded = true,
+                        onBack = { level = 0 },
+                    )
+                }
+            }
         }
     }
     if (controlsOpen) {
@@ -540,17 +575,6 @@ fun NoteFolderScreen(
             }
             Spacer(Modifier.height(10.dp))
         }
-    }
-    exportingNote?.let { note ->
-        NoteExportSheet(note, onDismiss = { exportingNote = null })
-    }
-    folderPickerNote?.let { note ->
-        NoteFolderPickerSheet(
-            current = note.groupId,
-            store = store,
-            onSelect = { group -> store.setNoteGroup(note.id, group) },
-            onDismiss = { folderPickerNote = null },
-        )
     }
     if (deleteNote != null) {
         val note = deleteNote!!
@@ -577,12 +601,13 @@ internal fun NoteFolderPickerSheet(
     store: AppStore,
     onSelect: (String?) -> Unit,
     onDismiss: () -> Unit,
+    /** true = 作为「笔记菜单 → 移动」同框层级的第二层画在面板里。 */
+    embedded: Boolean = false,
+    onBack: (() -> Unit)? = null,
 ) {
     val ui = LocalInk.current
     val p = ui.palette
-    ModalSheet(onDismiss = onDismiss) {
-        DialogTitle("移动到笔记夹", "笔记只能在一个夹里。", onClose = onDismiss)
-        Spacer(Modifier.height(12.dp))
+    val body: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit = {
         Row(
             Modifier
                 .fillMaxWidth()
@@ -611,6 +636,19 @@ internal fun NoteFolderPickerSheet(
                 Txt(g.name, size = 14f, weight = FontWeight.Medium, modifier = Modifier.weight(1f))
                 if (current == g.id) LineIcon(Glyph.Check, p.ink, 16.dp)
             }
+        }
+    }
+    if (embedded) {
+        Column(Modifier.fillMaxWidth()) {
+            SheetPageHeader("移动到笔记夹", "笔记只能在一个夹里。", onBack ?: onDismiss)
+            Spacer(Modifier.height(12.dp))
+            body()
+        }
+    } else {
+        ModalSheet(onDismiss = onDismiss) {
+            DialogTitle("移动到笔记夹", "笔记只能在一个夹里。", onClose = onDismiss)
+            Spacer(Modifier.height(12.dp))
+            body()
         }
     }
 }

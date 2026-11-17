@@ -1356,20 +1356,33 @@ fun BookDetailScreen(
     }
     if (chapterMenu != null) {
         val chapter = chapterMenu!!
-        ModalSheet(onDismiss = { chapterMenu = null }) {
-            DialogTitle(chapter.title, "${formatWords(countWords(chapter.content))} 字 · ${relativeTime(chapter.updatedAt)}", onClose = { chapterMenu = null })
+        // 3.26.10：章节菜单改用同窗口面板，进出与笔记夹/书籍菜单同一套。
+        // 重命名与删除是居中 Dialog，等面板退场后再开（pending）。
+        var pending by remember(chapter.id) { mutableStateOf<(() -> Unit)?>(null) }
+        InlineModalSheet(onDismiss = {
+            chapterMenu = null
+            val action = pending
+            pending = null
+            action?.invoke()
+        }) { close ->
+            DialogTitle(
+                chapter.title,
+                "${formatWords(countWords(chapter.content))} 字 · ${relativeTime(chapter.updatedAt)}",
+                onClose = { close() },
+            )
             Spacer(Modifier.height(12.dp))
             SettingRow("重命名章节", "目录和电子书会同步更新", Glyph.Edit, onClick = {
-                chapterMenu = null
-                renameChapter = chapter
+                pending = { renameChapter = chapter }
+                close()
             })
             RowDivider()
             SettingRow("删除章节", "这一章正文会一并删除", Glyph.Trash, onClick = {
-                chapterMenu = null
                 if (book.chapters.size <= 1) {
                     ToastBus.show("至少保留一章，可以先新建一章")
+                    close()
                 } else {
-                    deleteChapter = chapter
+                    pending = { deleteChapter = chapter }
+                    close()
                 }
             })
         }

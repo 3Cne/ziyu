@@ -469,13 +469,13 @@ fun WritingScreen(
     var abilityOpen by remember { mutableStateOf(settings.dockOpen) }
     val abilityT = remember { Animatable(1f) }
     LaunchedEffect(abilityOpen) {
-        // 3.26.9：临界阻尼（1f）——展开/收起到位就停，不再回弹。
-        // 3.26.8 及以前是 spring(.52, 300)，到位置后还要过冲再弹回来，
-        // 用户读作「到了既定位置还在晃」。粘滞读数由 ViscousDrop.lagged(t)
-        // 的两轴时间差给出，不依赖 spring 的过冲，所以阻尼改 1 不丢形变。
+        // 3.26.10：改成 300ms 的 tween。上一版用临界阻尼 spring(1f, 300f)：
+        // 不过冲、但尾部极长——最后 5% 要爬 200ms 以上，能力栏的 alpha 直接
+        // 等于 t，于是整块在「发灰」里停一下才变实（用户读作「顿一下」）。
+        // tween 有确定的结束点，形变仍由 ViscousDrop.lagged(t) 给出。
         abilityT.animateTo(
             if (abilityOpen) 1f else 0f,
-            spring(dampingRatio = 1f, stiffness = 300f),
+            tween(durationMillis = 300, easing = androidx.compose.animation.core.FastOutSlowInEasing),
         )
     }
     // 记忆：开合一变就写回设置；同值不重写，避免每次进编辑器都落盘。

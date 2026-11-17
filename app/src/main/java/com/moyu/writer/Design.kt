@@ -1828,16 +1828,11 @@ fun InlineModalSheet(
         topStart = sheetCorner.dp,
         topEnd = sheetCorner.dp,
     )
-    val scrimAlpha by animateFloatAsState(
-        targetValue = if (visibleState.targetState) {
-            if (ui.palette.isDark) .38f else .22f
-        } else {
-            0f
-        },
-        animationSpec = spring(MOYU_DAMPING, 520f),
-        visibilityThreshold = .002f,
-        label = "inlineSheetScrim",
-    )
+    // 3.26.10：关闭时遮罩立即撤掉，不等任何动画。
+    // 试过 tween(180) 与 Animatable：实测关掉后背景仍按 ~0.9s 衰减，
+    // 说明压在页面上的暗来自面板退出这一程本身（低阻尼滑出 + 阴影）。
+    // 遮罩是「压暗」，不是面板的一部分——它先消失，面板继续滑出即可。
+    val scrimAlpha = if (closing) 0f else if (ui.palette.isDark) .38f else .22f
     // 3.26.9：进出那一程的粘滞形变（与 ModalSheet 共用同一组数）。
     // 面板往上走时纵向被拉长一点，停稳回到 1；数值是 t 的函数，落位一定精确。
     val sheetShape by animateFloatAsState(
@@ -1959,16 +1954,8 @@ fun ModalSheet(
     LaunchedEffect(closing, visibleState.isIdle, visibleState.currentState) {
         if (closing && visibleState.isIdle && !visibleState.currentState) onDismiss()
     }
-    val scrimAlpha by animateFloatAsState(
-        targetValue = if (visibleState.targetState) {
-            if (ui.palette.isDark) .38f else .22f
-        } else {
-            0f
-        },
-        animationSpec = spring(MOYU_DAMPING, 520f),
-        visibilityThreshold = .002f,
-        label = "modalSheetScrim",
-    )
+    // 与 InlineModalSheet 一致：关闭瞬间撤掉遮罩。
+    val scrimAlpha = if (closing) 0f else if (ui.palette.isDark) .38f else .22f
     val sheetShape by animateFloatAsState(
         targetValue = if (visibleState.targetState) 1f else 0f,
         animationSpec = spring(MOYU_DAMPING, 320f),

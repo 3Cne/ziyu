@@ -658,15 +658,20 @@ private fun SaveAsButton(result: ExportResult) {
 }
 
 @Composable
-fun NoteExportSheet(note: Note, onDismiss: () -> Unit) {
+fun NoteExportSheet(
+    note: Note,
+    onDismiss: () -> Unit,
+    /** true = 作为「笔记菜单 → 导出」同框层级的第二层画在面板里。 */
+    embedded: Boolean = false,
+    onBack: (() -> Unit)? = null,
+) {
     val ui = LocalInk.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var format by remember { mutableStateOf("txt") }
     var busy by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<ExportResult?>(null) }
-    ModalSheet(onDismiss) {
-        DialogTitle("导出笔记", "正文和待办会一起写进文件。", onClose = onDismiss)
+    val body: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit = {
         Spacer(Modifier.height(16.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
             FormatCard("TXT", "纯文本 · 最通用", Glyph.Note, format == "txt", Modifier.weight(1f)) {
@@ -717,6 +722,17 @@ fun NoteExportSheet(note: Note, onDismiss: () -> Unit) {
             }
         }
         Spacer(Modifier.height(12.dp))
+    }
+    if (embedded) {
+        Column(Modifier.fillMaxWidth()) {
+            SheetPageHeader("导出笔记", "正文和待办会一起写进文件。", onBack ?: onDismiss)
+            body()
+        }
+    } else {
+        ModalSheet(onDismiss) {
+            DialogTitle("导出笔记", "正文和待办会一起写进文件。", onClose = onDismiss)
+            body()
+        }
     }
 }
 

@@ -91,6 +91,7 @@ import androidx.compose.foundation.shape.CircleShape
 import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import com.kyant.backdrop.backdrops.layerBackdrop
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
@@ -2099,7 +2100,13 @@ private fun ChatPane(
                         )
                     }
                     val e = if (pressed != null) menuEmphasis.value else 0f
-                    val s = 1f - .03f * e
+                    // 3.26.10：长文本跳过景深后退。整块缩 3% 再让被按下的那条
+                    // 反向放大 1/0.97，长气泡里的文字在缩放层里会「抽动」一下
+                    // （用户报「长按长文本时文本范围会抽动」）。短文本保留景深。
+                    val longPressed = pressed != null &&
+                        pressed.height > paneSize.height * LongBubbleFraction
+                    val sr = if (longPressed) 0f else e
+                    val s = 1f - .03f * sr
                     scaleX = s
                     scaleY = s
                 },
@@ -2195,7 +2202,11 @@ private fun ChatPane(
                                         (focus.y - item.top) / item.height,
                                     )
                                 }
-                                val s = 1f - .03f * menuEmphasis.value
+                                // 长文本父层不做景深（见 LazyColumn 的 graphicsLayer），
+                                // 这里也不再反向放大，两边保持 1:1，文字不经过缩放层。
+                                val longItem = (rowRects[msg.id]?.height ?: 0f) >
+                                    paneSize.height * LongBubbleFraction
+                                val s = if (longItem) 1f else 1f - .03f * menuEmphasis.value
                                 if (s > 0f) {
                                     scaleX = 1f / s
                                     scaleY = 1f / s
@@ -2848,6 +2859,13 @@ private fun ChatPane(
             if (listState.isScrollInProgress) closeMenu()
         }
         val menuAnchor = anchorId
+        // 3.26.10：菜单是页面内的层，root 的 TabBar 画在它之上；菜单存活期间
+        // 收起 TabBar，否则菜单底部会被玻璃条盖住、点不到。
+        val suppressBar = LocalSheetSuppressed.current
+        DisposableEffect(menuAnchor != null) {
+            suppressBar(menuAnchor != null)
+            onDispose { suppressBar(false) }
+        }
         val menuRect = menuAnchor?.let { rowRects[it] }
         if (menuAnchor != null && menuRect != null && menuRect.height > 0f) {
             val gap = with(density) { 8.dp.toPx() }
@@ -2872,7 +2890,15 @@ private fun ChatPane(
             val visualCenterX = focus.x + (menuRect.center.x - focus.x) * (1f + grow)
             val below = visualBottom - paneOrigin.y + gap
             val above = visualTop - paneOrigin.y - gap - menuH
-            val y = if (paneSize.height > 0 && below + menuH > paneSize.height) above.coerceAtLeast(0f) else below
+            // 3.26.10：下边界是**输入栏的顶边**，不是 pane 的底边。
+            // pane 含输入区，用 paneSize.height 判断时菜单会落进输入栏后面，
+            // 被输入栏和 TabBar 盖住（用户报「长按菜单有时会被盖住」）。
+            val inputTop = paneSize.height - with(density) { bottomGap.toPx() }
+            val y = if (paneSize.height > 0 && below + menuH > inputTop - gap) {
+                above.coerceAtLeast(0f)
+            } else {
+                below
+            }
             // 横向菜单以气泡中心为准，再夹在面板内。
             val x = (visualCenterX - paneOrigin.x - menuW / 2f)
                 .coerceIn(0f, (paneSize.width - menuW).coerceAtLeast(0f))
