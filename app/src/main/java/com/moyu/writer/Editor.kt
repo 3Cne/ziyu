@@ -488,22 +488,15 @@ fun WritingScreen(
     LaunchedEffect(abilityOpen) {
         store.updateSettings { if (it.dockOpen == abilityOpen) it else it.copy(dockOpen = abilityOpen) }
     }
-    // 3.26.9：展开/收起期间把正文滚动位置钉住。
-    // 底部让位（baseDockInset）跟着 abilityT 每帧变，TextView 每次重排都会把
-    // 光标 bringIntoView；光标停在开头时整页会瞬间回顶——用户报的就是这个。
-    // 每帧校正一次，动画到位后再多钉 6 帧，压住收尾那次重排。
+    // 3.26.15：钉子挪进 BodyEditText.scrollTo（armScrollPin）。
+    // 3.26.9–3.26.13 用的是这里的每帧循环：它最早下一帧才跑，而那一帧的
+    // 原生重排已经把 scrollY 拉回 0 并画出去了，所以还剩「闪一下」。
+    // 现在点击处先 arm，这一层只做兜底与取证日志。
     LaunchedEffect(abilityOpen) {
         val editor = bodyEditor ?: return@LaunchedEffect
-        // 用点击那一刻记下的位置，不读当前 scrollY（可能已被重排清零）。
         val keep = abilityScrollKeep
         android.util.Log.d("MOYU_JUMP", "keep=$keep editorY=${editor.scrollY}")
-        val target = if (abilityOpen) 1f else 0f
-        var settle = 40
-        while (settle > 0) {
-            withFrameNanos { }
-            if (editor.scrollY != keep) editor.scrollTo(0, keep)
-            settle = if (kotlin.math.abs(abilityT.value - target) <= .002f) settle - 1 else 6
-        }
+        editor.armScrollPin(keep)
     }
     // The editor dock overlays the body instead of sitting below it. The body
     // layer is recorded separately so the dock can sample the real text under
@@ -1783,14 +1776,15 @@ fun WritingScreen(
                     },
                     onCollapse = {
                         // 3.26.11：先记住当前滚动位置，再翻状态。
-                        // 3.26.9 只翻状态、由钉住 effect 每帧守住，但 effect 启动时
-                        // 读到的 scrollY 已经被重排清零（滚到后段时必现回顶）。
+                        // 3.26.15：同时把钉子装进 view，重排当帧就生效。
                         abilityScrollKeep = maxOf(bodyScrollY, bodyEditor?.scrollY ?: 0)
+                        bodyEditor?.armScrollPin(abilityScrollKeep)
                         abilityOpen = false
                     },
                     onSymbol = { insertRaw(it) },
                     onExpand = {
                         abilityScrollKeep = maxOf(bodyScrollY, bodyEditor?.scrollY ?: 0)
+                        bodyEditor?.armScrollPin(abilityScrollKeep)
                         abilityOpen = true
                     },
                     selectionMode = body.selection.start != body.selection.end,
@@ -1845,6 +1839,7 @@ fun WritingScreen(
                         .background(dockTone(ui))
                         .bouncy {
                             abilityScrollKeep = maxOf(bodyScrollY, bodyEditor?.scrollY ?: 0)
+                            bodyEditor?.armScrollPin(abilityScrollKeep)
                             abilityOpen = !abilityOpen
                         },
                     contentAlignment = Alignment.Center,
@@ -2612,6 +2607,17 @@ private class BodyEditText(
      */
     private var keepViewportY = -1
     private var keepViewportAt = 0L
+    /**
+     * 能力栏开合期间要钉住的可视位置，-1 表示没有钉。
+     *
+     * 为什么必须在 view 里、而不是 Compose 的每帧循环里：开合会改 `baseDockInset`
+     * （底部让位），TextView 跟着重排，`onLayout` 里的 bringPointIntoView 会把
+     * 光标拉进视野——光标停在开头时就是整页回顶。Compose 的 `withFrameNanos`
+     * 最早也要下一帧才执行，而那一帧的布局已经跑完并且画出去了，于是「闪一下」。
+     * 这里在 system 调 `scrollTo` 的那一刻就把落点换掉，第 0 帧就落不了地。
+     */
+    private var pinScrollY = -1
+    private var pinUntil = 0L
     private var todoSwipeConsumed = false
     private var lastTodoDeleteAt = 0L
 
@@ -3607,11 +3613,32 @@ private class BodyEditText(
         // inset settles.
     }
 
+    /**
+     * 开合能力栏前由 Editor 调用：钉住当前可视位置。
+     *
+     * 时限只覆盖开合动画（300ms）与收尾那次重排；下一次按下立刻解钉，
+     * 所以它永远拦不到读者自己的滚动。
+     */
+    fun armScrollPin(y: Int, holdMs: Long = 700L) {
+        pinScrollY = y.coerceAtLeast(0)
+        pinUntil = android.os.SystemClock.uptimeMillis() + holdMs
+        if (scrollY != pinScrollY) scrollTo(scrollX, pinScrollY)
+    }
+
     private fun contentMaxScroll(): Int =
         (computeVerticalScrollRange() - computeVerticalScrollExtent() + dockBottomInset)
             .coerceAtLeast(0)
 
     override fun scrollTo(x: Int, y: Int) {
+        // 能力栏开合：重排会把 scrollY 拉回 0，这里当场换回钉住的位置。
+        // 夹取只在 contentMaxScroll() 已经算得出来时才做——重排最早那一两次
+        // 调用里它可能还是 0，直接 coerce 会把位置按到页首，正好是要修的那个 bug。
+        val pin = pinScrollY
+        if (pin >= 0 && android.os.SystemClock.uptimeMillis() < pinUntil && y != pin) {
+            val max = contentMaxScroll()
+            super.scrollTo(x, if (max > 0) pin.coerceIn(0, max) else pin)
+            return
+        }
         // A local body edit (ticking a box, writing a reminder line) must not
         // move the page, but TextView defers the caret bring to onPreDraw and
         // flushes it a frame or two after the edit. Hold the offset until the
@@ -4049,6 +4076,7 @@ private class BodyEditText(
             MotionEvent.ACTION_DOWN -> {
                 // A new gesture owns the scroll from here on.
                 keepViewportY = -1
+                pinScrollY = -1
                 removeCallbacks(flingDriver)
                 if (selectionBarActive) {
                     val a = handleBounds(selectionStart.coerceAtLeast(0))
