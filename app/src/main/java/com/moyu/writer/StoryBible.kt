@@ -149,15 +149,7 @@ private fun CharacterPane(book: Book, onBible: (BookBible) -> Unit) {
             onPick = { pick(it) },
             modifier = Modifier.fillMaxWidth().height(240.dp),
         )
-        if (bible.relations.isEmpty()) {
-            Spacer(Modifier.height(4.dp))
-            Txt(
-                "点下面的「加关系」，把两个人连起来",
-                size = 11f,
-                color = ui.palette.muted,
-                modifier = Modifier.fillMaxWidth(),
-            )
-        } else {
+        if (bible.relations.isNotEmpty()) {
             Spacer(Modifier.height(6.dp))
             RelationLegend()
         }
