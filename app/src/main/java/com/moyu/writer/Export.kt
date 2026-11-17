@@ -512,7 +512,13 @@ fun openExport(context: Context, result: ExportResult) {
 }
 
 @Composable
-fun ExportSheet(book: Book, onDismiss: () -> Unit) {
+fun ExportSheet(
+    book: Book,
+    onDismiss: () -> Unit,
+    /** true = 作为「菜单 → 导出」同框层级的第二层画在面板里（带返回箭头）。 */
+    embedded: Boolean = false,
+    onBack: (() -> Unit)? = null,
+) {
     val ui = LocalInk.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -520,8 +526,7 @@ fun ExportSheet(book: Book, onDismiss: () -> Unit) {
     var synopsis by remember { mutableStateOf(true) }
     var busy by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<ExportResult?>(null) }
-    ModalSheet(onDismiss) {
-        DialogTitle("导出书籍", "目录、章节名和封面都会写进文件。", onClose = onDismiss)
+    val body: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit = {
         Spacer(Modifier.height(16.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
             FormatCard(
@@ -617,6 +622,17 @@ fun ExportSheet(book: Book, onDismiss: () -> Unit) {
             }
         }
         Spacer(Modifier.height(12.dp))
+    }
+    if (embedded) {
+        Column(Modifier.fillMaxWidth()) {
+            SheetPageHeader("导出书籍", "目录、章节名和封面都会写进文件。", onBack ?: onDismiss)
+            body()
+        }
+    } else {
+        ModalSheet(onDismiss) {
+            DialogTitle("导出书籍", "目录、章节名和封面都会写进文件。", onClose = onDismiss)
+            body()
+        }
     }
 }
 
@@ -726,16 +742,16 @@ private fun FormatCard(
         Row(verticalAlignment = Alignment.CenterVertically) {
             LineIcon(glyph, if (selected) ui.accent else ui.palette.muted, 19.dp)
             Spacer(Modifier.weight(1f))
-            Box(
-                Modifier
-                    .size(15.dp)
-                    .clip(CircleShape)
-                    .background(if (selected) ui.accent else Color.Transparent)
-                    .border(1.2.dp, if (selected) ui.accent else ui.palette.muted.copy(alpha = .4f), CircleShape),
-                contentAlignment = Alignment.Center,
-            ) {
-                if (selected) Box(Modifier.size(5.dp).clip(CircleShape).background(ui.palette.bgTop))
-            }
+            // 3.26.9：选中标记统一走 SelectMark（底色从中心扩散 + 勾弹出），
+            // 不用再各页自己画一个「圆底 + 白点」。
+            SelectMark(
+                checked = selected,
+                onToggle = {},
+                size = 18.dp,
+                corner = 9.dp,
+                accent = ui.accent,
+                interactive = false,
+            )
         }
         Spacer(Modifier.height(10.dp))
         Txt(name, size = 14f, weight = FontWeight.SemiBold)

@@ -253,15 +253,14 @@ fun GroupPickerSheet(
     store: AppStore,
     onSelect: (String?) -> Unit,
     onDismiss: () -> Unit,
+    /** true = 作为「菜单 → 选项页」同框层级的第二层画在面板里（带返回箭头），
+     *  不再自己开一个 ModalSheet。 */
+    embedded: Boolean = false,
+    onBack: (() -> Unit)? = null,
 ) {
     val groups = if (kind == GroupKind.BOOK) store.bookGroups else store.noteGroups
-    ModalSheet(onDismiss = onDismiss) {
-        DialogTitle(
-            "移动到分组",
-            if (kind == GroupKind.BOOK) "书可以随时换组。" else "笔记可以随时换组。",
-            onClose = onDismiss,
-        )
-        Spacer(Modifier.height(12.dp))
+    val subtitle = if (kind == GroupKind.BOOK) "书可以随时换组。" else "笔记可以随时换组。"
+    val body: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit = {
         GroupPickerRow("未分组", null, current == null, groupColors.first()) {
             onSelect(null); onDismiss()
         }
@@ -270,6 +269,19 @@ fun GroupPickerSheet(
             GroupPickerRow(g.name, g.id, current == g.id, g.color) {
                 onSelect(g.id); onDismiss()
             }
+        }
+    }
+    if (embedded) {
+        Column(Modifier.fillMaxWidth()) {
+            SheetPageHeader("移动到分组", subtitle, onBack ?: onDismiss)
+            Spacer(Modifier.height(12.dp))
+            body()
+        }
+    } else {
+        ModalSheet(onDismiss = onDismiss) {
+            DialogTitle("移动到分组", subtitle, onClose = onDismiss)
+            Spacer(Modifier.height(12.dp))
+            body()
         }
     }
 }

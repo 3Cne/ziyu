@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 3.26.9 桌面图标（A 墨色几何）：一个墨色圆环被 45° 斜切成两半，
+     下半环整体向右下错开 6dp，两个切面都是平头。纸色底，不用任何文字或功能符号。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- 上半环：圆心 (50,50)，半径 20，从 135°(左下) 顺时针到 315°(右上)。 -->
+    <path
+        android:strokeColor="#2C2A25"
+        android:strokeWidth="8"
+        android:strokeLineCap="butt"
+        android:pathData="M35.86,64.14 A20,20 0 0 1 64.14,35.86" />
+
+    <!-- 下半环：圆心 (56,56)，同样半径，从 315° 顺时针到 135°，右下错开 6dp。 -->
+    <path
+        android:strokeColor="#2C2A25"
+        android:strokeWidth="8"
+        android:strokeLineCap="butt"
+        android:pathData="M70.14,41.86 A20,20 0 0 1 41.86,70.14" />
+</vector>

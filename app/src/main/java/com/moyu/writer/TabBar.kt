@@ -1,4 +1,4 @@
-﻿package com.moyu.writer
+package com.moyu.writer
 
 import android.os.Build
 import androidx.compose.animation.animateColorAsState
@@ -115,10 +115,18 @@ internal fun MoyuTabBar(
     // 栏体是胶囊。注意 SmoothCorner(50) 命中 Int 重载 = CircleShape，
     // 这在「宽远大于高」的栏体上正好是胶囊；但**不能**拿给镜片用（会变椭圆）。
     val capsule = SmoothCorner(50)
-    // 镜片是圆角矩形，不是胶囊。RoundedCornerShape 是 CornerBasedShape，
-    // drawBackdrop 的 lens() 折射只支持这一类（SmoothCorner 会抛
-    // "Only CornerBasedShape is supported in lens effects"）。
-    val lensShape = RoundedCornerShape(22.dp)
+    // 镜片是圆角矩形，不是胶囊。
+    // 3.26.9：普通 RoundedCornerShape 在直线与圆弧的切点处曲率从 0 跳到 1/R，
+    // 22dp 的角在大屏上能看出「棱角」。换成连续曲率的 SmoothCornerShape：
+    // 它仍继承 CornerBasedShape，drawBackdrop 的 lens() 才不会抛
+    // "Only CornerBasedShape is supported in lens effects"；折射仍按圆弧半径
+    // 计算，所以角上 1–3dp 与裁剪路径略有偏差，正好被加宽后的边缘带盖住。
+    val lensShape: androidx.compose.foundation.shape.CornerBasedShape = SmoothCornerShape(
+        androidx.compose.foundation.shape.CornerSize(22.dp),
+        androidx.compose.foundation.shape.CornerSize(22.dp),
+        androidx.compose.foundation.shape.CornerSize(22.dp),
+        androidx.compose.foundation.shape.CornerSize(22.dp),
+    )
     val glassEnabled = backdrop != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
     val count = names.size.coerceAtLeast(1)
     val scope = rememberCoroutineScope()
@@ -251,10 +259,11 @@ internal fun MoyuTabBar(
             }
 
 
-            // 镜片位置在**组合**阶段读：页面（TabPager）用的是同一个
-            // dragOffset 的组合值。之前把镜片改成绘制阶段读，比页面晚一帧——
-            // 快速拖动时镜片已经到下一格、页面还在中间，就是「和 tab 页不匹配」。
-            val lensIndex = dragOffset ?: lensPos.value
+            // 镜片位置在**绘制阶段**读 dragOffset / lensPos：
+            // 拖动时每个触摸事件只 invalidate 这一层的绘制，不再让整条
+            // TabBar 重组（3.26.8 是组合阶段读，长按拖动被读作「很卡」）。
+            // 页面（TabPager）同样改成绘制阶段读同一个 State，所以两者仍同帧，
+            // 不会回到 3.24.2 那种「镜片领先页面一帧」。
 
             // 玻璃底：整条胶囊。
             Box(
@@ -283,7 +292,8 @@ internal fun MoyuTabBar(
                     .graphicsLayer {
                         // 浮点位移，不用 Modifier.offset：那是布局属性，
                         // 每帧动画都会 relayout，和图层缩放不同步。
-                        translationX = lensLeftPx + itemPx * lensIndex
+                        val pos = dragOffset ?: lensPos.value
+                        translationX = lensLeftPx + itemPx * pos
                         translationY = -risePx * lift
                         scaleX = 1f + .04f * lift
                         scaleY = 1f + .04f * lift
@@ -297,8 +307,11 @@ internal fun MoyuTabBar(
                     }
                     .border(
                         .5.dp,
-                        if (p.isDark) Color.White.copy(alpha = .07f + .09f * lift)
-                        else p.ink.copy(alpha = .06f + .07f * lift),
+                        // 3.26.9：不再随 lift 变亮。点击切页时 clickLift 会在 260ms
+                        // 里把边框、外阴影、内阴影一起推高再收回，用户读作「点一下
+                        // 镜片边缘亮一下」。抬起感只留位置与 4% 缩放，材质三处恒定。
+                        if (p.isDark) Color.White.copy(alpha = .07f)
+                        else p.ink.copy(alpha = .06f),
                         lensShape,
                     )
                     .then(
@@ -321,8 +334,8 @@ internal fun MoyuTabBar(
                                 highlight = null,
                                 shadow = {
                                     Shadow(
-                                        radius = 10.dp + 8.dp * lift,
-                                        alpha = (s.lensShadow + .14f * lift).coerceIn(0f, 1f),
+                                        radius = 12.dp,
+                                        alpha = s.lensShadow,
                                     )
                                 },
                                 innerShadow = { InnerShadow(radius = 6.dp, alpha = s.lensShadow + .07f) },
@@ -444,7 +457,16 @@ internal fun MoyuTabBar(
                                             val stretchTarget = (step60 * itemPx / 30f).coerceIn(0f, 1f)
                                             val follow = 1f - (1f - .32f).pow(dt * 60f)
                                             lensStretch += (stretchTarget - lensStretch) * follow
-                                            lensRightward = smooth >= prev
+                                            // 换向：先把旧方向的形变收掉再按新方向长。
+                                            // 3.26.8 是每帧直接改 lensRightward，原点瞬间从
+                                            // 一端翻到另一端，形状像被掰断——用户读作
+                                            // 「变形不符合物理的方向性」。这里给 1e-4 的死区，
+                                            // 手指停住时不会来回翻。
+                                            val movingRight = smooth >= prev
+                                            if (movingRight != lensRightward && abs(smooth - prev) > 1e-4f) {
+                                                lensStretch *= .25f
+                                                lensRightward = movingRight
+                                            }
                                             dragOffset = smooth
                                             onDragNow(smooth)
                                         }

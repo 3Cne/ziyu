@@ -1,11 +1,16 @@
 package com.moyu.writer
 
 import android.content.Context
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -35,6 +40,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import kotlinx.coroutines.delay
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -162,23 +168,60 @@ fun NotesScreen(
         )
     }
     menuFolder?.let { folder ->
-        ModalSheet(onDismiss = { menuFolder = null }) {
-            DialogTitle(folder.name, "${countOf(folder.id)} 条笔记", onClose = { menuFolder = null })
-            Spacer(Modifier.height(12.dp))
-            SettingRow("重命名", "改名和颜色", Glyph.Edit, onClick = {
-                menuFolder = null
-                renameFolder = folder
-            })
-            RowDivider()
-            SettingRow("上移", "排到前一个笔记夹前面", Glyph.ArrowUp, onClick = {
-                store.moveGroup(GroupKind.NOTE, folder.id, -1)
-                menuFolder = null
-            })
-            RowDivider()
-            SettingRow("删除笔记夹", "夹里的笔记回到「未归类」，不会被删", Glyph.Trash, onClick = {
-                menuFolder = null
-                deleteFolder = folder
-            })
+        // 3.26.9：菜单 → 编辑笔记夹 收进同一个面板，横向弹簧切换；
+        // 不再「关一个 ModalSheet、再开另一个」。
+        var level by remember(folder.id) { mutableIntStateOf(0) }
+        var pending by remember(folder.id) { mutableStateOf<(() -> Unit)?>(null) }
+        InlineModalSheet(onDismiss = {
+            menuFolder = null
+            val action = pending
+            pending = null
+            action?.invoke()
+        }) { close ->
+            AnimatedContent(
+                targetState = level,
+                transitionSpec = {
+                    val forward = targetState > initialState
+                    (slideInHorizontally(spring(MOYU_DAMPING, 380f)) { w ->
+                        if (forward) w / 3 else -w / 3
+                    } + fadeIn(tween(140))) togetherWith
+                        (slideOutHorizontally(spring(MOYU_DAMPING, 380f)) { w ->
+                            if (forward) -w / 3 else w / 3
+                        } + fadeOut(tween(110)))
+                },
+                label = "folderSheet",
+            ) { step ->
+                if (step == 0) {
+                    Column(Modifier.fillMaxWidth()) {
+                        DialogTitle(folder.name, "${countOf(folder.id)} 条笔记", onClose = { close() })
+                        Spacer(Modifier.height(12.dp))
+                        SettingRow("重命名", "改名和颜色", Glyph.Edit, onClick = { level = 1 })
+                        RowDivider()
+                        SettingRow("上移", "排到前一个笔记夹前面", Glyph.ArrowUp, onClick = {
+                            store.moveGroup(GroupKind.NOTE, folder.id, -1)
+                            close()
+                        })
+                        RowDivider()
+                        SettingRow("删除笔记夹", "夹里的笔记回到「未归类」，不会被删", Glyph.Trash, onClick = {
+                            pending = { deleteFolder = folder }
+                            close()
+                        })
+                    }
+                } else {
+                    FolderEditSheet(
+                        title = "编辑笔记夹",
+                        initialName = folder.name,
+                        initialColor = folder.color,
+                        onDismiss = { close() },
+                        onSave = { name, color ->
+                            store.updateGroup(GroupKind.NOTE, folder.id) { it.copy(name = name, color = color) }
+                            close()
+                        },
+                        embedded = true,
+                        onBack = { level = 0 },
+                    )
+                }
+            }
         }
     }
     deleteFolder?.let { folder ->
@@ -266,12 +309,14 @@ private fun FolderEditSheet(
     initialColor: Long,
     onDismiss: () -> Unit,
     onSave: (String, Long) -> Unit,
+    /** true = 作为「笔记夹菜单 → 编辑」同框层级的第二层画在面板里。 */
+    embedded: Boolean = false,
+    onBack: (() -> Unit)? = null,
 ) {
     val ui = LocalInk.current
     var name by remember { mutableStateOf(initialName) }
     var color by remember { mutableStateOf(initialColor) }
-    ModalSheet(onDismiss = onDismiss, imeAware = true) {
-        DialogTitle(title, "名字和颜色随时可以再改。", onClose = onDismiss)
+    val body: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit = {
         Spacer(Modifier.height(14.dp))
         Txt("名字", size = 10.5f, color = ui.palette.muted, modifier = Modifier.padding(start = 4.dp, bottom = 6.dp))
         InkField(name, { name = it.take(16) }, "例如：素材、灵感、大纲", onDone = {})
@@ -295,6 +340,18 @@ private fun FolderEditSheet(
             if (clean.isBlank()) ToastBus.show("先给笔记夹起个名字") else onSave(clean, color)
         }, Modifier.fillMaxWidth())
         Spacer(Modifier.height(8.dp))
+    }
+    val subtitle = "名字和颜色随时可以再改。"
+    if (embedded) {
+        Column(Modifier.fillMaxWidth()) {
+            SheetPageHeader(title, subtitle, onBack ?: onDismiss)
+            body()
+        }
+    } else {
+        ModalSheet(onDismiss = onDismiss, imeAware = true) {
+            DialogTitle(title, subtitle, onClose = onDismiss)
+            body()
+        }
     }
 }
 

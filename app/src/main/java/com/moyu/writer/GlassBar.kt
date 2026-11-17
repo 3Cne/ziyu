@@ -119,7 +119,17 @@ internal fun Modifier.liquidGlassBar(
             drawRect(tint)
             if (veil > 0f) drawRect(paperVeil)
             if (edgeStrength > 0f) {
-                glassEdgeBand(shape, palette, edgeStrength)
+                // 3.26.9：1 型玻璃的边缘反射带加宽、提亮（用户报「不够明显、很窄」）。
+                // 只对玻璃条生效；镜片与开关的小圆仍用默认 4.6dp——它们尺寸小，
+                // 跟着加宽会糊成厚边框。
+                glassEdgeBand(
+                    shape,
+                    palette,
+                    edgeStrength,
+                    bandDp = 6.4f,
+                    blurDp = 3.2f,
+                    brightness = 1.25f,
+                )
             }
         },
     )
@@ -127,28 +137,39 @@ internal fun Modifier.liquidGlassBar(
 
 
 /** Soft milk band just inside the glass edge: the thickness cue. Shared by the
- *  bar and the selected lens so each can be tuned on its own. */
+ *  bar and the selected lens so each can be tuned on its own.
+ *
+ *  [bandDp] / [blurDp] scale the band without touching small surfaces: the
+ *  bars pass a wider band (6.4dp) than the lens or the toggle knob (4.6dp).
+ *  [brightness] multiplies both ends of the vertical gradient. */
 internal fun androidx.compose.ui.graphics.drawscope.DrawScope.glassEdgeBand(
     shape: Shape,
     palette: InkPalette,
     strength: Float,
+    bandDp: Float = 4.6f,
+    blurDp: Float = 2.4f,
+    brightness: Float = 1f,
 ) {
     val s = strength.coerceIn(0f, 1f)
     if (s <= 0f) return
+    val b = brightness.coerceIn(0f, 1.6f)
+    val topAlpha = ((if (palette.isDark) .16f else .40f) * s * b).coerceIn(0f, 1f)
+    val bottomAlpha = ((if (palette.isDark) .08f else .10f) * s * b).coerceIn(0f, 1f)
+    val hairline = (bandDp / 4.6f * 1.1f).dp
     val outline = shape.createOutline(size, layoutDirection, this)
     val path = Path().apply { addOutline(outline) }
-    val top = Color.White.copy(alpha = (if (palette.isDark) .16f else .40f) * s)
+    val top = Color.White.copy(alpha = topAlpha)
     val bottom = if (palette.isDark) {
-        Color.White.copy(alpha = .08f * s)
+        Color.White.copy(alpha = bottomAlpha)
     } else {
-        palette.ink.copy(alpha = .10f * s)
+        palette.ink.copy(alpha = bottomAlpha)
     }
     val androidPath = path.asAndroidPath()
     clipPath(path) {
         drawIntoCanvas { canvas ->
             val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
                 style = android.graphics.Paint.Style.STROKE
-                strokeWidth = 4.6.dp.toPx()
+                strokeWidth = bandDp.dp.toPx()
                 shader = android.graphics.LinearGradient(
                     0f, 0f, 0f, size.height,
                     intArrayOf(top.toArgb(), Color.Transparent.toArgb(), bottom.toArgb()),
@@ -156,7 +177,7 @@ internal fun androidx.compose.ui.graphics.drawscope.DrawScope.glassEdgeBand(
                     android.graphics.Shader.TileMode.CLAMP,
                 )
                 maskFilter = android.graphics.BlurMaskFilter(
-                    2.4.dp.toPx(),
+                    blurDp.dp.toPx(),
                     android.graphics.BlurMaskFilter.Blur.NORMAL,
                 )
             }
@@ -165,11 +186,12 @@ internal fun androidx.compose.ui.graphics.drawscope.DrawScope.glassEdgeBand(
         drawPath(
             path = path,
             brush = androidx.compose.ui.graphics.Brush.verticalGradient(
-                0f to Color.White.copy(alpha = (if (palette.isDark) .18f else .55f) * s),
+                0f to Color.White.copy(alpha = (((if (palette.isDark) .18f else .55f) * s * b)).coerceIn(0f, 1f)),
                 0.35f to Color.Transparent,
-                1f to if (palette.isDark) Color.White.copy(alpha = .05f * s) else palette.ink.copy(alpha = .10f * s),
+                1f to if (palette.isDark) Color.White.copy(alpha = ((.05f * s * b)).coerceIn(0f, 1f))
+                else palette.ink.copy(alpha = ((.10f * s * b)).coerceIn(0f, 1f)),
             ),
-            style = Stroke(width = 1.1.dp.toPx()),
+            style = Stroke(width = hairline.toPx()),
         )
     }
 }
@@ -182,6 +204,15 @@ internal fun androidx.compose.ui.graphics.drawscope.DrawScope.glassEdgeBand(
  * published here once and every in-page glass reads it.
  */
 val LocalGlassBackdrop = compositionLocalOf<Backdrop?> { null }
+
+/**
+ * 同窗口面板打开时把根级 TabBar 收起来（3.26.9）。
+ *
+ * `InlineModalSheet` 是页面内的层，而 TabBar 是 root 的兄弟节点、绘制在页面之上，
+ * 面板底部会被玻璃条盖住、点不到（笔记夹菜单的「删除」行实测被挡）。
+ * 这里只做一件事：面板存活期间让 root 把 TabBar 收起来；面板退出后恢复。
+ */
+val LocalSheetSuppressed = compositionLocalOf<(Boolean) -> Unit> { {} }
 
 /**
  * In-page glass: the input row and the pinned-quote chips.

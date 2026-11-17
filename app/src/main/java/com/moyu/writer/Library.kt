@@ -9,9 +9,16 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -1118,6 +1125,10 @@ fun BookDetailScreen(
     var editOpen by remember { mutableStateOf(false) }
     var deleteOpen by remember { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
+    // 3.26.9：同框层级。1=菜单，2=移动到分组，3=导出书籍。
+    // 编辑书籍与删除是居中 Dialog，仍走 pendingMenuAction：等面板退场后再开。
+    var sheetLevel by remember { mutableIntStateOf(1) }
+    var pendingSheetAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     var groupPickerOpen by remember { mutableStateOf(false) }
     var exportOpen by remember { mutableStateOf(false) }
     var addChapter by remember { mutableStateOf(false) }
@@ -1208,40 +1219,75 @@ fun BookDetailScreen(
     }
 
     if (menuOpen) {
-        InlineModalSheet(onDismiss = { menuOpen = false }) { close ->
-            DialogTitle("书籍设置", book.title, onClose = close)
-            Spacer(Modifier.height(14.dp))
-            SettingRow("编辑书籍", "书名、作者、封面和简介", Glyph.Edit, onClick = {
-                close()
-                editOpen = true
-            })
-            RowDivider()
-            SettingRow(
-                "移动到分组",
-                store.bookGroups.firstOrNull { it.id == book.groupId }?.name ?: "未分组",
-                Glyph.Layers,
-                onClick = {
-                    close()
-                    groupPickerOpen = true
+        InlineModalSheet(onDismiss = {
+            menuOpen = false
+            sheetLevel = 1
+            val action = pendingSheetAction
+            pendingSheetAction = null
+            action?.invoke()
+        }) { close ->
+            AnimatedContent(
+                targetState = sheetLevel,
+                transitionSpec = {
+                    val forward = targetState > initialState
+                    (slideInHorizontally(spring(MOYU_DAMPING, 380f)) { w ->
+                        if (forward) w / 3 else -w / 3
+                    } + fadeIn(tween(140))) togetherWith
+                        (slideOutHorizontally(spring(MOYU_DAMPING, 380f)) { w ->
+                            if (forward) -w / 3 else w / 3
+                        } + fadeOut(tween(110)))
                 },
-            )
-            RowDivider()
-            SettingRow("导出书籍", "TXT / EPUB，自动生成目录", Glyph.Export, onClick = {
-                close()
-                exportOpen = true
-            })
-            RowDivider()
-            SettingRow("置顶到书架", if (book.pinned) "已置顶" else "按更新时间排序", Glyph.Pin, trailing = {
-                InkToggle(book.pinned) { on ->
-                    store.updateBook(book.id) { it.copy(pinned = on) }
-                    ToastBus.show(if (on) "已置顶" else "已取消置顶")
+                label = "bookSheet",
+            ) { step ->
+                when (step) {
+                    1 -> Column(Modifier.fillMaxWidth()) {
+                        DialogTitle("书籍设置", book.title, onClose = { close() })
+                        Spacer(Modifier.height(14.dp))
+                        SettingRow("编辑书籍", "书名、作者、封面和简介", Glyph.Edit, onClick = {
+                            pendingSheetAction = { editOpen = true }
+                            close()
+                        })
+                        RowDivider()
+                        SettingRow(
+                            "移动到分组",
+                            store.bookGroups.firstOrNull { it.id == book.groupId }?.name ?: "未分组",
+                            Glyph.Layers,
+                            onClick = { sheetLevel = 2 },
+                        )
+                        RowDivider()
+                        SettingRow("导出书籍", "TXT / EPUB，自动生成目录", Glyph.Export, onClick = {
+                            sheetLevel = 3
+                        })
+                        RowDivider()
+                        SettingRow("置顶到书架", if (book.pinned) "已置顶" else "按更新时间排序", Glyph.Pin, trailing = {
+                            InkToggle(book.pinned) { on ->
+                                store.updateBook(book.id) { it.copy(pinned = on) }
+                                ToastBus.show(if (on) "已置顶" else "已取消置顶")
+                            }
+                        })
+                        RowDivider()
+                        SettingRow("删除书籍", "章节和正文会一并删除", Glyph.Trash, onClick = {
+                            pendingSheetAction = { deleteOpen = true }
+                            close()
+                        })
+                    }
+                    2 -> GroupPickerSheet(
+                        kind = GroupKind.BOOK,
+                        current = book.groupId,
+                        store = store,
+                        onSelect = { group -> store.setBookGroup(book.id, group) },
+                        onDismiss = { close() },
+                        embedded = true,
+                        onBack = { sheetLevel = 1 },
+                    )
+                    else -> ExportSheet(
+                        book = book,
+                        onDismiss = { close() },
+                        embedded = true,
+                        onBack = { sheetLevel = 1 },
+                    )
                 }
-            })
-            RowDivider()
-            SettingRow("删除书籍", "章节和正文会一并删除", Glyph.Trash, onClick = {
-                close()
-                deleteOpen = true
-            })
+            }
         }
     }
     if (editOpen) {

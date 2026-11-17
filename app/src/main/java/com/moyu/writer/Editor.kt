@@ -130,6 +130,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -468,14 +469,33 @@ fun WritingScreen(
     var abilityOpen by remember { mutableStateOf(settings.dockOpen) }
     val abilityT = remember { Animatable(1f) }
     LaunchedEffect(abilityOpen) {
+        // 3.26.9：临界阻尼（1f）——展开/收起到位就停，不再回弹。
+        // 3.26.8 及以前是 spring(.52, 300)，到位置后还要过冲再弹回来，
+        // 用户读作「到了既定位置还在晃」。粘滞读数由 ViscousDrop.lagged(t)
+        // 的两轴时间差给出，不依赖 spring 的过冲，所以阻尼改 1 不丢形变。
         abilityT.animateTo(
             if (abilityOpen) 1f else 0f,
-            spring(dampingRatio = .52f, stiffness = 300f),
+            spring(dampingRatio = 1f, stiffness = 300f),
         )
     }
     // 记忆：开合一变就写回设置；同值不重写，避免每次进编辑器都落盘。
     LaunchedEffect(abilityOpen) {
         store.updateSettings { if (it.dockOpen == abilityOpen) it else it.copy(dockOpen = abilityOpen) }
+    }
+    // 3.26.9：展开/收起期间把正文滚动位置钉住。
+    // 底部让位（baseDockInset）跟着 abilityT 每帧变，TextView 每次重排都会把
+    // 光标 bringIntoView；光标停在开头时整页会瞬间回顶——用户报的就是这个。
+    // 每帧校正一次，动画到位后再多钉 6 帧，压住收尾那次重排。
+    LaunchedEffect(abilityOpen) {
+        val editor = bodyEditor ?: return@LaunchedEffect
+        val keep = editor.scrollY
+        val target = if (abilityOpen) 1f else 0f
+        var settle = 6
+        while (settle > 0) {
+            withFrameNanos { }
+            if (editor.scrollY != keep) editor.scrollTo(0, keep)
+            settle = if (kotlin.math.abs(abilityT.value - target) <= .002f) settle - 1 else 6
+        }
     }
     // The editor dock overlays the body instead of sitting below it. The body
     // layer is recorded separately so the dock can sample the real text under
@@ -1754,21 +1774,15 @@ fun WritingScreen(
                         hideEditorKeyboard()
                     },
                     onCollapse = {
-                        // 能力栏整块缩成左下角的球；正文视口不变（布局高度不改），
-                        // 只补一次滚动，避免 TextView 把 scrollY 夹回 0。
-                        val keep = bodyEditor?.scrollY ?: 0
+                        // 3.26.9：只翻状态，滚动位置由下面的钉住 effect 每帧守住。
+                        // 原来这里 post + 140ms 补两次 scrollTo，但底部让位是跟着
+                        // abilityT 连续变的，TextView 每次重排都会 bringIntoView，
+                        // 补两次压不住中间那些帧。
                         abilityOpen = false
-                        bodyEditor?.post { bodyEditor?.scrollTo(0, keep) }
-                        android.os.Handler(android.os.Looper.getMainLooper())
-                            .postDelayed({ bodyEditor?.scrollTo(0, keep) }, 140)
                     },
                     onSymbol = { insertRaw(it) },
                     onExpand = {
-                        val keep = bodyEditor?.scrollY ?: 0
                         abilityOpen = true
-                        bodyEditor?.post { bodyEditor?.scrollTo(0, keep) }
-                        android.os.Handler(android.os.Looper.getMainLooper())
-                            .postDelayed({ bodyEditor?.scrollTo(0, keep) }, 140)
                     },
                     selectionMode = body.selection.start != body.selection.end,
                     onCopy = {

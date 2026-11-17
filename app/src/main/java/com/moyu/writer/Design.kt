@@ -80,6 +80,7 @@ import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -111,6 +112,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.addOutline
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
@@ -890,43 +892,43 @@ fun GlassChip(
     onClick: () -> Unit,
 ) {
     val ui = LocalInk.current
-    val bg by animateColorAsState(
-        if (selected) accentTint(ui.palette, ui.accent) else Color.Transparent,
-        animationSpec = spring(MOYU_DAMPING, 420f),
-        label = "chip",
+    val motion = ui.settings.motion != "none"
+    // 3.26.9：选中底色从中心扩散铺满，取消时反向收回。
+    // 3.26.8 是 if/else 两个容器直接换（选中=底色块、未选=MoyuSurface），
+    // 切换那一帧没有过渡，读作「啪」地变黑。
+    val p by animateFloatAsState(
+        targetValue = if (selected) 1f else 0f,
+        animationSpec = if (motion) spring(MOYU_DAMPING, 420f) else tween(0),
+        label = "chipFill",
     )
     val fg by animateColorAsState(
         if (selected) ui.palette.ink else ui.palette.muted,
         animationSpec = spring(MOYU_DAMPING, 520f),
         label = "chipFg",
     )
-    if (selected) {
-        Row(
-            Modifier
-                .clip(CircleShape)
-                .background(bg)
-                .bouncy { onClick() }
-                .padding(horizontal = 13.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            if (leading != null) Txt(leading, size = 10f, color = fg, modifier = Modifier.padding(end = 5.dp))
-            Txt(label, size = 11.5f, color = fg, weight = FontWeight.Medium)
-        }
-    } else {
-        MoyuSurface(Modifier.clip(CircleShape).bouncy { onClick() },
-            radius = 20f,
-            shape = CircleShape,
-            flat = true,
-            tone = dockTone(ui),
-        ) {
-            Row(
-                Modifier.padding(horizontal = 13.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                if (leading != null) Txt(leading, size = 10f, color = fg, modifier = Modifier.padding(end = 5.dp))
-                Txt(label, size = 11.5f, color = fg)
+    val v = p.coerceIn(0f, 1f)
+    val base = dockTone(ui)
+    val fill = accentTint(ui.palette, ui.accent)
+    val chipPath = remember { Path() }
+    Row(
+        Modifier
+            .clip(CircleShape)
+            .drawBehind {
+                drawRect(base)
+                if (v > .001f) {
+                    chipPath.reset()
+                    chipPath.addOutline(CircleShape.createOutline(size, layoutDirection, this))
+                    clipPath(chipPath) {
+                        drawCircle(fill, radius = size.minDimension * .75f * v, center = center)
+                    }
+                }
             }
-        }
+            .bouncy { onClick() }
+            .padding(horizontal = 13.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (leading != null) Txt(leading, size = 10f, color = fg, modifier = Modifier.padding(end = 5.dp))
+        Txt(label, size = 11.5f, color = fg, weight = if (selected) FontWeight.Medium else FontWeight.Normal)
     }
 }
 
@@ -1191,42 +1193,69 @@ fun AnimatedTodoBox(
     onToggle: (Boolean) -> Unit,
     boxSize: Dp = 20.dp,
 ) {
+    SelectMark(checked = done, onToggle = onToggle, size = boxSize, corner = 6.dp)
+}
+
+/**
+ * 统一选中标记（3.26.9）。
+ *
+ * 2026-11-16 用户定了这一套：系统确认框那种——未选是细描边圈，选中时底色
+ * 从中心径向扩散铺满、勾在半程后弹出；取消时反向收缩。软件里所有
+ * 「勾选 / 多选」都走这里：待办框、颜色点、导出的格式选择、链接笔记的选择圈。
+ *
+ * 不用在：TabBar 镜片（移动的块，用粘滞水滴）、Segmented（滑动块）、
+ * 菜单里表示「当前项」的静态勾。
+ */
+@Composable
+fun SelectMark(
+    checked: Boolean,
+    onToggle: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+    size: Dp = 20.dp,
+    corner: Dp = 6.dp,
+    accent: Color = LocalInk.current.accent,
+    hapticType: Int = 1,
+    /** false = 只画标记，点击由外层卡片 / 整行负责（导出格式卡、链接笔记行）。 */
+    interactive: Boolean = true,
+) {
     val ui = LocalInk.current
     val motion = ui.settings.motion != "none"
-    val progress by animateFloatAsState(
-        if (done) 1f else 0f,
-        if (motion) spring(MOYU_DAMPING, 520f, PROGRESS_THRESHOLD) else tween(0),
+    val p by animateFloatAsState(
+        targetValue = if (checked) 1f else 0f,
+        animationSpec = if (motion) spring(MOYU_DAMPING, 520f, PROGRESS_THRESHOLD) else tween(0),
         visibilityThreshold = PROGRESS_THRESHOLD,
-        label = "todoBox",
+        label = "selectMark",
     )
-    val border = lerp(ui.palette.muted.copy(alpha = .55f), ui.accent, progress)
-    val fill = lerp(Color.Transparent, ui.accent, progress)
+    val shape = SmoothCorner(corner)
+    val v = p.coerceIn(0f, 1f)
+    val borderColor = lerp(ui.palette.muted.copy(alpha = .55f), accent, v)
     val checkColor = if (ui.palette.isDark) ui.palette.bgTop else Color.White
-    Box(
-        Modifier
-            .size(boxSize)
-            .bouncy(scale = .92f, hapticType = 1) { onToggle(!done) },
-        contentAlignment = Alignment.Center,
+    val base = Modifier.size(size)
+    Canvas(
+        (if (interactive) base.bouncy(scale = .92f, hapticType = hapticType) { onToggle(!checked) }
+        else base).then(modifier)
     ) {
-        Canvas(Modifier.fillMaxSize()) {
-            val w = size.width
-            val h = size.height
-            val radius = 6.dp.toPx()
-            drawRoundRect(fill, cornerRadius = CornerRadius(radius, radius))
-            drawRoundRect(
-                border,
-                cornerRadius = CornerRadius(radius, radius),
-                style = Stroke(width = 1.2.dp.toPx()),
-            )
-            if (progress > .01f) {
-                val path = Path().apply {
-                    moveTo(w * .22f, h * .52f)
-                    lineTo(w * .42f, h * .70f)
-                    lineTo(w * .79f, h * .30f)
+        val side = this.size.minDimension
+        val outline = shape.createOutline(this.size, layoutDirection, this)
+        val path = Path().apply { addOutline(outline) }
+        drawPath(path, borderColor, style = Stroke(1.2.dp.toPx()))
+        if (v > .001f) {
+            clipPath(path) {
+                // 半径取对角线一半以上，扩散到四角时已经铺满整个形状。
+                drawCircle(accent, radius = side * .72f * v, center = center)
+            }
+            // 勾在后 70% 里描绘，同时从 .55 倍长到 1 倍，读作「弹出来」。
+            val cp = ((v - .30f) / .70f).coerceIn(0f, 1f)
+            if (cp > 0f) {
+                val s = .55f + .45f * cp
+                val check = Path().apply {
+                    moveTo(center.x - side * .23f * s, center.y + side * .01f * s)
+                    lineTo(center.x - side * .06f * s, center.y + side * .18f * s)
+                    lineTo(center.x + side * .23f * s, center.y - side * .18f * s)
                 }
-                val measure = PathMeasure().apply { setPath(path, false) }
+                val measure = PathMeasure().apply { setPath(check, false) }
                 val partial = Path()
-                measure.getSegment(0f, measure.length * progress.coerceIn(0f, 1f), partial, true)
+                measure.getSegment(0f, measure.length * cp, partial, true)
                 drawPath(
                     partial,
                     checkColor,
@@ -1672,6 +1701,31 @@ private fun DialogBlur() {
     }
 }
 
+/** 面板内的子页头（3.26.9）：返回箭头 + 标题（+ 副标题）。
+ *  用于「菜单 → 选项页」同框层级里的第 2 层，和第一层的 DialogTitle 区分开：
+ *  第一层是「关掉」，第二层是「退回上一层」。 */
+@Composable
+fun SheetPageHeader(title: String, subtitle: String? = null, onBack: () -> Unit) {
+    val ui = LocalInk.current
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+        GlassIconButton(Glyph.Back, onBack, tint = ui.palette.muted)
+        Spacer(Modifier.width(8.dp))
+        Column(Modifier.weight(1f)) {
+            Txt(
+                title,
+                size = 23f,
+                color = ui.palette.ink,
+                weight = FontWeight.SemiBold,
+                letterSpacing = .3f,
+            )
+            if (subtitle != null) {
+                Spacer(Modifier.height(5.dp))
+                Txt(subtitle, size = 11.5f, color = ui.palette.muted, lineHeight = 17f)
+            }
+        }
+    }
+}
+
 @Composable
 fun DialogTitle(title: String, subtitle: String? = null, onClose: (() -> Unit)? = null) {
     val ui = LocalInk.current
@@ -1741,6 +1795,13 @@ fun InlineModalSheet(
     val ui = LocalInk.current
     var closing by remember { mutableStateOf(false) }
     var dismissReady by remember { mutableStateOf(false) }
+    // 面板存活期间收起根级 TabBar：它是 root 的兄弟节点、画在页面之上，
+    // 不收的话面板底部会被玻璃条盖住、点不到（3.26.9 笔记夹菜单实测）。
+    val suppressBar = LocalSheetSuppressed.current
+    DisposableEffect(Unit) {
+        suppressBar(true)
+        onDispose { suppressBar(false) }
+    }
     // The sheet leaves the composition only when the exit spring is idle.
     // A fixed 250ms dismiss used to unmount it while the last pixels were
     // still sliding, which showed up as a tiny teleport on close.
@@ -1776,6 +1837,13 @@ fun InlineModalSheet(
         animationSpec = spring(MOYU_DAMPING, 520f),
         visibilityThreshold = .002f,
         label = "inlineSheetScrim",
+    )
+    // 3.26.9：进出那一程的粘滞形变（与 ModalSheet 共用同一组数）。
+    // 面板往上走时纵向被拉长一点，停稳回到 1；数值是 t 的函数，落位一定精确。
+    val sheetShape by animateFloatAsState(
+        targetValue = if (visibleState.targetState) 1f else 0f,
+        animationSpec = spring(MOYU_DAMPING, 320f),
+        label = "inlineSheetShape",
     )
 
     BackHandler { close() }
@@ -1825,7 +1893,13 @@ fun InlineModalSheet(
                 }) {
                 MoyuSurface(Modifier
                         .fillMaxWidth()
-                        .heightIn(max = panelMax),
+                        .heightIn(max = panelMax)
+                        .graphicsLayer {
+                            val v = sheetShape.coerceIn(0f, 1f)
+                            scaleY = .94f + .06f * ViscousDrop.lagged(v)
+                            scaleX = .988f + .012f * v
+                            transformOrigin = androidx.compose.ui.graphics.TransformOrigin(.5f, 1f)
+                        },
                     radius = sheetCorner,
                     shape = panelShape,
                     flat = true,
@@ -1866,21 +1940,59 @@ fun ModalSheet(
         topStart = sheetCorner.dp,
         topEnd = sheetCorner.dp,
     )
+    // 3.26.9：与 InlineModalSheet 用同一套进出（滑入/滑出 + 粘滞形变 + 遮罩淡入淡出），
+    // 宿主仍是 Dialog。3.26.8 这里写的是 `AnimatedVisibility(visible = true)`——
+    // 只有进入、没有退出，一 dismiss 窗口当场消失，和同窗口面板的观感对不上。
+    var closing by remember { mutableStateOf(false) }
+    var dismissReady by remember { mutableStateOf(false) }
+    val visibleState = remember { MutableTransitionState(false) }
+    LaunchedEffect(Unit) {
+        visibleState.targetState = true
+        delay(260)
+        dismissReady = true
+    }
+    fun close() {
+        if (closing) return
+        closing = true
+        visibleState.targetState = false
+    }
+    LaunchedEffect(closing, visibleState.isIdle, visibleState.currentState) {
+        if (closing && visibleState.isIdle && !visibleState.currentState) onDismiss()
+    }
+    val scrimAlpha by animateFloatAsState(
+        targetValue = if (visibleState.targetState) {
+            if (ui.palette.isDark) .38f else .22f
+        } else {
+            0f
+        },
+        animationSpec = spring(MOYU_DAMPING, 520f),
+        visibilityThreshold = .002f,
+        label = "modalSheetScrim",
+    )
+    val sheetShape by animateFloatAsState(
+        targetValue = if (visibleState.targetState) 1f else 0f,
+        animationSpec = spring(MOYU_DAMPING, 320f),
+        label = "modalSheetShape",
+    )
     Dialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { close() },
         properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
     ) {
         DialogBlur()
         Box(
             Modifier
                 .fillMaxSize()
-                .background(Color.Black.copy(alpha = if (ui.palette.isDark) .38f else .22f)),
+                .background(Color.Black.copy(alpha = scrimAlpha)),
             contentAlignment = Alignment.BottomCenter,
         ) {
             Box(
                 Modifier
                     .fillMaxSize()
-                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { onDismiss() }
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        enabled = dismissReady && !closing,
+                    ) { close() }
             )
             BoxWithConstraints(
                 Modifier
@@ -1891,19 +2003,27 @@ fun ModalSheet(
             ) {
                 val panelMax = maxHeight
                 AnimatedVisibility(
-                    visible = true,
-                    // No spring overshoot here: the old 330f spring made the
-                    // sheet top edge bounce/閳ユ竾lash閳?while it was entering.
+                    visibleState = visibleState,
                     // Slide only: a fading opaque sheet shows the page through
                     // itself while it enters.
                     enter = slideInVertically(
                         initialOffsetY = { it },
-                        animationSpec = spring(MOYU_DAMPING, 380f),
+                        animationSpec = spring(MOYU_DAMPING, 420f),
+                    ),
+                    exit = slideOutVertically(
+                        targetOffsetY = { it },
+                        animationSpec = spring(MOYU_DAMPING, 460f),
                     ),
                 ) {
                     MoyuSurface(Modifier
                             .fillMaxWidth()
-                            .heightIn(max = panelMax),
+                            .heightIn(max = panelMax)
+                            .graphicsLayer {
+                                val v = sheetShape.coerceIn(0f, 1f)
+                                scaleY = .94f + .06f * ViscousDrop.lagged(v)
+                                scaleX = .988f + .012f * v
+                                transformOrigin = androidx.compose.ui.graphics.TransformOrigin(.5f, 1f)
+                            },
                         radius = sheetCorner,
                         shape = panelShape,
                         flat = true,
@@ -2117,24 +2237,51 @@ fun FpsMeter(modifier: Modifier = Modifier) {
 @Composable
 fun ColorDot(color: Color, selected: Boolean, onClick: () -> Unit) {
     val ui = LocalInk.current
-    Box(
-        Modifier
-            .size(34.dp)
-            .clip(CircleShape)
-            .background(color)
-            .then(
-                if (selected) Modifier.border(2.dp, ui.palette.ink, CircleShape)
-                else Modifier.border(
-                    .8.dp,
-                    if (ui.palette.isDark) Color.White.copy(alpha = .22f) else Color.Black.copy(alpha = .12f),
-                    CircleShape,
-                )
+    val motion = ui.settings.motion != "none"
+    // 3.26.9：选中时外环与勾一起「长出来」，不再直接换描边和图标。
+    val p by animateFloatAsState(
+        targetValue = if (selected) 1f else 0f,
+        animationSpec = if (motion) spring(MOYU_DAMPING, 480f) else tween(0),
+        label = "colorDot",
+    )
+    val v = p.coerceIn(0f, 1f)
+    val checkColor = if (color.red * .3f + color.green * .6f + color.blue * .1f > .6f) {
+        Color(0xFF171713)
+    } else {
+        Color.White
+    }
+    Canvas(Modifier.size(34.dp).bouncy { onClick() }) {
+        drawCircle(color, radius = size.minDimension / 2)
+        if (v > .001f) {
+            drawCircle(
+                ui.palette.ink.copy(alpha = v),
+                radius = size.minDimension / 2 - 1.5.dp.toPx(),
+                style = Stroke(2.dp.toPx()),
             )
-            .bouncy { onClick() },
-        contentAlignment = Alignment.Center,
-    ) {
-        if (selected) {
-            LineIcon(Glyph.Check, if (color.red * .3f + color.green * .6f + color.blue * .1f > .6f) Color(0xFF171713) else Color.White, 16.dp, 2f)
+            val s = .55f + .45f * v
+            val check = Path().apply {
+                moveTo(center.x - size.width * .22f * s, center.y + size.height * .01f * s)
+                lineTo(center.x - size.width * .06f * s, center.y + size.height * .18f * s)
+                lineTo(center.x + size.width * .23f * s, center.y - size.height * .18f * s)
+            }
+            val measure = PathMeasure().apply { setPath(check, false) }
+            val partial = Path()
+            measure.getSegment(0f, measure.length * v, partial, true)
+            drawPath(
+                partial,
+                checkColor,
+                style = Stroke(
+                    width = 2.dp.toPx(),
+                    cap = StrokeCap.Round,
+                    join = StrokeJoin.Round,
+                ),
+            )
+        } else {
+            drawCircle(
+                if (ui.palette.isDark) Color.White.copy(alpha = .22f) else Color.Black.copy(alpha = .12f),
+                radius = size.minDimension / 2 - .4.dp.toPx(),
+                style = Stroke(.8.dp.toPx()),
+            )
         }
     }
 }

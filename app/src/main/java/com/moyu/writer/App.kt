@@ -177,7 +177,9 @@ private fun MoyuRoot(store: AppStore, initialNote: String?, consumeInitialNote: 
     var stack by remember { mutableStateOf(listOf<Screen>(Screen.Library)) }
     // 长按标签栏拖动镜片时的连续位置（可见页序列），松手回 null。
     // 页面与镜片读同一个值，所以「镜片到哪、页面跟到哪」不会脱位。
-    var tabDrag by remember { mutableStateOf<Float?>(null) }
+    // 长按拖动镜片时的连续位置。传 State 而不是拆包值：TabPager 在绘制阶段
+    // 读它，拖动时不再每帧重组整页（3.26.9 修「长按拖动很卡」）。
+    val tabDrag = remember { mutableStateOf<Float?>(null) }
     // Rapid back presses used to start a second page transition before the
     // first one had finished, so the same detail page was composed twice and
     // both copies slid off together. One pop per transition window keeps a
@@ -208,6 +210,10 @@ private fun MoyuRoot(store: AppStore, initialNote: String?, consumeInitialNote: 
     val settingsListState = rememberLazyListState()
     val current = stack.lastOrNull() ?: Screen.Library
     val rootVisible = current.depth == 0
+    // 同窗口面板（InlineModalSheet）存活期间收起 TabBar：面板是页面内的层，
+    // TabBar 是 root 的兄弟节点、画在页面之上，不收面板底部会被盖住、点不到。
+    var sheetSuppressed by remember { mutableStateOf(false) }
+    val suppressSheet: (Boolean) -> Unit = remember { { v -> sheetSuppressed = v } }
 
     LaunchedEffect(Unit) {
         if (store.data.settings.autoUpdate && BuildConfig.UPDATE_REPO.isNotBlank()) {
@@ -277,7 +283,8 @@ private fun MoyuRoot(store: AppStore, initialNote: String?, consumeInitialNote: 
             // In-page glass (the AI input row and its chips) samples the same
             // recorded page layer as the tab bar, so both read the same pixels.
             androidx.compose.runtime.CompositionLocalProvider(
-                LocalGlassBackdrop provides tabBarBackdrop
+                LocalGlassBackdrop provides tabBarBackdrop,
+                LocalSheetSuppressed provides suppressSheet,
             ) {
 // The tab pager is the bottom layer of the depth stack and is kept alive
 // while a detail page sits on top of it: pushed pages wait one screen to the
@@ -449,7 +456,8 @@ DepthStack(
         )
 
         AnimatedVisibility(
-            visible = rootVisible,
+            // 面板打开时一起收起：面板内的底部行必须点得到（3.26.9）。
+            visible = rootVisible && !sheetSuppressed,
             enter = slideInVertically(initialOffsetY = { it / 2 }, animationSpec = spring(MOYU_DAMPING, 380f)) + fadeIn(tween(180)),
             exit = slideOutVertically(targetOffsetY = { it }, animationSpec = tween(200)) + fadeOut(tween(140)),
             modifier = Modifier.align(Alignment.BottomCenter),
@@ -470,7 +478,7 @@ DepthStack(
                 onSelect = { index ->
                     stack = listOf(barScreens.getOrElse(index) { Screen.Settings })
                 },
-                onDrag = { tabDrag = it },
+                onDrag = { tabDrag.value = it },
                 backdrop = tabBarBackdrop,
             )
         }

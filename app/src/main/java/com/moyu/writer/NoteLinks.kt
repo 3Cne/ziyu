@@ -476,18 +476,45 @@ private fun NotePickRow(note: Note, checked: Boolean, onToggle: (Boolean) -> Uni
             )
         }
         Spacer(Modifier.width(8.dp))
+        // 3.26.9：底色从中心扩散，+ 缩掉、勾弹出——和 SelectMark 同一套。
+        // 未选必须保留「加号」：它才是「点我绑定」的提示，不能只剩一个空圈。
+        val v by animateFloatAsState(
+            targetValue = if (checked) 1f else 0f,
+            animationSpec = if (ui.settings.motion == "none") tween(0) else spring(MOYU_DAMPING, 520f),
+            label = "pickMark",
+        )
         Box(
             Modifier
                 .size(28.dp)
                 .clip(CircleShape)
-                .background(if (checked) ui.accent else p.faint),
+                .drawBehind {
+                    val side = size.minDimension / 2f
+                    drawCircle(p.faint, radius = side)
+                    if (v > .001f) drawCircle(ui.accent, radius = side * v.coerceIn(0f, 1f))
+                },
             contentAlignment = Alignment.Center,
         ) {
-            LineIcon(
-                if (checked) Glyph.Check else Glyph.Plus,
-                if (checked) (if (p.isDark) p.bgTop else Color.White) else p.muted,
-                14.dp,
-            )
+            Box(
+                Modifier.graphicsLayer {
+                    alpha = 1f - v
+                    scaleX = 1f - .25f * v
+                    scaleY = 1f - .25f * v
+                }
+            ) {
+                LineIcon(Glyph.Plus, p.muted, 14.dp)
+            }
+            if (v > .001f) {
+                Box(
+                    Modifier.graphicsLayer {
+                        alpha = v.coerceIn(0f, 1f)
+                        val s = .55f + .45f * v.coerceIn(0f, 1f)
+                        scaleX = s
+                        scaleY = s
+                    }
+                ) {
+                    LineIcon(Glyph.Check, if (p.isDark) p.bgTop else Color.White, 14.dp)
+                }
+            }
         }
     }
 }
