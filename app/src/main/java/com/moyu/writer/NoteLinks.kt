@@ -151,6 +151,9 @@ fun ChapterNotesSheet(
     bookId: String,
     chapterId: String,
     onDismiss: () -> Unit,
+    /** true = 作为「写作选项 → 章节笔记」同框层级的第二层画在面板里。 */
+    embedded: Boolean = false,
+    onBack: (() -> Unit)? = null,
 ) {
     val ui = LocalInk.current
     val p = ui.palette
@@ -203,12 +206,8 @@ fun ChapterNotesSheet(
         )
     }
 
-    InlineModalSheet(onDismiss = onDismiss) { close ->
-        DialogTitle(
-            "章节笔记",
-            "${book.title} · ${chapter.title}，已绑定 ${linked.size} 条",
-            onClose = close,
-        )
+    val body: @Composable androidx.compose.foundation.layout.ColumnScope.((() -> Unit)) -> Unit = { close ->
+        Spacer(Modifier.height(12.dp))
         Spacer(Modifier.height(12.dp))
         SettingRow(
             "行文时悬浮",
@@ -340,6 +339,18 @@ fun ChapterNotesSheet(
             }
         }
         Spacer(Modifier.height(14.dp))
+    }
+    val subtitle = "${book.title} · ${chapter.title}，已绑定 ${linked.size} 条"
+    if (embedded) {
+        Column(Modifier.fillMaxWidth()) {
+            SheetPageHeader("章节笔记", subtitle, onBack ?: onDismiss)
+            body { onDismiss() }
+        }
+    } else {
+        InlineModalSheet(onDismiss = onDismiss) { close ->
+            DialogTitle("章节笔记", subtitle, onClose = close)
+            body(close)
+        }
     }
 }
 
@@ -1063,6 +1074,9 @@ fun NoteChapterSheet(
     noteId: String,
     onDismiss: () -> Unit,
     onOpenChapter: (String, String) -> Unit,
+    /** true = 作为「笔记选项 → 关联章节」同框层级的第二层画在面板里。 */
+    embedded: Boolean = false,
+    onBack: (() -> Unit)? = null,
 ) {
     val ui = LocalInk.current
     val p = ui.palette
@@ -1072,12 +1086,7 @@ fun NoteChapterSheet(
         LaunchedEffect(Unit) { onDismiss() }
         return
     }
-    InlineModalSheet(onDismiss = onDismiss) { close ->
-        DialogTitle(
-            "关联章节",
-            "已关联 ${note.chapterIds.size} 个章节。点章节名去那一章写作，右侧开关切换关联。",
-            onClose = close,
-        )
+    val body: @Composable androidx.compose.foundation.layout.ColumnScope.((() -> Unit)) -> Unit = { close ->
         Spacer(Modifier.height(12.dp))
         if (data.books.isEmpty()) {
             Txt("书架还是空的。先建一本书，才能关联章节。", size = 11f, color = p.muted)
@@ -1146,6 +1155,18 @@ fun NoteChapterSheet(
             Spacer(Modifier.height(14.dp))
         }
         Spacer(Modifier.height(4.dp))
+    }
+    val subtitle = "已关联 ${note.chapterIds.size} 个章节。点章节名去那一章写作，右侧开关切换关联。"
+    if (embedded) {
+        Column(Modifier.fillMaxWidth()) {
+            SheetPageHeader("关联章节", subtitle, onBack ?: onDismiss)
+            body { onDismiss() }
+        }
+    } else {
+        InlineModalSheet(onDismiss = onDismiss) { close ->
+            DialogTitle("关联章节", subtitle, onClose = close)
+            body(close)
+        }
     }
 }
 

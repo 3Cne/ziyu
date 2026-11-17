@@ -468,6 +468,12 @@ fun WritingScreen(
     // （首次与旧备份默认收起），每次开合写回设置。
     var abilityOpen by remember { mutableStateOf(settings.dockOpen) }
     val abilityT = remember { Animatable(1f) }
+    // 3.26.11：能力栏开合前先记住正文滚动位置。
+    // 上一版在 LaunchedEffect(abilityOpen) 里才读 editor.scrollY——那时
+    // 底部让位已按新值重排、EditText 的滚动已被清零，于是把 0 当成
+    // 「要守住的位置」钉死：滚到后段一点能力栏就整页回顶（用户录屏
+    // 6c8b2f2b，5.0s 处先跳顶再被光标拉回来）。
+    var abilityScrollKeep by remember { mutableIntStateOf(0) }
     LaunchedEffect(abilityOpen) {
         // 3.26.10：改成 300ms 的 tween。上一版用临界阻尼 spring(1f, 300f)：
         // 不过冲、但尾部极长——最后 5% 要爬 200ms 以上，能力栏的 alpha 直接
@@ -488,7 +494,8 @@ fun WritingScreen(
     // 每帧校正一次，动画到位后再多钉 6 帧，压住收尾那次重排。
     LaunchedEffect(abilityOpen) {
         val editor = bodyEditor ?: return@LaunchedEffect
-        val keep = editor.scrollY
+        // 用点击那一刻记下的位置，不读当前 scrollY（可能已被重排清零）。
+        val keep = abilityScrollKeep
         val target = if (abilityOpen) 1f else 0f
         var settle = 6
         while (settle > 0) {
@@ -1774,14 +1781,15 @@ fun WritingScreen(
                         hideEditorKeyboard()
                     },
                     onCollapse = {
-                        // 3.26.9：只翻状态，滚动位置由下面的钉住 effect 每帧守住。
-                        // 原来这里 post + 140ms 补两次 scrollTo，但底部让位是跟着
-                        // abilityT 连续变的，TextView 每次重排都会 bringIntoView，
-                        // 补两次压不住中间那些帧。
+                        // 3.26.11：先记住当前滚动位置，再翻状态。
+                        // 3.26.9 只翻状态、由钉住 effect 每帧守住，但 effect 启动时
+                        // 读到的 scrollY 已经被重排清零（滚到后段时必现回顶）。
+                        abilityScrollKeep = bodyEditor?.scrollY ?: abilityScrollKeep
                         abilityOpen = false
                     },
                     onSymbol = { insertRaw(it) },
                     onExpand = {
+                        abilityScrollKeep = bodyEditor?.scrollY ?: abilityScrollKeep
                         abilityOpen = true
                     },
                     selectionMode = body.selection.start != body.selection.end,
@@ -1835,6 +1843,7 @@ fun WritingScreen(
                         .clip(SmoothCorner(11.dp))
                         .background(dockTone(ui))
                         .bouncy {
+                            abilityScrollKeep = bodyEditor?.scrollY ?: abilityScrollKeep
                             abilityOpen = !abilityOpen
                         },
                     contentAlignment = Alignment.Center,
@@ -5142,29 +5151,58 @@ fun BookEditorScreen(
         }
 
         if (menuOpen) {
+            // 3.26.11：章节笔记 / 导出这本书收进同一面板（横向弹簧切换）；
+            // 书籍详情是页面跳转，等面板退场后再走。
+            var level by remember(chapter.id) { mutableIntStateOf(0) }
             InlineModalSheet(onDismiss = {
                 menuOpen = false
                 pendingMenuAction?.invoke()
                 pendingMenuAction = null
             }) { close ->
-                DialogTitle("写作选项", "${book.title} · ${chapter.title}", onClose = close)
-                Spacer(Modifier.height(14.dp))
-                SettingRow("书籍详情与目录", "查看章节、封面和统计", Glyph.Book, onClick = {
-                    pendingMenuAction = { onOpenBook() }
-                    close()
-                })
-                RowDivider()
-                SettingRow("章节笔记", "绑定笔记、行文时悬浮", Glyph.Link, onClick = {
-                    pendingMenuAction = { notesOpen = true }
-                    close()
-                })
-                RowDivider()
-                SettingRow("导出这本书", "EPUB / TXT", Glyph.Export, onClick = {
-                    pendingMenuAction = { exportOpen = true }
-                    close()
-                })
-                RowDivider()
-                PaperStyleMenu()
+                AnimatedContent(
+                    targetState = level,
+                    transitionSpec = {
+                        val forward = targetState > initialState
+                        (slideInHorizontally(spring(MOYU_DAMPING, 380f)) { w ->
+                            if (forward) w / 3 else -w / 3
+                        }) togetherWith
+                            (slideOutHorizontally(spring(MOYU_DAMPING, 380f)) { w ->
+                                if (forward) -w / 3 else w / 3
+                            })
+                    },
+                    label = "writingOptionLevel",
+                ) { step ->
+                    when (step) {
+                        0 -> Column(Modifier.fillMaxWidth()) {
+                            DialogTitle("写作选项", "${book.title} · ${chapter.title}", onClose = close)
+                            Spacer(Modifier.height(14.dp))
+                            SettingRow("书籍详情与目录", "查看章节、封面和统计", Glyph.Book, onClick = {
+                                pendingMenuAction = { onOpenBook() }
+                                close()
+                            })
+                            RowDivider()
+                            SettingRow("章节笔记", "绑定笔记、行文时悬浮", Glyph.Link, onClick = { level = 1 })
+                            RowDivider()
+                            SettingRow("导出这本书", "EPUB / TXT", Glyph.Export, onClick = { level = 2 })
+                            RowDivider()
+                            PaperStyleMenu()
+                        }
+                        1 -> ChapterNotesSheet(
+                            store = store,
+                            bookId = book.id,
+                            chapterId = chapter.id,
+                            onDismiss = { close() },
+                            embedded = true,
+                            onBack = { level = 0 },
+                        )
+                        else -> ExportSheet(
+                            book = book,
+                            onDismiss = { close() },
+                            embedded = true,
+                            onBack = { level = 0 },
+                        )
+                    }
+                }
             }
         }
     }
@@ -5236,43 +5274,74 @@ fun NoteEditorScreen(
         )
 
         if (menuOpen) {
+            // 3.26.11：关联章节 / 移动到笔记夹收进同一面板（横向弹簧切换）；
+            // 删除是居中确认框，仍等面板退场后再开。
+            var level by remember(note.id) { mutableIntStateOf(0) }
             InlineModalSheet(onDismiss = {
                 menuOpen = false
                 pendingMenuAction?.invoke()
                 pendingMenuAction = null
             }) { close ->
-                DialogTitle("笔记选项", "${note.todos.size} 项待办 · ${formatWords(countWords(note.content))} 字", onClose = close)
-                Spacer(Modifier.height(14.dp))
-                SettingRow(
-                    "关联章节",
-                    if (chapterRefs.isEmpty()) "还没有关联章节" else "已关联 ${chapterRefs.size} 个章节",
-                    Glyph.Link,
-                    onClick = {
-                        pendingMenuAction = { chapterSheetOpen = true }
-                        close()
+                AnimatedContent(
+                    targetState = level,
+                    transitionSpec = {
+                        val forward = targetState > initialState
+                        (slideInHorizontally(spring(MOYU_DAMPING, 380f)) { w ->
+                            if (forward) w / 3 else -w / 3
+                        }) togetherWith
+                            (slideOutHorizontally(spring(MOYU_DAMPING, 380f)) { w ->
+                                if (forward) -w / 3 else w / 3
+                            })
                     },
-                )
-                RowDivider()
-                SettingRow("固定到顶部", if (note.pinned) "已固定" else "按更新时间排序", Glyph.Pin, trailing = {
-                    InkToggle(note.pinned) { on -> store.updateNote(note.id) { it.copy(pinned = on) } }
-                })
-                RowDivider()
-                SettingRow(
-                    "移动到笔记夹",
-                    store.noteGroups.firstOrNull { it.id == note.groupId }?.name ?: "未归类",
-                    Glyph.Folder,
-                    onClick = {
-                        pendingMenuAction = { groupPickerOpen = true }
-                        close()
-                    },
-                )
-                RowDivider()
-                PaperStyleMenu()
-                RowDivider()
-                SettingRow("删除笔记", "正文和待办会一起删除", Glyph.Trash, onClick = {
-                    pendingMenuAction = { deleteOpen = true }
-                    close()
-                })
+                    label = "noteOptionLevel",
+                ) { step ->
+                    when (step) {
+                        0 -> Column(Modifier.fillMaxWidth()) {
+                            DialogTitle("笔记选项", "${note.todos.size} 项待办 · ${formatWords(countWords(note.content))} 字", onClose = close)
+                            Spacer(Modifier.height(14.dp))
+                            SettingRow(
+                                "关联章节",
+                                if (chapterRefs.isEmpty()) "还没有关联章节" else "已关联 ${chapterRefs.size} 个章节",
+                                Glyph.Link,
+                                onClick = { level = 1 },
+                            )
+                            RowDivider()
+                            SettingRow("固定到顶部", if (note.pinned) "已固定" else "按更新时间排序", Glyph.Pin, trailing = {
+                                InkToggle(note.pinned) { on -> store.updateNote(note.id) { it.copy(pinned = on) } }
+                            })
+                            RowDivider()
+                            SettingRow(
+                                "移动到笔记夹",
+                                store.noteGroups.firstOrNull { it.id == note.groupId }?.name ?: "未归类",
+                                Glyph.Folder,
+                                onClick = { level = 2 },
+                            )
+                            RowDivider()
+                            PaperStyleMenu()
+                            RowDivider()
+                            SettingRow("删除笔记", "正文和待办会一起删除", Glyph.Trash, onClick = {
+                                pendingMenuAction = { deleteOpen = true }
+                                close()
+                            })
+                        }
+                        1 -> NoteChapterSheet(
+                            store = store,
+                            noteId = note.id,
+                            onDismiss = { close() },
+                            onOpenChapter = { bookId, chapterId -> onOpenChapter(bookId, chapterId) },
+                            embedded = true,
+                            onBack = { level = 0 },
+                        )
+                        else -> NoteFolderPickerSheet(
+                            current = note.groupId,
+                            store = store,
+                            onSelect = { group -> store.setNoteGroup(note.id, group) },
+                            onDismiss = { close() },
+                            embedded = true,
+                            onBack = { level = 0 },
+                        )
+                    }
+                }
             }
         }
     }
