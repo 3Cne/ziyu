@@ -1784,12 +1784,12 @@ fun WritingScreen(
                         // 3.26.11：先记住当前滚动位置，再翻状态。
                         // 3.26.9 只翻状态、由钉住 effect 每帧守住，但 effect 启动时
                         // 读到的 scrollY 已经被重排清零（滚到后段时必现回顶）。
-                        abilityScrollKeep = bodyEditor?.scrollY ?: abilityScrollKeep
+                        abilityScrollKeep = bodyScrollY
                         abilityOpen = false
                     },
                     onSymbol = { insertRaw(it) },
                     onExpand = {
-                        abilityScrollKeep = bodyEditor?.scrollY ?: abilityScrollKeep
+                        abilityScrollKeep = bodyScrollY
                         abilityOpen = true
                     },
                     selectionMode = body.selection.start != body.selection.end,
@@ -1843,7 +1843,7 @@ fun WritingScreen(
                         .clip(SmoothCorner(11.dp))
                         .background(dockTone(ui))
                         .bouncy {
-                            abilityScrollKeep = bodyEditor?.scrollY ?: abilityScrollKeep
+                            abilityScrollKeep = bodyScrollY
                             abilityOpen = !abilityOpen
                         },
                     contentAlignment = Alignment.Center,
@@ -5173,7 +5173,7 @@ fun BookEditorScreen(
                     label = "writingOptionLevel",
                 ) { step ->
                     when (step) {
-                        0 -> Column(Modifier.fillMaxWidth()) {
+                        0 -> SheetPane {
                             DialogTitle("写作选项", "${book.title} · ${chapter.title}", onClose = close)
                             Spacer(Modifier.height(14.dp))
                             SettingRow("书籍详情与目录", "查看章节、封面和统计", Glyph.Book, onClick = {
@@ -5296,7 +5296,7 @@ fun NoteEditorScreen(
                     label = "noteOptionLevel",
                 ) { step ->
                     when (step) {
-                        0 -> Column(Modifier.fillMaxWidth()) {
+                        0 -> SheetPane {
                             DialogTitle("笔记选项", "${note.todos.size} 项待办 · ${formatWords(countWords(note.content))} 字", onClose = close)
                             Spacer(Modifier.height(14.dp))
                             SettingRow(
@@ -5324,22 +5324,26 @@ fun NoteEditorScreen(
                                 close()
                             })
                         }
-                        1 -> NoteChapterSheet(
-                            store = store,
-                            noteId = note.id,
-                            onDismiss = { close() },
-                            onOpenChapter = { bookId, chapterId -> onOpenChapter(bookId, chapterId) },
-                            embedded = true,
-                            onBack = { level = 0 },
-                        )
-                        else -> NoteFolderPickerSheet(
-                            current = note.groupId,
-                            store = store,
-                            onSelect = { group -> store.setNoteGroup(note.id, group) },
-                            onDismiss = { close() },
-                            embedded = true,
-                            onBack = { level = 0 },
-                        )
+                        1 -> SheetPane {
+                            NoteChapterSheet(
+                                store = store,
+                                noteId = note.id,
+                                onDismiss = { close() },
+                                onOpenChapter = { bookId, chapterId -> onOpenChapter(bookId, chapterId) },
+                                embedded = true,
+                                onBack = { level = 0 },
+                            )
+                        }
+                        else -> SheetPane {
+                            NoteFolderPickerSheet(
+                                current = note.groupId,
+                                store = store,
+                                onSelect = { group -> store.setNoteGroup(note.id, group) },
+                                onDismiss = { close() },
+                                embedded = true,
+                                onBack = { level = 0 },
+                            )
+                        }
                     }
                 }
             }

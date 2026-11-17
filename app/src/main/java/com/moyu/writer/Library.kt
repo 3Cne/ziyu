@@ -1240,7 +1240,7 @@ fun BookDetailScreen(
                 label = "bookSheet",
             ) { step ->
                 when (step) {
-                    1 -> Column(Modifier.fillMaxWidth()) {
+                    1 -> SheetPane {
                         DialogTitle("书籍设置", book.title, onClose = { close() })
                         Spacer(Modifier.height(14.dp))
                         SettingRow("编辑书籍", "书名、作者、封面和简介", Glyph.Edit, onClick = {
@@ -1271,21 +1271,25 @@ fun BookDetailScreen(
                             close()
                         })
                     }
-                    2 -> GroupPickerSheet(
-                        kind = GroupKind.BOOK,
-                        current = book.groupId,
-                        store = store,
-                        onSelect = { group -> store.setBookGroup(book.id, group) },
-                        onDismiss = { close() },
-                        embedded = true,
-                        onBack = { sheetLevel = 1 },
-                    )
-                    else -> ExportSheet(
-                        book = book,
-                        onDismiss = { close() },
-                        embedded = true,
-                        onBack = { sheetLevel = 1 },
-                    )
+                    2 -> SheetPane {
+                        GroupPickerSheet(
+                            kind = GroupKind.BOOK,
+                            current = book.groupId,
+                            store = store,
+                            onSelect = { group -> store.setBookGroup(book.id, group) },
+                            onDismiss = { close() },
+                            embedded = true,
+                            onBack = { sheetLevel = 1 },
+                        )
+                    }
+                    else -> SheetPane {
+                        ExportSheet(
+                            book = book,
+                            onDismiss = { close() },
+                            embedded = true,
+                            onBack = { sheetLevel = 1 },
+                        )
+                    }
                 }
             }
         }

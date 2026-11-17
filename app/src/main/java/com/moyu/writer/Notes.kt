@@ -511,7 +511,7 @@ fun NoteFolderScreen(
                 label = "noteSheet",
             ) { step ->
                 when (step) {
-                    0 -> Column(Modifier.fillMaxWidth()) {
+                    0 -> SheetPane {
                         DialogTitle(note.title, "${formatWords(note.words)} 字 · ${relativeTime(note.updatedAt)}", onClose = { close() })
                         Spacer(Modifier.height(13.dp))
                         SettingRow("打开笔记", "继续写正文", Glyph.Edit, onClick = {

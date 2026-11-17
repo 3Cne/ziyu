@@ -1930,13 +1930,33 @@ fun InlineModalSheet(
     }
 }
 
+/**
+ * 同框面板的每一层：自带**不透明纸底**。
+ *
+ * 3.26.12：3.26.9–3.26.11 的同框切换只做了横向滑动，没有给每一层铺底，
+ * 于是切到第二层时两层的文字同时可见、互相叠在一起（用户录屏 e8a40d6b：
+ * 「写作选项」和「导出书籍」两个标题上下摞着）。面板底色在 MoyuSurface 上，
+ * 层内透明，滑动时不会遮挡——每一层必须自己铺纸。
+ */
+@Composable
+fun SheetPane(
+    content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit,
+) {
+    val ui = LocalInk.current
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .background(ui.palette.paper),
+        content = content,
+    )
+}
+
 @Composable
 fun ModalSheet(
     onDismiss: () -> Unit,
     imeAware: Boolean = false,
     content: @Composable ColumnScope.() -> Unit,
-) {
-    val ui = LocalInk.current
+) {    val ui = LocalInk.current
     val sheetCorner = GlassStyle.corner
     val panelShape = SmoothCorner(
         topStart = sheetCorner.dp,
