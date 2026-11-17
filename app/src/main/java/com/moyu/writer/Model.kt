@@ -1,4 +1,4 @@
-﻿package com.moyu.writer
+package com.moyu.writer
 
 import android.content.Context
 import android.graphics.Color as AndroidColor
@@ -52,6 +52,12 @@ data class Book(
     val updatedAt: Long = System.currentTimeMillis(),
     val pinned: Boolean = false,
     val groupId: String? = null,
+    /**
+     * 故事圣经（3.26.16）：角色 / 角色关系 / 故事时间线 / 大纲。
+     * 这是**唯一事实源**，问书（下一批）只读写这一层，不另建一份。
+     * 空对象表示这本书还没用过；旧备份没有该字段时解出空对象，不算迁移。
+     */
+    val bible: BookBible = BookBible(),
 ) {
     val words: Int get() = chapters.sumOf { countWords(it.content) }
 
@@ -95,6 +101,89 @@ data class Group(
     val color: Long = 0xFF8A7A62,
     val order: Int = 0,
 )
+
+/** 角色之间的关系类型。枚举而不是自由文本：图上的颜色、筛选、问书的读写都要靠它枚举。 */
+enum class RelationKind(val label: String) {
+    FAMILY("亲人"),
+    LOVER("恋人"),
+    FRIEND("朋友"),
+    ALLY("同盟"),
+    RIVAL("对手"),
+    ENEMY("仇敌"),
+    MENTOR("师徒"),
+    OTHER("其他"),
+}
+
+data class StoryCharacter(
+    val id: String = uuid(),
+    val name: String = "",
+    /** 主角 / 配角 / 反派，自由文本，空表示没填。 */
+    val role: String = "",
+    /** 一句话：他是谁、想要什么。 */
+    val note: String = "",
+)
+
+data class StoryRelation(
+    val id: String = uuid(),
+    val from: String,
+    val to: String,
+    val kind: RelationKind = RelationKind.OTHER,
+)
+
+data class StoryEvent(
+    val id: String = uuid(),
+    /** 故事内时间，自由文本（"11 月 7 日"、"三年前"）。 */
+    val whenText: String = "",
+    val title: String = "",
+    val note: String = "",
+    val chapterId: String? = null,
+    val characterIds: List<String> = emptyList(),
+)
+
+data class OutlineBeat(
+    val id: String = uuid(),
+    val text: String = "",
+    val done: Boolean = false,
+)
+
+data class OutlineNode(
+    val id: String = uuid(),
+    /** 对应哪一章；null 表示还没落到正文（显示「待写」）。 */
+    val chapterId: String? = null,
+    val title: String = "",
+    val beats: List<OutlineBeat> = emptyList(),
+)
+
+data class BookBible(
+    val characters: List<StoryCharacter> = emptyList(),
+    val relations: List<StoryRelation> = emptyList(),
+    val events: List<StoryEvent> = emptyList(),
+    val outline: List<OutlineNode> = emptyList(),
+) {
+    val isEmpty: Boolean
+        get() = characters.isEmpty() && relations.isEmpty() && events.isEmpty() && outline.isEmpty()
+
+    fun character(id: String?): StoryCharacter? = characters.firstOrNull { it.id == id }
+
+    /** 与某个角色直接相连的所有关系（两个方向都算）。 */
+    fun relationsOf(id: String): List<StoryRelation> =
+        relations.filter { it.from == id || it.to == id }
+
+    fun otherEnd(r: StoryRelation, id: String): StoryCharacter? =
+        character(if (r.from == id) r.to else r.from)
+
+    /** 删角色时连带删掉挂在它身上的关系与事件引用，避免留悬空边。 */
+    fun withoutCharacter(id: String): BookBible = copy(
+        characters = characters.filterNot { it.id == id },
+        relations = relations.filterNot { it.from == id || it.to == id },
+        events = events.map { e -> e.copy(characterIds = e.characterIds.filterNot { it == id }) },
+    )
+
+    fun withoutChapter(chapterId: String): BookBible = copy(
+        outline = outline.filterNot { it.chapterId == chapterId },
+        events = events.map { if (it.chapterId == chapterId) it.copy(chapterId = null) else it },
+    )
+}
 
 data class AppSettings(
     val theme: String = "paper",
@@ -925,6 +1014,7 @@ private fun encodeData(data: AppData): String {
             put("chapters", chapters); put("createdAt", b.createdAt)
             put("updatedAt", b.updatedAt); put("pinned", b.pinned)
             put("groupId", b.groupId ?: JSONObject.NULL)
+            put("bible", encodeBible(b.bible))
         })
     }
     root.put("books", books)
@@ -960,6 +1050,115 @@ private fun encodeGroups(groups: List<Group>): JSONArray {
         })
     }
     return arr
+}
+
+/** 故事圣经的编码。四个 list 全写；空对象也写，读回来是空 bible，不做字段猜测。 */
+private fun encodeBible(b: BookBible): JSONObject = JSONObject().apply {
+    val cs = JSONArray()
+    b.characters.forEach { c ->
+        cs.put(JSONObject().apply {
+            put("id", c.id); put("name", c.name); put("role", c.role); put("note", c.note)
+        })
+    }
+    val rs = JSONArray()
+    b.relations.forEach { r ->
+        rs.put(JSONObject().apply {
+            put("id", r.id); put("from", r.from); put("to", r.to); put("kind", r.kind.name)
+        })
+    }
+    val es = JSONArray()
+    b.events.forEach { e ->
+        es.put(JSONObject().apply {
+            put("id", e.id); put("whenText", e.whenText); put("title", e.title)
+            put("note", e.note); put("chapterId", e.chapterId ?: JSONObject.NULL)
+            put("characterIds", JSONArray(e.characterIds))
+        })
+    }
+    val os = JSONArray()
+    b.outline.forEach { n ->
+        val bs = JSONArray()
+        n.beats.forEach { t ->
+            bs.put(JSONObject().apply {
+                put("id", t.id); put("text", t.text); put("done", t.done)
+            })
+        }
+        os.put(JSONObject().apply {
+            put("id", n.id); put("chapterId", n.chapterId ?: JSONObject.NULL)
+            put("title", n.title); put("beats", bs)
+        })
+    }
+    put("characters", cs); put("relations", rs); put("events", es); put("outline", os)
+}
+
+private fun decodeBible(o: JSONObject?): BookBible {
+    if (o == null) return BookBible()
+    val chars = mutableListOf<StoryCharacter>()
+    val ca = o.optJSONArray("characters") ?: JSONArray()
+    for (i in 0 until ca.length()) {
+        val c = ca.optJSONObject(i) ?: continue
+        chars += StoryCharacter(
+            id = c.optString("id", uuid()),
+            name = c.optString("name", ""),
+            role = c.optString("role", ""),
+            note = c.optString("note", ""),
+        )
+    }
+    val rels = mutableListOf<StoryRelation>()
+    val ra = o.optJSONArray("relations") ?: JSONArray()
+    for (i in 0 until ra.length()) {
+        val r = ra.optJSONObject(i) ?: continue
+        val from = r.optString("from", "")
+        val to = r.optString("to", "")
+        if (from.isBlank() || to.isBlank() || from == to) continue
+        rels += StoryRelation(
+            id = r.optString("id", uuid()),
+            from = from,
+            to = to,
+            kind = RelationKind.entries.firstOrNull { it.name == r.optString("kind") } ?: RelationKind.OTHER,
+        )
+    }
+    val events = mutableListOf<StoryEvent>()
+    val ea = o.optJSONArray("events") ?: JSONArray()
+    for (i in 0 until ea.length()) {
+        val e = ea.optJSONObject(i) ?: continue
+        events += StoryEvent(
+            id = e.optString("id", uuid()),
+            whenText = e.optString("whenText", ""),
+            title = e.optString("title", ""),
+            note = e.optString("note", ""),
+            chapterId = if (e.isNull("chapterId")) null else e.optString("chapterId"),
+            characterIds = decodeStringList(e, "characterIds"),
+        )
+    }
+    val outline = mutableListOf<OutlineNode>()
+    val oa = o.optJSONArray("outline") ?: JSONArray()
+    for (i in 0 until oa.length()) {
+        val n = oa.optJSONObject(i) ?: continue
+        val beats = mutableListOf<OutlineBeat>()
+        val ba = n.optJSONArray("beats") ?: JSONArray()
+        for (j in 0 until ba.length()) {
+            val t = ba.optJSONObject(j) ?: continue
+            beats += OutlineBeat(
+                id = t.optString("id", uuid()),
+                text = t.optString("text", ""),
+                done = t.optBoolean("done", false),
+            )
+        }
+        outline += OutlineNode(
+            id = n.optString("id", uuid()),
+            chapterId = if (n.isNull("chapterId")) null else n.optString("chapterId"),
+            title = n.optString("title", ""),
+            beats = beats,
+        )
+    }
+    // 悬空引用清一遍：关系端点、事件里的角色必须还在角色表里，否则图上会画出空节点。
+    val ids = chars.map { it.id }.toSet()
+    return BookBible(
+        characters = chars,
+        relations = rels.filter { it.from in ids && it.to in ids },
+        events = events.map { it.copy(characterIds = it.characterIds.filter { id -> id in ids }) },
+        outline = outline,
+    )
 }
 
 private fun decodeGroups(a: JSONArray?): List<Group> {
@@ -1182,6 +1381,7 @@ private fun decodeData(text: String): AppData {
             updatedAt = o.optLong("updatedAt", now()),
             pinned = o.optBoolean("pinned", false),
             groupId = if (o.isNull("groupId")) null else o.optString("groupId"),
+            bible = decodeBible(o.optJSONObject("bible")),
         )
     }
     val notes = mutableListOf<Note>()

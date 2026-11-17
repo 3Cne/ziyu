@@ -1132,6 +1132,7 @@ fun BookDetailScreen(
     var groupPickerOpen by remember { mutableStateOf(false) }
     var exportOpen by remember { mutableStateOf(false) }
     var addChapter by remember { mutableStateOf(false) }
+    var storyOpen by remember { mutableStateOf(false) }
     var chapterMenu by remember { mutableStateOf<Chapter?>(null) }
     var renameChapter by remember { mutableStateOf<Chapter?>(null) }
     var deleteChapter by remember { mutableStateOf<Chapter?>(null) }
@@ -1191,6 +1192,32 @@ fun BookDetailScreen(
                         glyph = Glyph.Edit,
                     )
                     GlassButton("导出", { exportOpen = true }, Modifier.width(104.dp), glyph = Glyph.Export)
+                }
+            }
+            item {
+                // 3.26.16：故事圣经入口。角色 / 关系 / 时间线 / 大纲都是「这本书的」，
+                // 所以挂在书籍详情而不是新开一个 tab；空着也常驻，点进去是带引导的空态。
+                val bible = book.bible
+                MoyuSurface(Modifier.fillMaxWidth(), radius = 20f, flat = true) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable { storyOpen = true }
+                            .padding(horizontal = 16.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Txt("故事", size = 15f, weight = FontWeight.Medium)
+                            Spacer(Modifier.height(4.dp))
+                            Txt(
+                                "${bible.characters.size} 位角色 · ${bible.relations.size} 条关系 · " +
+                                    "${bible.events.size} 个事件 · ${bible.outline.size} 章大纲",
+                                size = 10.5f,
+                                color = ui.palette.muted,
+                            )
+                        }
+                        LineIcon(Glyph.Chevron, ui.palette.muted, 16.dp, 1.4f)
+                    }
                 }
             }
             item {
@@ -1315,6 +1342,17 @@ fun BookDetailScreen(
                 editOpen = false
                 ToastBus.show("书籍信息已更新")
             },
+        )
+    }
+    if (storyOpen) {
+        StorySheet(
+            book = book,
+            onBible = { next -> store.updateBook(book.id) { it.copy(bible = next) } },
+            onOpenChapter = { chapterId ->
+                storyOpen = false
+                onOpenChapter(book.id, chapterId)
+            },
+            onDismiss = { storyOpen = false },
         )
     }
     if (groupPickerOpen) {
