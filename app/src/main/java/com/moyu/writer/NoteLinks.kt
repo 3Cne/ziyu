@@ -398,19 +398,14 @@ private fun FolderPickRow(
                 Txt("$count 条笔记", size = 9.5f, color = p.muted)
             }
             if (linked != null) {
-                Box(
-                    Modifier
-                        .size(28.dp)
-                        .clip(CircleShape)
-                        .background(if (linked) ui.accent else p.faint),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    LineIcon(
-                        if (linked) Glyph.Check else Glyph.Plus,
-                        if (linked) (if (p.isDark) p.bgTop else Color.White) else p.muted,
-                        14.dp,
-                    )
-                }
+                // 3.26.22：勾选统一走 SelectMark（整行点击负责切换，标记只画）。
+                SelectMark(
+                    checked = linked,
+                    onToggle = {},
+                    interactive = false,
+                    size = 26.dp,
+                    corner = 9.dp,
+                )
             }
         }
         Box(

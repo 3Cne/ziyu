@@ -306,6 +306,7 @@ private fun GroupPickerRow(
         GroupDot(color, 10)
         Spacer(Modifier.width(10.dp))
         Txt(name, size = 14f, weight = FontWeight.Medium, modifier = Modifier.weight(1f))
-        if (selected) LineIcon(Glyph.Check, p.ink, 16.dp)
+        // 3.26.22：勾选统一走 SelectMark（中心扩散 + 勾弹出），不再画静态对勾。
+        SelectMark(checked = selected, onToggle = {}, interactive = false, size = 18.dp, corner = 6.dp)
     }
 }

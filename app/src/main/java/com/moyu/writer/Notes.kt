@@ -630,7 +630,8 @@ internal fun NoteFolderPickerSheet(
             LineIcon(Glyph.Folder, p.muted, 16.dp)
             Spacer(Modifier.width(10.dp))
             Txt("未归类", size = 14f, weight = FontWeight.Medium, modifier = Modifier.weight(1f))
-            if (current == null) LineIcon(Glyph.Check, p.ink, 16.dp)
+            // 3.26.22：勾选统一走 SelectMark。
+            SelectMark(checked = current == null, onToggle = {}, interactive = false, size = 18.dp, corner = 6.dp)
         }
         store.noteGroups.forEach { g ->
             RowDivider()
@@ -645,7 +646,8 @@ internal fun NoteFolderPickerSheet(
                 GroupDot(g.color, 10)
                 Spacer(Modifier.width(10.dp))
                 Txt(g.name, size = 14f, weight = FontWeight.Medium, modifier = Modifier.weight(1f))
-                if (current == g.id) LineIcon(Glyph.Check, p.ink, 16.dp)
+                // 3.26.22：勾选统一走 SelectMark。
+                SelectMark(checked = current == g.id, onToggle = {}, interactive = false, size = 18.dp, corner = 6.dp)
             }
         }
     }

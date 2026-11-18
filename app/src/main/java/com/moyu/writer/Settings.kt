@@ -767,7 +767,14 @@ private fun ThemePicker(store: AppStore, onChange: () -> Unit = {}) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Txt(themeLabel(key), size = 9.5f, color = if (pal.isDark) Color(0xFFF0EDE5) else Color(0xFF191813), weight = FontWeight.Medium)
                     Spacer(androidx.compose.ui.Modifier.weight(1f))
-                    if (s.theme == key) LineIcon(Glyph.Check, ui.accent, 11.dp, 2f)
+                    // 3.26.22：勾选统一走 SelectMark（尺寸缩到色卡适配）。
+                    SelectMark(
+                        checked = s.theme == key,
+                        onToggle = {},
+                        interactive = false,
+                        size = 15.dp,
+                        corner = 4.dp,
+                    )
                 }
             }
         }

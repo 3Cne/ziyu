@@ -3383,26 +3383,8 @@ private fun QuoteRow(
             Txt(detail, size = 10f, color = ui.palette.muted)
         }
         Spacer(Modifier.width(10.dp))
-        val tick by animateFloatAsState(
-            targetValue = if (checked) 1f else 0f,
-            animationSpec = spring(stiffness = 760f, dampingRatio = MOYU_DAMPING),
-            label = "quoteTick",
-        )
-        Box(
-            Modifier
-                .size(23.dp)
-                .clip(CircleShape)
-                .background(if (checked) ui.palette.ink else ui.palette.faint)
-                .border(.8.dp, ui.palette.line, CircleShape),
-            contentAlignment = Alignment.Center,
-        ) {
-            if (checked) {
-                LineIcon(
-                    Glyph.Check, ui.palette.bgTop, 13.dp, 2.2f,
-                    Modifier.graphicsLayer { scaleX = tick; scaleY = tick },
-                )
-            }
-        }
+        // 3.26.22：勾选统一走 SelectMark（整行 bouncy 负责点击）。
+        SelectMark(checked = checked, onToggle = {}, interactive = false, size = 23.dp, corner = 7.dp)
     }
 }
 
