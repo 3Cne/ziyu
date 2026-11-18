@@ -16,8 +16,10 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -27,6 +29,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -68,32 +71,28 @@ fun StorySheet(
     onOpenChapter: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val bible = book.bible
-    var tab by remember { mutableIntStateOf(0) }
+    // 3.26.19：写作前规划台默认停在「大纲」。
+    var tab by remember { mutableIntStateOf(2) }
 
-    // 这张面板整块是留白（关系图占了大半），所以 surface 也铺纸色：
-    // 与 SheetPane 的纸底同色，中间那块「灰框」才消失，而卡片仍是卡片色。
+    // 3.26.19：全屏工作台——标题/分段固定，内容区自己滚，切 tab 高度不跳。
+    // surface 仍铺纸色（与 SheetPane 同色，避免 3.26.17 的「灰框」）。
+    // 3.26.18：面板内没有输入框（输入全在 GlassDialog），不跟 IME 抬高；点空白不返回。
     InlineModalSheet(
         onDismiss,
         tone = LocalInk.current.palette.paper,
-        // 3.26.18：面板内没有任何输入框（7 个 InkField 全在 GlassDialog 里），
-        // 所以不跟 IME 抬高——否则面板底边先到、键盘还在上滑，缝里会透出书籍详情页。
         imeAware = false,
-        // 3.26.18：点空白不返回（用户点名），保留返回键与右上角 X。
         dismissOnOutsideClick = false,
-    ) { close ->
-        DialogTitle(
-            "故事",
-            subtitle = "${bible.characters.size} 位角色 · ${bible.relations.size} 条关系 · " +
-                "${bible.events.size} 个事件 · ${bible.outline.size} 章大纲",
-            onClose = close,
-        )
-        Spacer(Modifier.height(14.dp))
-        Segmented(listOf("角色", "时间线", "大纲"), tab, { tab = it })
-        Spacer(Modifier.height(14.dp))
+        fillHeight = true,
+        pinnedContent = { close ->
+            DialogTitle("故事", onClose = close)
+            Spacer(Modifier.height(12.dp))
+            Segmented(listOf("角色", "时间线", "大纲"), tab, { tab = it })
+            Spacer(Modifier.height(4.dp))
+        },
+    ) { _ ->
         AnimatedContent(
             targetState = tab,
-            modifier = Modifier.heightIn(min = 600.dp),
+            modifier = Modifier.fillMaxSize(),
             transitionSpec = {
                 val forward = targetState > initialState
                 val dir = if (forward) 1 else -1
@@ -104,7 +103,7 @@ fun StorySheet(
             },
             label = "storyTab",
         ) { index ->
-            SheetPane {
+            SheetPane(Modifier.fillMaxSize()) {
                 when (index) {
                     0 -> CharacterPane(book, onBible)
                     1 -> TimelinePane(book, onBible, onOpenChapter)
@@ -145,92 +144,107 @@ private fun CharacterPane(book: Book, onBible: (BookBible) -> Unit) {
     }
     val center = bible.character(centerId)
 
-    if (bible.characters.isEmpty()) {
-        EmptyState(
-            glyph = Glyph.Note,
-            title = "还没有角色",
-            message = "先记下一个名字，关系线和时间线都从这里长出来。",
-            action = { PrimaryButton("新建角色", { creating = true }, glyph = Glyph.Plus) },
-        )
-    } else {
-        RelationGraph(
-            bible = bible,
-            centerId = centerId,
-            fromId = fromId,
-            tick = tick,
-            onPick = { pick(it) },
-            modifier = Modifier.fillMaxWidth().height(240.dp),
-        )
-        if (bible.relations.isNotEmpty()) {
-            Spacer(Modifier.height(6.dp))
-            RelationLegend()
-        }
-        Spacer(Modifier.height(14.dp))
-        Row(
-            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            bible.characters.forEach { c ->
-                GlassChip(c.name.ifBlank { "未命名" }, selected = c.id == centerId) { pick(c.id) }
+    // 3.26.19：工作台模式——上半区自己滚，主按钮固定在 pane 底部，长内容不会把按钮顶出屏幕。
+    Column(Modifier.fillMaxSize()) {
+        if (bible.characters.isEmpty()) {
+            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                EmptyState(
+                    glyph = Glyph.Note,
+                    title = "还没有角色",
+                    message = "先记下一个名字，关系线和时间线都从这里长出来。",
+                )
             }
-            Box(Modifier.width(1.dp))
-        }
-        if (center != null) {
-            Spacer(Modifier.height(14.dp))
-            MoyuSurface(Modifier.fillMaxWidth(), radius = 20f, flat = true) {
-                Column(Modifier.padding(16.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Txt(center.name.ifBlank { "未命名" }, size = 18f, weight = FontWeight.SemiBold)
-                        if (center.role.isNotBlank()) {
-                            Spacer(Modifier.width(8.dp))
-                            Txt(center.role, size = 11f, color = ui.palette.muted)
-                        }
-                    }
-                    if (center.note.isNotBlank()) {
+        } else {
+            BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
+                // 关系图高度跟着可用空间走：原固定 240dp 在矮屏/大字号下会把下面的操作挤掉。
+                val graphH = (maxHeight * .30f).coerceIn(150.dp, 240.dp)
+                Column(
+                    Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState()),
+                ) {
+                    RelationGraph(
+                        bible = bible,
+                        centerId = centerId,
+                        fromId = fromId,
+                        tick = tick,
+                        onPick = { pick(it) },
+                        modifier = Modifier.fillMaxWidth().height(graphH),
+                    )
+                    if (bible.relations.isNotEmpty()) {
                         Spacer(Modifier.height(6.dp))
-                        Txt(center.note, size = 11.5f, color = ui.palette.muted, lineHeight = 18f)
+                        RelationLegend()
                     }
                     Spacer(Modifier.height(14.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        GlassChip("加关系", false, leading = null) { linking = center }
-                        GlassChip("编辑", false) { editing = center }
-                        GlassChip("删除", false) { deleting = center }
-                    }
-                }
-            }
-            val links = bible.relationsOf(center.id)
-            if (links.isNotEmpty()) {
-                Spacer(Modifier.height(12.dp))
-                links.forEach { r ->
-                    val other = bible.otherEnd(r, center.id) ?: return@forEach
                     Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
+                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        Box(
-                            Modifier
-                                .size(7.dp)
-                                .background(relationTone(r.kind, ui), CircleShape)
-                        )
-                        Spacer(Modifier.width(10.dp))
-                        Txt(other.name.ifBlank { "未命名" }, size = 13f)
-                        Spacer(Modifier.width(8.dp))
-                        Txt(r.kind.label, size = 11f, color = ui.palette.muted)
-                        Spacer(Modifier.weight(1f))
-                        Txt(
-                            "删除",
-                            size = 11f,
-                            color = ui.palette.muted,
-                            // 3.26.18：关系删除也要确认（原来点一下立即删，误触无法恢复）。
-                            modifier = Modifier.clickable { deletingRelation = r },
-                        )
+                        bible.characters.forEach { c ->
+                            GlassChip(c.name.ifBlank { "未命名" }, selected = c.id == centerId) { pick(c.id) }
+                        }
+                        Box(Modifier.width(1.dp))
                     }
+                    if (center != null) {
+                        Spacer(Modifier.height(14.dp))
+                        MoyuSurface(Modifier.fillMaxWidth(), radius = 20f, flat = true) {
+                            Column(Modifier.padding(16.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Txt(center.name.ifBlank { "未命名" }, size = 18f, weight = FontWeight.SemiBold)
+                                    if (center.role.isNotBlank()) {
+                                        Spacer(Modifier.width(8.dp))
+                                        Txt(center.role, size = 11f, color = ui.palette.muted)
+                                    }
+                                }
+                                if (center.note.isNotBlank()) {
+                                    Spacer(Modifier.height(6.dp))
+                                    Txt(center.note, size = 11.5f, color = ui.palette.muted, lineHeight = 18f)
+                                }
+                                Spacer(Modifier.height(14.dp))
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    GlassChip("加关系", false, leading = null) { linking = center }
+                                    GlassChip("编辑", false) { editing = center }
+                                    GlassChip("删除", false) { deleting = center }
+                                }
+                            }
+                        }
+                        val links = bible.relationsOf(center.id)
+                        if (links.isNotEmpty()) {
+                            Spacer(Modifier.height(12.dp))
+                            links.forEach { r ->
+                                val other = bible.otherEnd(r, center.id) ?: return@forEach
+                                Row(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Box(
+                                        Modifier
+                                            .size(7.dp)
+                                            .background(relationTone(r.kind, ui), CircleShape)
+                                    )
+                                    Spacer(Modifier.width(10.dp))
+                                    Txt(other.name.ifBlank { "未命名" }, size = 13f)
+                                    Spacer(Modifier.width(8.dp))
+                                    Txt(r.kind.label, size = 11f, color = ui.palette.muted)
+                                    Spacer(Modifier.weight(1f))
+                                    Txt(
+                                        "删除",
+                                        size = 11f,
+                                        color = ui.palette.muted,
+                                        // 3.26.18：关系删除也要确认（原来点一下立即删，误触无法恢复）。
+                                        modifier = Modifier.clickable { deletingRelation = r },
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
                 }
             }
         }
-        Spacer(Modifier.height(14.dp))
+        Spacer(Modifier.height(8.dp))
         PrimaryButton("新建角色", { creating = true }, Modifier.fillMaxWidth(), glyph = Glyph.Plus)
     }
 
@@ -545,67 +559,62 @@ private fun TimelinePane(book: Book, onBible: (BookBible) -> Unit, onOpenChapter
     var deleting by remember { mutableStateOf<StoryEvent?>(null) }
     val events = book.bible.events
 
-    if (events.isEmpty()) {
-        EmptyState(
-            glyph = Glyph.Clock,
-            title = "时间线还空着",
-            message = "把「哪天发生了什么」记下来，写后面的章节时就不会撞时间。",
-            action = { PrimaryButton("新建事件", { creating = true }, glyph = Glyph.Plus) },
-        )
-    } else {
-        events.forEach { e ->
-            MoyuSurface(Modifier.fillMaxWidth(), radius = 18f, flat = true) {
+    // 3.26.19：时间线改成「章节刻度竖轴」——每章一个刻度点，事件挂在章下，
+    // 同章按故事时间升序；没关联章节的事件进顶部「未定位」组。
+    Column(Modifier.fillMaxSize()) {
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            if (events.isEmpty()) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    EmptyState(
+                        glyph = Glyph.Clock,
+                        title = "时间线还空着",
+                        message = "把「哪天发生了什么」记下来，写后面的章节时就不会撞时间。",
+                    )
+                }
+            } else {
+                val knownChapters = book.chapters.map { it.id }.toSet()
+                val groups = book.chapters.map { chapter ->
+                    chapter to events.filter { it.chapterId == chapter.id }
+                        .sortedWith(compareBy({ storyTimeKey(it.whenText) ?: Int.MAX_VALUE }))
+                }
+                val loose = events.filter { it.chapterId !in knownChapters }
+                    .sortedWith(compareBy({ storyTimeKey(it.whenText) ?: Int.MAX_VALUE }))
+                val groupCount = groups.size + if (loose.isEmpty()) 0 else 1
+                var drawn = 0
                 Column(
                     Modifier
-                        .fillMaxWidth()
-                        .clickable { editing = e }
-                        .padding(14.dp),
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState()),
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Txt(
-                            e.whenText.ifBlank { "未标时间" },
-                            size = 10.5f,
-                            color = ui.palette.muted,
+                    if (loose.isNotEmpty()) {
+                        TimelineGroup(
+                            label = "未定位",
+                            events = loose,
+                            book = book,
+                            isFirst = drawn == 0,
+                            isLast = drawn == groupCount - 1,
+                            onEdit = { editing = it },
+                            onDelete = { deleting = it },
                         )
-                        Spacer(Modifier.weight(1f))
-                        if (e.chapterId != null) {
-                            val title = book.chapters.firstOrNull { it.id == e.chapterId }?.title
-                            if (title != null) {
-                                Txt(
-                                    title,
-                                    size = 10.5f,
-                                    color = ui.accent,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.clickable { onOpenChapter(e.chapterId) },
-                                )
-                            }
-                        }
-                        Spacer(Modifier.width(4.dp))
-                        Box(
-                            Modifier
-                                .size(26.dp)
-                                .clip(CircleShape)
-                                .clickable { deleting = e },
-                            contentAlignment = Alignment.Center,
-                        ) { LineIcon(Glyph.Trash, ui.palette.muted, 14.dp) }
+                        drawn++
                     }
-                    Spacer(Modifier.height(6.dp))
-                    Txt(e.title.ifBlank { "未命名事件" }, size = 15f, weight = FontWeight.Medium)
-                    if (e.note.isNotBlank()) {
-                        Spacer(Modifier.height(4.dp))
-                        Txt(e.note, size = 11.5f, color = ui.palette.muted, lineHeight = 18f)
+                    groups.forEach { (chapter, list) ->
+                        TimelineGroup(
+                            label = chapter.title,
+                            events = list,
+                            book = book,
+                            isFirst = drawn == 0,
+                            isLast = drawn == groupCount - 1,
+                            onEdit = { editing = it },
+                            onDelete = { deleting = it },
+                        )
+                        drawn++
                     }
-                    val names = e.characterIds.mapNotNull { id -> book.bible.character(id)?.name }
-                    if (names.isNotEmpty()) {
-                        Spacer(Modifier.height(8.dp))
-                        Txt(names.joinToString(" · "), size = 10.5f, color = ui.palette.muted)
-                    }
+                    Spacer(Modifier.height(8.dp))
                 }
             }
-            Spacer(Modifier.height(10.dp))
         }
-        Spacer(Modifier.height(4.dp))
+        Spacer(Modifier.height(8.dp))
         PrimaryButton("新建事件", { creating = true }, Modifier.fillMaxWidth(), glyph = Glyph.Plus)
     }
 
@@ -645,6 +654,101 @@ private fun TimelinePane(book: Book, onBible: (BookBible) -> Unit, onOpenChapter
     }
 }
 
+// 3.26.19：章节刻度的一行——左边竖线 + 刻度点，右边章名与该章事件卡。
+@Composable
+private fun TimelineGroup(
+    label: String,
+    events: List<StoryEvent>,
+    book: Book,
+    isFirst: Boolean,
+    isLast: Boolean,
+    onEdit: (StoryEvent) -> Unit,
+    onDelete: (StoryEvent) -> Unit,
+) {
+    val ui = LocalInk.current
+    Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
+        Column(
+            Modifier.width(22.dp).fillMaxHeight(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Box(
+                Modifier
+                    .padding(top = 5.dp)
+                    .size(7.dp)
+                    .background(if (isFirst) ui.accent else ui.palette.muted, CircleShape),
+            )
+            if (!isLast) {
+                Box(
+                    Modifier
+                        .width(1.dp)
+                        .weight(1f)
+                        .background(ui.palette.line),
+                )
+            }
+        }
+        Column(Modifier.weight(1f).padding(start = 10.dp, bottom = if (isLast) 4.dp else 18.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Txt(label, size = 13f, weight = FontWeight.Medium)
+                Spacer(Modifier.width(8.dp))
+                Txt("${events.size} 个事件", size = 10.5f, color = ui.palette.muted)
+            }
+            if (events.isNotEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                events.forEach { e ->
+                    EventCard(
+                        event = e,
+                        book = book,
+                        onEdit = { onEdit(e) },
+                        onDelete = { onDelete(e) },
+                    )
+                    Spacer(Modifier.height(8.dp))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun EventCard(
+    event: StoryEvent,
+    book: Book,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    val ui = LocalInk.current
+    MoyuSurface(Modifier.fillMaxWidth(), radius = 18f, flat = true) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onEdit)
+                .padding(14.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Txt(event.whenText.ifBlank { "未标时间" }, size = 10.5f, color = ui.palette.muted)
+                Spacer(Modifier.weight(1f))
+                Box(
+                    Modifier
+                        .size(26.dp)
+                        .clip(CircleShape)
+                        .clickable(onClick = onDelete),
+                    contentAlignment = Alignment.Center,
+                ) { LineIcon(Glyph.Trash, ui.palette.muted, 14.dp) }
+            }
+            Spacer(Modifier.height(6.dp))
+            Txt(event.title.ifBlank { "未命名事件" }, size = 15f, weight = FontWeight.Medium)
+            if (event.note.isNotBlank()) {
+                Spacer(Modifier.height(4.dp))
+                Txt(event.note, size = 11.5f, color = ui.palette.muted, lineHeight = 18f)
+            }
+            val names = event.characterIds.mapNotNull { id -> book.bible.character(id)?.name }
+            if (names.isNotEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                Txt(names.joinToString(" · "), size = 10.5f, color = ui.palette.muted)
+            }
+        }
+    }
+}
+
 // ───────────────────────── 大纲 ─────────────────────────
 
 @Composable
@@ -666,7 +770,12 @@ private fun OutlinePane(book: Book, onBible: (BookBible) -> Unit) {
         return
     }
 
-    book.chapters.forEachIndexed { index, chapter ->
+    // 3.26.19：工作台模式——章卡列表自己滚，不把整块面板撑高。
+    Column(Modifier.fillMaxSize()) {
+        Column(
+            Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),
+        ) {
+            book.chapters.forEachIndexed { index, chapter ->
         val node = bible.outline.firstOrNull { it.chapterId == chapter.id }
         MoyuSurface(Modifier.fillMaxWidth(), radius = 18f, flat = true) {
             Column(
@@ -690,6 +799,7 @@ private fun OutlinePane(book: Book, onBible: (BookBible) -> Unit) {
                         size = 10.5f,
                         color = if (node == null) ui.palette.muted else ui.accent,
                     )
+                    // 3.26.19：先「···」（仅已有大纲的章）再「+」，让「+」永远在最右侧同一列。
                     if (node != null) {
                         Spacer(Modifier.width(2.dp))
                         Box(
@@ -700,6 +810,19 @@ private fun OutlinePane(book: Book, onBible: (BookBible) -> Unit) {
                             contentAlignment = Alignment.Center,
                         ) { LineIcon(Glyph.More, ui.palette.muted, 16.dp) }
                     }
+                    Spacer(Modifier.width(2.dp))
+                    Box(
+                        Modifier
+                            .size(30.dp)
+                            .clip(CircleShape)
+                            .clickable {
+                                beatTarget = node ?: OutlineNode(
+                                    chapterId = chapter.id,
+                                    title = chapter.title,
+                                )
+                            },
+                        contentAlignment = Alignment.Center,
+                    ) { LineIcon(Glyph.Plus, ui.palette.muted, 16.dp) }
                 }
                 if (node != null && node.beats.isNotEmpty()) {
                     Spacer(Modifier.height(10.dp))
@@ -763,6 +886,8 @@ private fun OutlinePane(book: Book, onBible: (BookBible) -> Unit) {
             }
         }
         Spacer(Modifier.height(10.dp))
+            }
+        }
     }
 
     // 3.26.18：情节点删除（行尾垃圾桶 → 确认）。
@@ -1104,4 +1229,94 @@ private fun BeatEditor(
             )
         }
     }
+}
+
+// ───────────────────────── 故事时间解析（只读，不写回数据） ─────────────────────────
+// 3.26.19：时间线原来按录入顺序排，看不出「谁先谁后」。现有数据只有自由文本 whenText，
+// 没有 storyTime 字段；这里只做**显示排序**的启发式解析：同章事件按解析出的时间升序，
+// 解析失败的排同章末尾。解析结果不写回 moyu.json、不改 schema；C 批让问书写入结构化
+// 故事时间后再替换这里。
+
+private val storyIsoDate = Regex("(\\d{4})\\s*[-/.]\\s*(\\d{1,2})\\s*[-/.]\\s*(\\d{1,2})")
+private val storyShortDate = Regex("(?<![\\d/-])(\\d{1,2})\\s*[-/]\\s*(\\d{1,2})(?![\\d/-])")
+private val storyDate = Regex("(\\d{1,4})\\s*年\\s*(\\d{1,2})\\s*月(?:\\s*(\\d{1,2})\\s*[日号])?")
+private val storyMonthDay = Regex("(\\d{1,2})\\s*月\\s*(\\d{1,2})\\s*[日号]")
+private val storyNumberUnit = Regex("(\\d+|[零一二两三四五六七八九十百千]+)\\s*(年|岁|个月|月|日|天|周|星期|点|刻)")
+
+/** 中文输入法常把 `-` `/` `.` 和数字打成全角，解析前先归一成 ASCII。 */
+private fun normalizeStoryTime(text: String): String {
+    val sb = StringBuilder(text.length)
+    for (c in text) {
+        sb.append(
+            when (c) {
+                '－', '—', '–', '−' -> '-'
+                '／' -> '/'
+                '．', '。' -> '.'
+                '　' -> ' '
+                in '０'..'９' -> '0' + (c - '０')
+                else -> c
+            },
+        )
+    }
+    return sb.toString()
+}
+
+/** 把「11 月 7 日 / 三年前 / 2026-11-07」这类自由文本压成一个粗略可比的整数；解析不了返回 null。 */
+private fun storyTimeKey(raw: String): Int? {
+    if (raw.isBlank()) return null
+    val text = normalizeStoryTime(raw)
+    storyIsoDate.find(text)?.let { m ->
+        val year = m.groupValues[1].toIntOrNull() ?: return@let
+        val month = m.groupValues[2].toIntOrNull() ?: return@let
+        val day = m.groupValues[3].toIntOrNull() ?: return@let
+        return year * 372 + month * 31 + day
+    }
+    storyShortDate.find(text)?.let { m ->
+        val month = m.groupValues[1].toIntOrNull() ?: return@let
+        val day = m.groupValues[2].toIntOrNull() ?: return@let
+        return month * 31 + day
+    }
+    storyDate.find(text)?.let { m ->
+        val year = m.groupValues[1].toIntOrNull() ?: return@let
+        val month = m.groupValues[2].toIntOrNull() ?: return@let
+        val day = m.groupValues[3].toIntOrNull() ?: 0
+        return year * 372 + month * 31 + day
+    }
+    storyMonthDay.find(text)?.let { m ->
+        val month = m.groupValues[1].toIntOrNull() ?: return@let
+        val day = m.groupValues[2].toIntOrNull() ?: return@let
+        return month * 31 + day
+    }
+    storyNumberUnit.find(text)?.let { m ->
+        val n = m.groupValues[1].toIntOrNull() ?: chineseNumber(m.groupValues[1]) ?: return@let
+        val days = when (m.groupValues[2]) {
+            "年", "岁" -> 360
+            "个月", "月" -> 30
+            "周", "星期" -> 7
+            else -> 1
+        }
+        val key = n * days
+        // 「三年前 / 以前 / 之前」是回忆，排序时放到常规时间之前。
+        return if (text.contains("前") || text.contains("以前") || text.contains("之前")) -key else key
+    }
+    return null
+}
+
+private fun chineseNumber(text: String): Int? {
+    val digits = mapOf(
+        '零' to 0, '一' to 1, '二' to 2, '两' to 2, '三' to 3, '四' to 4,
+        '五' to 5, '六' to 6, '七' to 7, '八' to 8, '九' to 9,
+    )
+    var section = 0
+    var number = 0
+    for (c in text) {
+        when {
+            digits.containsKey(c) -> number = digits.getValue(c)
+            c == '十' -> { section += (if (number == 0) 1 else number) * 10; number = 0 }
+            c == '百' -> { section += (if (number == 0) 1 else number) * 100; number = 0 }
+            c == '千' -> { section += (if (number == 0) 1 else number) * 1000; number = 0 }
+            else -> return null
+        }
+    }
+    return section + number
 }

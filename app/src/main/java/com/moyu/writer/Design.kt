@@ -1800,6 +1800,11 @@ fun InlineModalSheet(
     /** false = 点面板外的空白不关闭；返回键与右上角 X 仍然有效。
      *  3.26.18：故事面板与 4 个故事编辑框传 false（用户录屏：点空白处就返回）。 */
     dismissOnOutsideClick: Boolean = true,
+    /** true = 面板铺满可用高度，内容自己滚（工作台类面板用；3.26.19 故事）。
+     *  默认 false，其它面板保持「包内容高度 + 整块滚」的老行为。 */
+    fillHeight: Boolean = false,
+    /** 固定在内容上方、不随内容滚的头；只在 fillHeight 时生效。 */
+    pinnedContent: (@Composable ColumnScope.(close: () -> Unit) -> Unit)? = null,
     content: @Composable ColumnScope.(close: () -> Unit) -> Unit,
 ) {
     val ui = LocalInk.current
@@ -1906,6 +1911,7 @@ fun InlineModalSheet(
                 MoyuSurface(Modifier
                         .fillMaxWidth()
                         .heightIn(max = panelMax)
+                        .then(if (fillHeight) Modifier.fillMaxHeight() else Modifier)
                         .graphicsLayer {
                             val v = sheetShape.coerceIn(0f, 1f)
                             scaleY = .94f + .06f * ViscousDrop.lagged(v)
@@ -1917,22 +1923,49 @@ fun InlineModalSheet(
                     flat = true,
                     tone = tone,
                 ) {
-                    Column(
-                        Modifier
-                            .fillMaxWidth()
-                            // No tap consumer on the content column at all. The
-                            // scrim behind already ignores taps that land on the
-                            // sheet: it is laid out first and the sheet paints
-                            // over it, so Compose routes the tap to the sheet
-                            // subtree. An empty `clickable` here used to win the
-                            // hit test before every row inside it, which is why
-                            // bound notes could never be tapped to unbind.
-                            .navigationBarsPadding()
-                            .verticalScroll(rememberScrollState())
-                            .padding(horizontal = 20.dp)
-                            .padding(top = 10.dp, bottom = 24.dp),
-                    ) {
-                        content { close() }
+                    if (fillHeight) {
+                        // 工作台：头固定、内容区填满剩余高度并自己滚（每个 pane 自己 verticalScroll）。
+                        Column(
+                            Modifier
+                                .fillMaxSize()
+                                .navigationBarsPadding(),
+                        ) {
+                            pinnedContent?.let { pinned ->
+                                Column(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 20.dp)
+                                        .padding(top = 10.dp),
+                                ) { pinned { close() } }
+                            }
+                            Column(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .weight(1f)
+                                    .padding(horizontal = 20.dp)
+                                    .padding(top = 10.dp, bottom = 12.dp),
+                            ) {
+                                content { close() }
+                            }
+                        }
+                    } else {
+                        Column(
+                            Modifier
+                                .fillMaxWidth()
+                                // No tap consumer on the content column at all. The
+                                // scrim behind already ignores taps that land on the
+                                // sheet: it is laid out first and the sheet paints
+                                // over it, so Compose routes the tap to the sheet
+                                // subtree. An empty `clickable` here used to win the
+                                // hit test before every row inside it, which is why
+                                // bound notes could never be tapped to unbind.
+                                .navigationBarsPadding()
+                                .verticalScroll(rememberScrollState())
+                                .padding(horizontal = 20.dp)
+                                .padding(top = 10.dp, bottom = 24.dp),
+                        ) {
+                            content { close() }
+                        }
                     }
                 }
                 }
@@ -1951,6 +1984,7 @@ fun InlineModalSheet(
  */
 @Composable
 fun SheetPane(
+    modifier: Modifier = Modifier,
     content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit,
 ) {
     val ui = LocalInk.current
@@ -1961,6 +1995,7 @@ fun SheetPane(
     Column(
         Modifier
             .fillMaxWidth()
+            .then(modifier)
             .background(ui.palette.paper),
         content = content,
     )
