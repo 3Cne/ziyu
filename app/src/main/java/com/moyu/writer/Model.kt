@@ -673,7 +673,14 @@ class AppStore(context: Context) {
         mutate { d ->
             d.copy(
                 books = d.books.map { b ->
-                    if (b.id == bookId) b.copy(chapters = b.chapters.filterNot { it.id == chapterId }) else b
+                    if (b.id == bookId) {
+                        b.copy(
+                            chapters = b.chapters.filterNot { it.id == chapterId },
+                            // 3.26.18：删章同时清大纲节点、把事件从这一章解绑。
+                            // 原来不碰 bible，JSON 里会留下永远不显示、也删不掉的大纲孤儿。
+                            bible = b.bible.withoutChapter(chapterId),
+                        )
+                    } else b
                 },
                 notes = d.notes.map {
                     if (chapterId in it.chapterIds) {

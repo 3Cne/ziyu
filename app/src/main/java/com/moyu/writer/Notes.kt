@@ -182,44 +182,50 @@ fun NotesScreen(
                 targetState = level,
                 transitionSpec = {
                     val forward = targetState > initialState
+                    // 3.26.18：只滑不淡 + 整宽位移。每层自带纸底，fade 会让纸底半透明；
+                    // w/3 位移会让两层全程重叠、旧层从新层纸底下方露出。
                     (slideInHorizontally(spring(MOYU_DAMPING, 380f)) { w ->
-                        if (forward) w / 3 else -w / 3
-                    } + fadeIn(tween(140))) togetherWith
+                        if (forward) w else -w
+                    }) togetherWith
                         (slideOutHorizontally(spring(MOYU_DAMPING, 380f)) { w ->
-                            if (forward) -w / 3 else w / 3
-                        } + fadeOut(tween(110)))
+                            if (forward) -w else w
+                        })
                 },
                 label = "folderSheet",
             ) { step ->
                 if (step == 0) {
-                    Column(Modifier.fillMaxWidth()) {
-                        DialogTitle(folder.name, "${countOf(folder.id)} 条笔记", onClose = { close() })
-                        Spacer(Modifier.height(12.dp))
-                        SettingRow("重命名", "改名和颜色", Glyph.Edit, onClick = { level = 1 })
-                        RowDivider()
-                        SettingRow("上移", "排到前一个笔记夹前面", Glyph.ArrowUp, onClick = {
-                            store.moveGroup(GroupKind.NOTE, folder.id, -1)
-                            close()
-                        })
-                        RowDivider()
-                        SettingRow("删除笔记夹", "夹里的笔记回到「未归类」，不会被删", Glyph.Trash, onClick = {
-                            pending = { deleteFolder = folder }
-                            close()
-                        })
+                    SheetPane {
+                        Column(Modifier.fillMaxWidth()) {
+                            DialogTitle(folder.name, "${countOf(folder.id)} 条笔记", onClose = { close() })
+                            Spacer(Modifier.height(12.dp))
+                            SettingRow("重命名", "改名和颜色", Glyph.Edit, onClick = { level = 1 })
+                            RowDivider()
+                            SettingRow("上移", "排到前一个笔记夹前面", Glyph.ArrowUp, onClick = {
+                                store.moveGroup(GroupKind.NOTE, folder.id, -1)
+                                close()
+                            })
+                            RowDivider()
+                            SettingRow("删除笔记夹", "夹里的笔记回到「未归类」，不会被删", Glyph.Trash, onClick = {
+                                pending = { deleteFolder = folder }
+                                close()
+                            })
+                        }
                     }
                 } else {
-                    FolderEditSheet(
-                        title = "编辑笔记夹",
-                        initialName = folder.name,
-                        initialColor = folder.color,
-                        onDismiss = { close() },
-                        onSave = { name, color ->
-                            store.updateGroup(GroupKind.NOTE, folder.id) { it.copy(name = name, color = color) }
-                            close()
-                        },
-                        embedded = true,
-                        onBack = { level = 0 },
-                    )
+                    SheetPane {
+                        FolderEditSheet(
+                            title = "编辑笔记夹",
+                            initialName = folder.name,
+                            initialColor = folder.color,
+                            onDismiss = { close() },
+                            onSave = { name, color ->
+                                store.updateGroup(GroupKind.NOTE, folder.id) { it.copy(name = name, color = color) }
+                                close()
+                            },
+                            embedded = true,
+                            onBack = { level = 0 },
+                        )
+                    }
                 }
             }
         }
@@ -501,12 +507,13 @@ fun NoteFolderScreen(
                 targetState = level,
                 transitionSpec = {
                     val forward = targetState > initialState
+                    // 3.26.18：只滑不淡 + 整宽位移（同上）。
                     (slideInHorizontally(spring(MOYU_DAMPING, 380f)) { w ->
-                        if (forward) w / 3 else -w / 3
-                    } + fadeIn(tween(140))) togetherWith
+                        if (forward) w else -w
+                    }) togetherWith
                         (slideOutHorizontally(spring(MOYU_DAMPING, 380f)) { w ->
-                            if (forward) -w / 3 else w / 3
-                        } + fadeOut(tween(110)))
+                            if (forward) -w else w
+                        })
                 },
                 label = "noteSheet",
             ) { step ->
@@ -537,20 +544,24 @@ fun NoteFolderScreen(
                             close()
                         })
                     }
-                    1 -> NoteFolderPickerSheet(
-                        current = note.groupId,
-                        store = store,
-                        onSelect = { group -> store.setNoteGroup(note.id, group) },
-                        onDismiss = { close() },
-                        embedded = true,
-                        onBack = { level = 0 },
-                    )
-                    else -> NoteExportSheet(
-                        note = note,
-                        onDismiss = { close() },
-                        embedded = true,
-                        onBack = { level = 0 },
-                    )
+                    1 -> SheetPane {
+                        NoteFolderPickerSheet(
+                            current = note.groupId,
+                            store = store,
+                            onSelect = { group -> store.setNoteGroup(note.id, group) },
+                            onDismiss = { close() },
+                            embedded = true,
+                            onBack = { level = 0 },
+                        )
+                    }
+                    else -> SheetPane {
+                        NoteExportSheet(
+                            note = note,
+                            onDismiss = { close() },
+                            embedded = true,
+                            onBack = { level = 0 },
+                        )
+                    }
                 }
             }
         }

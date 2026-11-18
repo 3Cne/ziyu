@@ -5201,11 +5201,13 @@ fun BookEditorScreen(
                     targetState = level,
                     transitionSpec = {
                         val forward = targetState > initialState
+                        // 3.26.18：整宽位移。原来两层各移 w/3，全程重叠；旧层比新层高时
+                        // 会从新层纸底下方露出来（用户录屏 v1b），两个标题也同屏。
                         (slideInHorizontally(spring(MOYU_DAMPING, 380f)) { w ->
-                            if (forward) w / 3 else -w / 3
+                            if (forward) w else -w
                         }) togetherWith
                             (slideOutHorizontally(spring(MOYU_DAMPING, 380f)) { w ->
-                                if (forward) -w / 3 else w / 3
+                                if (forward) -w else w
                             })
                     },
                     label = "writingOptionLevel",
@@ -5225,20 +5227,24 @@ fun BookEditorScreen(
                             RowDivider()
                             PaperStyleMenu()
                         }
-                        1 -> ChapterNotesSheet(
-                            store = store,
-                            bookId = book.id,
-                            chapterId = chapter.id,
-                            onDismiss = { close() },
-                            embedded = true,
-                            onBack = { level = 0 },
-                        )
-                        else -> ExportSheet(
-                            book = book,
-                            onDismiss = { close() },
-                            embedded = true,
-                            onBack = { level = 0 },
-                        )
+                        1 -> SheetPane {
+                            ChapterNotesSheet(
+                                store = store,
+                                bookId = book.id,
+                                chapterId = chapter.id,
+                                onDismiss = { close() },
+                                embedded = true,
+                                onBack = { level = 0 },
+                            )
+                        }
+                        else -> SheetPane {
+                            ExportSheet(
+                                book = book,
+                                onDismiss = { close() },
+                                embedded = true,
+                                onBack = { level = 0 },
+                            )
+                        }
                     }
                 }
             }
@@ -5324,11 +5330,12 @@ fun NoteEditorScreen(
                     targetState = level,
                     transitionSpec = {
                         val forward = targetState > initialState
+                        // 3.26.18：整宽位移（同上，避免两层重叠透底）。
                         (slideInHorizontally(spring(MOYU_DAMPING, 380f)) { w ->
-                            if (forward) w / 3 else -w / 3
+                            if (forward) w else -w
                         }) togetherWith
                             (slideOutHorizontally(spring(MOYU_DAMPING, 380f)) { w ->
-                                if (forward) -w / 3 else w / 3
+                                if (forward) -w else w
                             })
                     },
                     label = "noteOptionLevel",

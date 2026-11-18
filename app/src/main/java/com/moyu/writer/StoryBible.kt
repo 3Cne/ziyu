@@ -3,8 +3,6 @@ package com.moyu.writer
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.spring
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
@@ -39,6 +37,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
@@ -74,7 +73,15 @@ fun StorySheet(
 
     // 这张面板整块是留白（关系图占了大半），所以 surface 也铺纸色：
     // 与 SheetPane 的纸底同色，中间那块「灰框」才消失，而卡片仍是卡片色。
-    InlineModalSheet(onDismiss, tone = LocalInk.current.palette.paper) { close ->
+    InlineModalSheet(
+        onDismiss,
+        tone = LocalInk.current.palette.paper,
+        // 3.26.18：面板内没有任何输入框（7 个 InkField 全在 GlassDialog 里），
+        // 所以不跟 IME 抬高——否则面板底边先到、键盘还在上滑，缝里会透出书籍详情页。
+        imeAware = false,
+        // 3.26.18：点空白不返回（用户点名），保留返回键与右上角 X。
+        dismissOnOutsideClick = false,
+    ) { close ->
         DialogTitle(
             "故事",
             subtitle = "${bible.characters.size} 位角色 · ${bible.relations.size} 条关系 · " +
@@ -90,8 +97,10 @@ fun StorySheet(
             transitionSpec = {
                 val forward = targetState > initialState
                 val dir = if (forward) 1 else -1
-                (slideInHorizontally(spring(MOYU_DAMPING, 420f)) { it * dir / 3 } + fadeIn()) togetherWith
-                    (slideOutHorizontally(spring(MOYU_DAMPING, 420f)) { -it * dir / 3 } + fadeOut())
+                // 3.26.18：只滑不淡 + 整宽位移。三层都自带 SheetPane 纸底：
+                // fade 会让纸底半透明；w/3 重叠会让较高的一层从另一层纸底下方露出来。
+                slideInHorizontally(spring(MOYU_DAMPING, 420f)) { it * dir } togetherWith
+                    slideOutHorizontally(spring(MOYU_DAMPING, 420f)) { -it * dir }
             },
             label = "storyTab",
         ) { index ->
@@ -115,6 +124,7 @@ private fun CharacterPane(book: Book, onBible: (BookBible) -> Unit) {
     var editing by remember { mutableStateOf<StoryCharacter?>(null) }
     var creating by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf<StoryCharacter?>(null) }
+    var deletingRelation by remember { mutableStateOf<StoryRelation?>(null) }
     var linking by remember { mutableStateOf<StoryCharacter?>(null) }
     var centerId by remember { mutableStateOf(bible.characters.firstOrNull()?.id.orEmpty()) }
     var fromId by remember { mutableStateOf(centerId) }
@@ -213,9 +223,8 @@ private fun CharacterPane(book: Book, onBible: (BookBible) -> Unit) {
                             "删除",
                             size = 11f,
                             color = ui.palette.muted,
-                            modifier = Modifier.clickable {
-                                onBible(bible.copy(relations = bible.relations.filterNot { it.id == r.id }))
-                            },
+                            // 3.26.18：关系删除也要确认（原来点一下立即删，误触无法恢复）。
+                            modifier = Modifier.clickable { deletingRelation = r },
                         )
                     }
                 }
@@ -259,6 +268,21 @@ private fun CharacterPane(book: Book, onBible: (BookBible) -> Unit) {
                 deleting = null
             },
             onDismiss = { deleting = null },
+            destructive = true,
+        )
+    }
+    deletingRelation?.let { r ->
+        val a = book.bible.character(r.from)?.name?.ifBlank { "未命名" } ?: "未命名"
+        val b = book.bible.character(r.to)?.name?.ifBlank { "未命名" } ?: "未命名"
+        ConfirmDialog(
+            title = "删除这条关系？",
+            message = "「$a」和「$b」之间的「${r.kind.label}」关系会被移除，两个角色都保留。",
+            confirmLabel = "删除",
+            onConfirm = {
+                onBible(book.bible.copy(relations = book.bible.relations.filterNot { it.id == r.id }))
+                deletingRelation = null
+            },
+            onDismiss = { deletingRelation = null },
             destructive = true,
         )
     }
@@ -517,6 +541,8 @@ private fun TimelinePane(book: Book, onBible: (BookBible) -> Unit, onOpenChapter
     val ui = LocalInk.current
     var editing by remember { mutableStateOf<StoryEvent?>(null) }
     var creating by remember { mutableStateOf(false) }
+    // 3.26.18：卡片上直接可删（原来只有进编辑框才有「删除」，用户读作「删不掉」）。
+    var deleting by remember { mutableStateOf<StoryEvent?>(null) }
     val events = book.bible.events
 
     if (events.isEmpty()) {
@@ -555,6 +581,14 @@ private fun TimelinePane(book: Book, onBible: (BookBible) -> Unit, onOpenChapter
                                 )
                             }
                         }
+                        Spacer(Modifier.width(4.dp))
+                        Box(
+                            Modifier
+                                .size(26.dp)
+                                .clip(CircleShape)
+                                .clickable { deleting = e },
+                            contentAlignment = Alignment.Center,
+                        ) { LineIcon(Glyph.Trash, ui.palette.muted, 14.dp) }
                     }
                     Spacer(Modifier.height(6.dp))
                     Txt(e.title.ifBlank { "未命名事件" }, size = 15f, weight = FontWeight.Medium)
@@ -573,6 +607,20 @@ private fun TimelinePane(book: Book, onBible: (BookBible) -> Unit, onOpenChapter
         }
         Spacer(Modifier.height(4.dp))
         PrimaryButton("新建事件", { creating = true }, Modifier.fillMaxWidth(), glyph = Glyph.Plus)
+    }
+
+    deleting?.let { e ->
+        ConfirmDialog(
+            title = "删除这个事件？",
+            message = "「${e.title.ifBlank { "未命名事件" }}」会从时间线移除，正文不受影响。",
+            confirmLabel = "删除",
+            onConfirm = {
+                onBible(book.bible.copy(events = book.bible.events.filterNot { it.id == e.id }))
+                deleting = null
+            },
+            onDismiss = { deleting = null },
+            destructive = true,
+        )
     }
 
     if (creating || editing != null) {
@@ -603,6 +651,10 @@ private fun TimelinePane(book: Book, onBible: (BookBible) -> Unit, onOpenChapter
 private fun OutlinePane(book: Book, onBible: (BookBible) -> Unit) {
     val ui = LocalInk.current
     var beatTarget by remember { mutableStateOf<OutlineNode?>(null) }
+    // 3.26.18：补删除入口。原来情节点与整条大纲一条都删不掉，还能造出空节点。
+    var deletingBeat by remember { mutableStateOf<Pair<OutlineNode, OutlineBeat>?>(null) }
+    var menuNode by remember { mutableStateOf<OutlineNode?>(null) }
+    var confirmNode by remember { mutableStateOf<Pair<OutlineNode, Boolean>?>(null) }
     val bible = book.bible
 
     if (book.chapters.isEmpty()) {
@@ -638,6 +690,16 @@ private fun OutlinePane(book: Book, onBible: (BookBible) -> Unit) {
                         size = 10.5f,
                         color = if (node == null) ui.palette.muted else ui.accent,
                     )
+                    if (node != null) {
+                        Spacer(Modifier.width(2.dp))
+                        Box(
+                            Modifier
+                                .size(30.dp)
+                                .clip(CircleShape)
+                                .clickable { menuNode = node },
+                            contentAlignment = Alignment.Center,
+                        ) { LineIcon(Glyph.More, ui.palette.muted, 16.dp) }
+                    }
                 }
                 if (node != null && node.beats.isNotEmpty()) {
                     Spacer(Modifier.height(10.dp))
@@ -681,12 +743,102 @@ private fun OutlinePane(book: Book, onBible: (BookBible) -> Unit) {
                                 color = if (b.done) ui.palette.muted else ui.palette.ink,
                                 lineHeight = 18f,
                             )
+                            Spacer(Modifier.weight(1f))
+                            Box(
+                                Modifier
+                                    .size(26.dp)
+                                    .clip(CircleShape)
+                                    .clickable { deletingBeat = node to b },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                LineIcon(
+                                    Glyph.Trash,
+                                    ui.palette.muted.copy(alpha = .75f),
+                                    13.dp,
+                                )
+                            }
                         }
                     }
                 }
             }
         }
         Spacer(Modifier.height(10.dp))
+    }
+
+    // 3.26.18：情节点删除（行尾垃圾桶 → 确认）。
+    deletingBeat?.let { (node, beat) ->
+        ConfirmDialog(
+            title = "删除这个情节点？",
+            message = "「${beat.text}」会从这一章的大纲移除。",
+            confirmLabel = "删除",
+            onConfirm = {
+                onBible(
+                    bible.copy(
+                        outline = bible.outline.map { n ->
+                            if (n.id != node.id) n
+                            else n.copy(beats = n.beats.filterNot { it.id == beat.id })
+                        },
+                    ),
+                )
+                deletingBeat = null
+            },
+            onDismiss = { deletingBeat = null },
+            destructive = true,
+        )
+    }
+
+    // 3.26.18：整条大纲的删除/清空（章卡「···」→ 菜单 → 确认，两个 Dialog 不同时在同一帧出现）。
+    menuNode?.let { node ->
+        GlassDialog(onDismiss = { menuNode = null }, dismissOnOutsideClick = false) {
+            DialogTitle(
+                "本章大纲",
+                subtitle = book.chapters.firstOrNull { it.id == node.chapterId }?.title ?: node.title,
+            )
+            Spacer(Modifier.height(10.dp))
+            SettingRow(
+                "清空情节点",
+                "${node.beats.size} 个情节点会移除，章节正文不动",
+                Glyph.Trash,
+                onClick = {
+                    menuNode = null
+                    confirmNode = node to true
+                },
+            )
+            RowDivider()
+            SettingRow(
+                "删除整条大纲",
+                "这一章回到「待写」，章节正文不动",
+                Glyph.Trash,
+                onClick = {
+                    menuNode = null
+                    confirmNode = node to false
+                },
+            )
+            Spacer(Modifier.height(14.dp))
+            GlassButton("取消", { menuNode = null }, Modifier.fillMaxWidth())
+        }
+    }
+    confirmNode?.let { (node, clearOnly) ->
+        ConfirmDialog(
+            title = if (clearOnly) "清空这章的情节点？" else "删除这章的大纲？",
+            message = if (clearOnly) "情节点会全部移除；章节正文不受影响。"
+            else "整条大纲会移除，这一章回到「待写」；章节正文不受影响。",
+            confirmLabel = if (clearOnly) "清空" else "删除",
+            onConfirm = {
+                onBible(
+                    bible.copy(
+                        outline = if (clearOnly) {
+                            bible.outline.map { if (it.id == node.id) it.copy(beats = emptyList()) else it }
+                        } else {
+                            bible.outline.filterNot { it.id == node.id }
+                        },
+                    ),
+                )
+                confirmNode = null
+            },
+            onDismiss = { confirmNode = null },
+            destructive = true,
+        )
     }
 
     beatTarget?.let { node ->
@@ -719,7 +871,7 @@ private fun CharacterEditor(
     var name by remember { mutableStateOf(initial?.name ?: "") }
     var role by remember { mutableStateOf(initial?.role ?: "") }
     var note by remember { mutableStateOf(initial?.note ?: "") }
-    GlassDialog(onDismiss) {
+    GlassDialog(onDismiss, dismissOnOutsideClick = false) {
         DialogTitle(if (initial == null) "新建角色" else "编辑角色")
         Spacer(Modifier.height(14.dp))
         InkField(name, { name = it }, "名字")
@@ -751,7 +903,7 @@ private fun RelationEditor(
     val others = bible.characters.filter { it.id != from.id }
     var target by remember { mutableStateOf(others.firstOrNull()?.id) }
     var kind by remember { mutableStateOf(RelationKind.FRIEND) }
-    GlassDialog(onDismiss) {
+    GlassDialog(onDismiss, dismissOnOutsideClick = false) {
         DialogTitle("给「${from.name.ifBlank { "未命名" }}」连一条线")
         Spacer(Modifier.height(14.dp))
         Txt("和谁", size = 11f, color = ui.palette.muted)
@@ -801,7 +953,7 @@ private fun EventEditor(
     var note by remember { mutableStateOf(initial?.note ?: "") }
     var chapterId by remember { mutableStateOf(initial?.chapterId) }
     var picked by remember { mutableStateOf(initial?.characterIds ?: emptyList()) }
-    GlassDialog(onDismiss) {
+    GlassDialog(onDismiss, dismissOnOutsideClick = false) {
         DialogTitle(if (initial == null) "新建事件" else "编辑事件")
         Spacer(Modifier.height(14.dp))
         InkField(whenText, { whenText = it }, "故事内时间：11 月 7 日 / 三年前")
@@ -874,20 +1026,54 @@ private fun BeatEditor(
 ) {
     val ui = LocalInk.current
     var text by remember { mutableStateOf("") }
+    // 3.26.18：点「已有」里的一条 = 编辑它。原来这里纯展示，改字只能删了重加；
+    // 同时把「添加」的 enabled 从恒 true 改成必须非空，杜绝空情节点/空大纲节点。
+    var editingBeat by remember { mutableStateOf<OutlineBeat?>(null) }
     val chapterTitle = book.chapters.firstOrNull { it.id == node.chapterId }?.title ?: node.title
-    GlassDialog(onDismiss) {
-        DialogTitle("第 ${node.beats.size + 1} 个情节点", subtitle = chapterTitle)
+    GlassDialog(onDismiss, dismissOnOutsideClick = false) {
+        DialogTitle(
+            if (editingBeat == null) "第 ${node.beats.size + 1} 个情节点" else "编辑情节点",
+            subtitle = chapterTitle,
+        )
         Spacer(Modifier.height(14.dp))
-        InkField(text, { text = it }, "这一章要发生的事", singleLine = false, minHeight = 80.dp)
+        InkField(
+            text,
+            { text = it },
+            if (editingBeat == null) "这一章要发生的事" else "改这一条情节点",
+            singleLine = false,
+            minHeight = 80.dp,
+        )
         if (node.beats.isNotEmpty()) {
             Spacer(Modifier.height(14.dp))
             Txt("已有", size = 11f, color = ui.palette.muted)
             Spacer(Modifier.height(6.dp))
             node.beats.forEach { b ->
-                Row(Modifier.padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+                val selected = editingBeat?.id == b.id
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(SmoothCorner(10.dp))
+                        .background(if (selected) ui.palette.faint else Color.Transparent)
+                        .clickable {
+                            if (selected) {
+                                editingBeat = null
+                                text = ""
+                            } else {
+                                editingBeat = b
+                                text = b.text
+                            }
+                        }
+                        .padding(vertical = 5.dp, horizontal = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     Txt("·", size = 12f, color = ui.palette.muted)
                     Spacer(Modifier.width(8.dp))
-                    Txt(b.text, size = 12f, lineHeight = 18f)
+                    Txt(
+                        b.text,
+                        size = 12f,
+                        lineHeight = 18f,
+                        color = if (selected) ui.accent else ui.palette.ink,
+                    )
                 }
             }
         }
@@ -895,16 +1081,26 @@ private fun BeatEditor(
         Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
             GlassButton("取消", onDismiss, Modifier.weight(1f))
             PrimaryButton(
-                "添加",
+                if (editingBeat == null) "添加" else "保存修改",
                 {
-                    if (text.isNotBlank()) {
-                        onSave(node.copy(beats = node.beats + OutlineBeat(text = text.trim())))
-                    } else {
-                        onSave(node)
+                    val body = text.trim()
+                    if (body.isNotBlank()) {
+                        val current = editingBeat
+                        if (current == null) {
+                            onSave(node.copy(beats = node.beats + OutlineBeat(text = body)))
+                        } else {
+                            onSave(
+                                node.copy(
+                                    beats = node.beats.map {
+                                        if (it.id == current.id) it.copy(text = body) else it
+                                    },
+                                ),
+                            )
+                        }
                     }
                 },
                 Modifier.weight(1f),
-                enabled = text.isNotBlank() || node.id.isNotEmpty(),
+                enabled = text.isNotBlank(),
             )
         }
     }

@@ -1793,6 +1793,13 @@ fun InlineModalSheet(
     /** 面板底色。默认是「纸 + 4% 反色」的卡片色；整块留白为主的面板传 `palette.paper`，
      *  让它和 `SheetPane` 铺的纸底完全同色，否则内容区会显成一块更暗的矩形。 */
     tone: Color? = null,
+    /** true = 面板跟随 IME 抬高；纯展示、没有输入框的面板传 false。
+     *  3.26.18：故事面板传 false——它的输入都在独立 GlassDialog 里，面板跟着 IME
+     *  抬满反而会在「面板底边已到、键盘还没升到」的缝里露出下层页面（用户录屏 6570cc）。 */
+    imeAware: Boolean = true,
+    /** false = 点面板外的空白不关闭；返回键与右上角 X 仍然有效。
+     *  3.26.18：故事面板与 4 个故事编辑框传 false（用户录屏：点空白处就返回）。 */
+    dismissOnOutsideClick: Boolean = true,
     content: @Composable ColumnScope.(close: () -> Unit) -> Unit,
 ) {
     val ui = LocalInk.current
@@ -1859,14 +1866,14 @@ fun InlineModalSheet(
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
-                enabled = dismissReady && !closing,
+                enabled = dismissOnOutsideClick && dismissReady && !closing,
             ) { close() }
     ) {
         BoxWithConstraints(
             Modifier
                 .fillMaxSize()
                 .statusBarsPadding()
-                .imePadding(),
+                .then(if (imeAware) Modifier.imePadding() else Modifier),
             contentAlignment = Alignment.BottomCenter,
         ) {
             val panelMax = maxHeight

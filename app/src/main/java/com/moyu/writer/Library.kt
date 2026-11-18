@@ -1257,12 +1257,13 @@ fun BookDetailScreen(
                 targetState = sheetLevel,
                 transitionSpec = {
                     val forward = targetState > initialState
+                    // 3.26.18：整宽位移。w/3 时两层全程重叠，旧层会从新层纸底露出来。
                     (slideInHorizontally(spring(MOYU_DAMPING, 380f)) { w ->
-                        if (forward) w / 3 else -w / 3
-                    } + fadeIn(tween(140))) togetherWith
+                        if (forward) w else -w
+                    }) togetherWith
                         (slideOutHorizontally(spring(MOYU_DAMPING, 380f)) { w ->
-                            if (forward) -w / 3 else w / 3
-                        } + fadeOut(tween(110)))
+                            if (forward) -w else w
+                        })
                 },
                 label = "bookSheet",
             ) { step ->
