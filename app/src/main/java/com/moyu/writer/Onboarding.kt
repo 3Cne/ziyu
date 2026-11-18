@@ -2,16 +2,32 @@ package com.moyu.writer
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.FiniteAnimationSpec
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
+import androidx.compose.animation.core.Animatable
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,10 +38,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -36,9 +56,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import kotlin.math.PI
+import kotlin.math.cos
+import kotlin.math.sin
 
 /**
  * One onboarding page: a section label ("上手 · 2 / 5"), what this screen is for, and
@@ -209,10 +235,11 @@ fun OnboardingOverlay(onDone: () -> Unit) {
     val p = ui.palette
     val pages = ONBOARD_PAGES
     var page by remember { mutableIntStateOf(0) }
-    val target = if (pages.isEmpty()) 0f else (page + 1f) / pages.size
+    val motion = ui.settings.motion != "none"
     val progress by animateFloatAsState(
-        targetValue = target,
-        animationSpec = tween(260),
+        targetValue = if (pages.isEmpty()) 0f else (page + 1f) / pages.size,
+        animationSpec = if (motion) spring(dampingRatio = .9f, stiffness = 420f, visibilityThreshold = PROGRESS_THRESHOLD)
+        else tween(0),
         visibilityThreshold = PROGRESS_THRESHOLD,
         label = "onboardingProgress",
     )
@@ -229,31 +256,55 @@ fun OnboardingOverlay(onDone: () -> Unit) {
             .statusBarsPadding()
             .navigationBarsPadding(),
     ) {
+        // 触摸兜底（3.26.25 修「跳过」点到新建书籍）：这层只吃手势不画东西，
+        // 子元素在它上面时仍先拿到点击；落在空处的手势被它吃掉，不会漏到下层书架。
+        Box(
+            Modifier
+                .fillMaxSize()
+                .pointerInput(Unit) { detectTapGestures { } },
+        )
+
+        // 背景完全静止：不随页数换位置、不做明暗呼吸。亮度只由页面内容决定。
         Canvas(Modifier.fillMaxSize()) {
+            val w = size.width
+            val h = size.height
             drawCircle(
                 brush = Brush.radialGradient(
-                    listOf(ui.accent.copy(alpha = .10f), Color.Transparent),
-                    center = Offset(size.width * .82f, size.height * .12f),
-                    radius = size.width * .82f,
+                    listOf(ui.accent.copy(alpha = if (p.isDark) .26f else .16f), Color.Transparent),
+                    center = Offset(w * .80f, h * .16f),
+                    radius = w * .95f,
                 ),
-                radius = size.width * .82f,
-                center = Offset(size.width * .82f, size.height * .12f),
+                radius = w * .95f,
+                center = Offset(w * .80f, h * .16f),
             )
             drawCircle(
                 brush = Brush.radialGradient(
-                    listOf(Color.White.copy(alpha = .20f), Color.Transparent),
-                    center = Offset(size.width * .12f, size.height * .78f),
-                    radius = size.width * .72f,
+                    listOf(Color.White.copy(alpha = if (p.isDark) .05f else .55f), Color.Transparent),
+                    center = Offset(w * .10f, h * .86f),
+                    radius = w * .80f,
                 ),
-                radius = size.width * .72f,
-                center = Offset(size.width * .12f, size.height * .78f),
+                radius = w * .80f,
+                center = Offset(w * .10f, h * .86f),
+            )
+            val ringR = w * .52f
+            drawCircle(
+                ui.accent.copy(alpha = .07f),
+                radius = ringR,
+                center = Offset(w * .86f, h * .22f),
+                style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.dp.toPx()),
+            )
+            drawCircle(
+                ui.accent.copy(alpha = .05f),
+                radius = ringR * 1.22f,
+                center = Offset(w * .86f, h * .22f),
+                style = androidx.compose.ui.graphics.drawscope.Stroke(width = .8.dp.toPx()),
             )
         }
 
         Column(
             Modifier
                 .fillMaxSize()
-                .padding(horizontal = 24.dp, vertical = 12.dp),
+                .padding(horizontal = 24.dp, vertical = 10.dp),
         ) {
             Row(
                 Modifier.fillMaxWidth(),
@@ -261,130 +312,81 @@ fun OnboardingOverlay(onDone: () -> Unit) {
             ) {
                 Box(
                     Modifier
-                        .size(26.dp)
+                        .size(28.dp)
                         .clip(CircleShape)
                         .background(p.ink),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Txt("字", size = 10f, color = p.paper, weight = FontWeight.SemiBold)
+                    Txt("字", size = 10.5f, color = p.paper, weight = FontWeight.SemiBold)
                 }
-                Spacer(Modifier.width(9.dp))
-                Txt("素纸", size = 11f, color = p.ink, weight = FontWeight.Medium, letterSpacing = .8f)
+                Spacer(Modifier.width(10.dp))
+                Txt("素纸", size = 11.5f, color = p.ink, weight = FontWeight.Medium, letterSpacing = .8f)
                 Spacer(Modifier.weight(1f))
                 Txt(
                     "${page + 1} / ${pages.size}",
-                    size = 9f,
+                    size = 9.5f,
                     color = p.muted,
                 )
-                Spacer(Modifier.width(12.dp))
-                Txt(
-                    "跳过",
-                    size = 9f,
-                    color = p.muted,
-                    modifier = Modifier
+                Spacer(Modifier.width(6.dp))
+                // 热区 ≥48dp；之前只有 8×6dp 内边距，点偏一点就落到下层「新建书籍」上。
+                Box(
+                    Modifier
+                        .sizeIn(minWidth = 48.dp, minHeight = 48.dp)
                         .clip(CircleShape)
-                        .padding(horizontal = 8.dp, vertical = 6.dp)
-                        .bouncy(scale = .95f) { onDone() },
-                )
+                        .bouncy(scale = .94f) { onDone() },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Txt("跳过", size = 10.5f, color = p.muted)
+                }
             }
 
             Box(
                 Modifier
                     .weight(1f)
-                    .fillMaxWidth(),
-                contentAlignment = Alignment.CenterStart,
+                    .fillMaxWidth()
+                    .clipToBounds(),
             ) {
+                // 3.26.25（用户 2026-11-19 反馈：「下一步亮度来回闪」+「后面全是空页」）：
+                // 不用交叉淡化 / 缩放（会让两页半透明叠出亮度坑），也不用超宽 Row（子页会被
+                // 父约束压成 0 宽、叠在一起）。这里就是「两页并排、整幅横移」：旧页向左滑出、
+                // 新页从右滑入，两者都不透明，中途没有纸底空档，亮度保持不变。
                 AnimatedContent(
                     targetState = page,
                     transitionSpec = {
-                        if (targetState > initialState) {
-                            (slideInHorizontally(tween(260)) { it / 5 } + fadeIn(tween(180))) togetherWith
-                                (slideOutHorizontally(tween(220)) { -it / 6 } + fadeOut(tween(120)))
-                        } else {
-                            (slideInHorizontally(tween(260)) { -it / 5 } + fadeIn(tween(180))) togetherWith
-                                (slideOutHorizontally(tween(220)) { it / 6 } + fadeOut(tween(120)))
-                        }
+                        val forward = targetState > initialState
+                        val spec: FiniteAnimationSpec<IntOffset> =
+                            if (motion) spring(dampingRatio = .86f, stiffness = 380f) else tween(0)
+                        (slideInHorizontally(spec) { if (forward) it else -it }) togetherWith
+                            (slideOutHorizontally(spec) { if (forward) -it else it })
                     },
                     label = "onboardingPage",
                 ) { index ->
-                    val item = pages[index]
-                    Column(Modifier.fillMaxWidth()) {
-                        Txt(
-                            item.section,
-                            size = 9.5f,
-                            color = ui.accent,
-                            letterSpacing = 1.6f,
-                            weight = FontWeight.Medium,
-                        )
-                        Spacer(Modifier.height(14.dp))
-                        Box(
-                            Modifier
-                                .size(60.dp)
-                                .clip(SmoothCorner(18.dp))
-                                .background(ui.accent.copy(alpha = .10f))
-                                .border(1.dp, ui.accent.copy(alpha = .14f), SmoothCorner(18.dp)),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            LineIcon(item.glyph, ui.accent, 26.dp, 1.7f)
-                        }
-                        Spacer(Modifier.height(18.dp))
-                        Txt(
-                            item.title,
-                            size = 28f,
-                            weight = FontWeight.SemiBold,
-                            color = p.ink,
-                            lineHeight = 34f,
-                        )
-                        Spacer(Modifier.height(10.dp))
-                        Txt(
-                            item.body,
-                            size = 13f,
-                            color = p.muted,
-                            lineHeight = 22f,
-                        )
-                        Spacer(Modifier.height(18.dp))
-                        Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
-                            item.steps.forEachIndexed { i, step ->
-                                Row(Modifier.fillMaxWidth()) {
-                                    Txt(
-                                        "${i + 1}",
-                                        size = 9f,
-                                        color = ui.accent,
-                                        weight = FontWeight.Medium,
-                                        modifier = Modifier.width(15.dp),
-                                    )
-                                    Txt(
-                                        step,
-                                        size = 12.5f,
-                                        color = p.ink.copy(alpha = .88f),
-                                        lineHeight = 20f,
-                                        modifier = Modifier.weight(1f),
-                                    )
-                                }
-                            }
-                        }
-                    }
+                    OnboardPageBody(pages[index], index)
                 }
             }
 
-            Spacer(Modifier.height(20.dp))
+            Spacer(Modifier.height(16.dp))
 
             Box(
                 Modifier
                     .fillMaxWidth()
-                    .height(2.dp)
+                    .height(4.dp)
                     .clip(CircleShape)
                     .background(p.line),
             ) {
                 Box(
                     Modifier
-                        .fillMaxWidth(progress)
-                        .height(2.dp)
+                        .fillMaxWidth(progress.coerceIn(0f, 1f))
+                        .height(4.dp)
                         .clip(CircleShape)
-                        .background(ui.accent),
+                        .background(
+                            Brush.horizontalGradient(
+                                listOf(ui.accent.copy(alpha = .55f), ui.accent),
+                            ),
+                        ),
                 )
             }
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(14.dp))
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -419,6 +421,110 @@ fun OnboardingOverlay(onDone: () -> Unit) {
                     Modifier.weight(1f),
                     glyph = if (page == pages.lastIndex) Glyph.Check else Glyph.Chevron,
                 )
+            }
+        }
+    }
+}
+
+/** 一页内容：位置由外层滑动决定，自己不做进出场；内容超高时页内滚动。 */
+@Composable
+private fun OnboardPageBody(item: OnboardPage, index: Int) {
+    val ui = LocalInk.current
+    val p = ui.palette
+    Column(
+        Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(vertical = 10.dp),
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Box(
+            Modifier.size(104.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Canvas(Modifier.fillMaxSize()) {
+                val c = center
+                val r = size.minDimension / 2f
+                drawCircle(
+                    brush = Brush.radialGradient(
+                        listOf(
+                            ui.accent.copy(alpha = if (p.isDark) .30f else .20f),
+                            ui.accent.copy(alpha = if (p.isDark) .06f else .05f),
+                        ),
+                        center = c,
+                        radius = r,
+                    ),
+                    radius = r,
+                    center = c,
+                )
+                drawCircle(
+                    ui.accent.copy(alpha = .22f),
+                    radius = r - 1.dp.toPx(),
+                    center = c,
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.dp.toPx()),
+                )
+                val start = -60f + index * 24f
+                drawArc(
+                    color = ui.accent.copy(alpha = .30f),
+                    startAngle = start,
+                    sweepAngle = 140f,
+                    useCenter = false,
+                    topLeft = Offset(6.dp.toPx(), 6.dp.toPx()),
+                    size = androidx.compose.ui.geometry.Size(
+                        size.width - 12.dp.toPx(),
+                        size.height - 12.dp.toPx(),
+                    ),
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(
+                        width = 1.4.dp.toPx(),
+                        cap = androidx.compose.ui.graphics.StrokeCap.Round,
+                    ),
+                )
+            }
+            LineIcon(item.glyph, ui.accent, 36.dp, 1.6f)
+        }
+        Spacer(Modifier.height(20.dp))
+        Txt(
+            item.section,
+            size = 10f,
+            color = ui.accent,
+            letterSpacing = 1.8f,
+            weight = FontWeight.Medium,
+        )
+        Spacer(Modifier.height(10.dp))
+        Txt(
+            item.title,
+            size = 34f,
+            weight = FontWeight.SemiBold,
+            color = p.ink,
+            lineHeight = 40f,
+        )
+        Spacer(Modifier.height(12.dp))
+        Txt(
+            item.body,
+            size = 13.5f,
+            color = p.muted,
+            lineHeight = 23f,
+        )
+        Spacer(Modifier.height(22.dp))
+        Column(verticalArrangement = Arrangement.spacedBy(11.dp)) {
+            item.steps.forEach { step ->
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+                    Box(
+                        Modifier
+                            .padding(top = 7.dp)
+                            .size(5.dp)
+                            .clip(CircleShape)
+                            .background(ui.accent.copy(alpha = .65f)),
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Txt(
+                        step,
+                        size = 13f,
+                        color = p.ink.copy(alpha = .90f),
+                        lineHeight = 21f,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
             }
         }
     }
