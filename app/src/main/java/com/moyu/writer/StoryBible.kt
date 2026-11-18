@@ -56,6 +56,7 @@ import androidx.compose.ui.unit.dp
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.min
+import kotlin.math.pow
 import kotlin.math.sin
 
 /**
@@ -190,6 +191,12 @@ private fun CharacterPane(book: Book, onBible: (BookBible) -> Unit) {
                         MoyuSurface(Modifier.fillMaxWidth(), radius = 20f, flat = true) {
                             Column(Modifier.padding(16.dp)) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Box(
+                                        Modifier
+                                            .size(10.dp)
+                                            .background(ballColor(center), CircleShape)
+                                    )
+                                    Spacer(Modifier.width(8.dp))
                                     Txt(center.name.ifBlank { "未命名" }, size = 18f, weight = FontWeight.SemiBold)
                                     if (center.role.isNotBlank()) {
                                         Spacer(Modifier.width(8.dp))
@@ -252,17 +259,17 @@ private fun CharacterPane(book: Book, onBible: (BookBible) -> Unit) {
         CharacterEditor(
             initial = editing,
             onDismiss = { creating = false; editing = null },
-            onSave = { name, role, note ->
+            onSave = { name, role, note, color ->
                 val b = book.bible
                 if (editing == null) {
-                    val c = StoryCharacter(name = name, role = role, note = note)
+                    val c = StoryCharacter(name = name, role = role, note = note, color = color)
                     onBible(b.copy(characters = b.characters + c))
                     pick(c.id)
                 } else {
                     onBible(
                         b.copy(
                             characters = b.characters.map {
-                                if (it.id == editing!!.id) it.copy(name = name, role = role, note = note) else it
+                                if (it.id == editing!!.id) it.copy(name = name, role = role, note = note, color = color) else it
                             },
                         ),
                     )
@@ -331,6 +338,43 @@ private fun relationTone(kind: RelationKind, ui: InkUi): Color = when (kind) {
     RelationKind.RIVAL, RelationKind.ENEMY ->
         lerp(ui.palette.muted, Color(0xFFB4543C), .62f)
     else -> ui.palette.line
+}
+
+// ───────────────────────── 角色球颜色（3.26.24） ─────────────────────────
+// 手动色存在 StoryCharacter.color；没设过就按 id 稳定取色板里的一色，重排/重启不变。
+// 色板与「外观 → 点缀色」同一份 accentChoices，不另造第二套颜色。
+
+private fun ballColor(c: StoryCharacter): Color {
+    c.color?.let { raw ->
+        runCatching { Color(android.graphics.Color.parseColor(raw)) }.getOrNull()?.let { return it }
+    }
+    val h = c.id.hashCode().toLong()
+    // 自动色跳过「墨黑」：深色主题下黑球在深纸上几乎看不见；手动仍可选它。
+    val palette = accentChoices.drop(1)
+    val idx = ((if (h < 0) -h else h) % palette.size).toInt()
+    return Color(palette[idx].second)
+}
+
+/** 球内文字的反差色：按 WCAG 对比度取墨/纸白里更高的一个。 */
+private fun inkOnBall(bg: Color, p: InkPalette): Color {
+    fun linear(c: Float): Float = if (c <= .03928f) c / 12.92f else ((c + .055f) / 1.055f).pow(2.4f)
+    fun lum(c: Color): Float = .2126f * linear(c.red) + .7152f * linear(c.green) + .0722f * linear(c.blue)
+    fun ratio(a: Color, b: Color): Float {
+        val la = lum(a)
+        val lb = lum(b)
+        return (maxOf(la, lb) + .05f) / (minOf(la, lb) + .05f)
+    }
+    val light = Color(0xFFF6F3EC)
+    val dark = Color(0xFF171713)
+    // 球色是固定的调色板色，不随主题变，所以反差也用固定的深/浅两个墨色比，不能用
+    // palette.ink（深色主题下它本身就是浅色，会把琥珀球判成浅字，只有 3.5:1）。
+    return if (ratio(bg, dark) >= ratio(bg, light)) dark else light
+}
+
+/** 圈内只放得下一行：超过 3 个字截断，全名在点开的角色卡里。 */
+private fun ballLabel(name: String): String {
+    val n = name.trim().ifBlank { "未命名" }
+    return if (n.length <= 3) n else n.take(3) + "…"
 }
 
 @Composable
@@ -425,6 +469,23 @@ private fun RelationGraph(
                 typeface = android.graphics.Typeface.DEFAULT_BOLD
             }
         }
+        // 3.26.24：名字进圈后的两种字，字号按球径收，颜色每球按底色算。
+        val ballPaint = remember {
+            android.graphics.Paint().apply {
+                isAntiAlias = true
+                textSize = with(density) { 10.dp.toPx() }
+                textAlign = android.graphics.Paint.Align.CENTER
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+            }
+        }
+        val centerBallPaint = remember {
+            android.graphics.Paint().apply {
+                isAntiAlias = true
+                textSize = with(density) { 11.dp.toPx() }
+                textAlign = android.graphics.Paint.Align.CENTER
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+            }
+        }
 
         // pointerInput 的 key 必须恒定：以 to 为 key 时，点中节点 → centerId 变 → to 变 →
         // 手势器在抬手前被重启，抬手事件漏到遮罩上，面板会自己 close()（3.26.16 实测）。
@@ -458,18 +519,20 @@ private fun RelationGraph(
                         cap = StrokeCap.Round,
                     )
                 }
+                val oldBall = bible.character(fromId)?.let { ballColor(it) } ?: ui.palette.faint
                 drawCircle(
-                    ui.palette.faint.copy(alpha = .6f * (1f - v)),
+                    oldBall.copy(alpha = .6f * (1f - v)),
                     radius = centerR,
                     center = Offset(cx, cy),
                 )
                 if (shownName.isNotBlank()) {
-                    namePaint.color = ui.palette.ink.toArgb()
+                    centerBallPaint.color = inkOnBall(oldBall, ui.palette).toArgb()
+                    centerBallPaint.alpha = (255 * (1f - v)).toInt().coerceIn(0, 255)
                     drawContext.canvas.nativeCanvas.drawText(
-                        shownName,
+                        ballLabel(shownName),
                         cx,
-                        cy + centerPaint.textSize * .35f,
-                        centerPaint,
+                        cy + centerBallPaint.textSize * .35f,
+                        centerBallPaint,
                     )
                 }
             }
@@ -494,20 +557,22 @@ private fun RelationGraph(
                         cap = StrokeCap.Round,
                     )
                 }
-                drawCircle(ui.palette.faint, radius = nodeR * (.72f + .28f * v), center = p)
+                val ball = ballColor(c)
+                val r = nodeR * (.72f + .28f * v)
+                drawCircle(ball.copy(alpha = v), radius = r, center = p)
                 drawCircle(
-                    ui.palette.line.copy(alpha = .9f),
-                    radius = nodeR * (.72f + .28f * v),
+                    ui.palette.ink.copy(alpha = .20f * v),
+                    radius = r,
                     center = p,
                     style = Stroke(width = .8.dp.toPx()),
                 )
-                namePaint.color = ui.palette.ink.toArgb()
-                namePaint.alpha = (255 * v).toInt().coerceIn(0, 255)
+                ballPaint.color = inkOnBall(ball, ui.palette).toArgb()
+                ballPaint.alpha = (255 * v).toInt().coerceIn(0, 255)
                 drawContext.canvas.nativeCanvas.drawText(
-                    c.name.ifBlank { "未命名" },
+                    ballLabel(c.name),
                     p.x,
-                    p.y + nodeR + with(density) { 14.dp.toPx() },
-                    namePaint,
+                    p.y + ballPaint.textSize * .36f,
+                    ballPaint,
                 )
             }
 
@@ -524,20 +589,28 @@ private fun RelationGraph(
                 )
             }
 
-            // 中心节点画在最上面
-            drawCircle(ui.palette.paper, radius = centerR, center = Offset(cx, cy))
+            // 3.26.24：中心球也用角色自己的颜色，外圈 2dp 强调环区分「当前中心」。
+            val centerBall = center?.let { ballColor(it) } ?: ui.palette.faint
+            drawCircle(centerBall, radius = centerR, center = Offset(cx, cy))
+            drawCircle(
+                ui.accent.copy(alpha = .9f),
+                radius = centerR + with(density) { 1.dp.toPx() },
+                center = Offset(cx, cy),
+                style = Stroke(width = 2.dp.toPx()),
+            )
             drawCircle(
                 ui.palette.ink.copy(alpha = .16f),
                 radius = centerR,
                 center = Offset(cx, cy),
-                style = Stroke(width = 1.dp.toPx()),
+                style = Stroke(width = .8.dp.toPx()),
             )
-            centerPaint.color = ui.palette.ink.toArgb()
+            centerBallPaint.color = inkOnBall(centerBall, ui.palette).toArgb()
+            centerBallPaint.alpha = 255
             drawContext.canvas.nativeCanvas.drawText(
-                center?.name?.ifBlank { "未命名" } ?: "",
+                ballLabel(center?.name ?: ""),
                 cx,
-                cy + centerPaint.textSize * .35f,
-                centerPaint,
+                cy + centerBallPaint.textSize * .35f,
+                centerBallPaint,
             )
         }
     }
@@ -1011,11 +1084,14 @@ private fun OutlinePane(book: Book, onBible: (BookBible) -> Unit) {
 private fun CharacterEditor(
     initial: StoryCharacter?,
     onDismiss: () -> Unit,
-    onSave: (String, String, String) -> Unit,
+    onSave: (String, String, String, String?) -> Unit,
 ) {
+    val ui = LocalInk.current
     var name by remember { mutableStateOf(initial?.name ?: "") }
     var role by remember { mutableStateOf(initial?.role ?: "") }
     var note by remember { mutableStateOf(initial?.note ?: "") }
+    // 3.26.24：null = 自动色，按角色 id 稳定取色板。
+    var color by remember { mutableStateOf(initial?.color) }
     GlassDialog(onDismiss, dismissOnOutsideClick = false) {
         DialogTitle(if (initial == null) "新建角色" else "编辑角色")
         Spacer(Modifier.height(14.dp))
@@ -1024,12 +1100,38 @@ private fun CharacterEditor(
         InkField(role, { role = it }, "身份：主角 / 配角 / 反派（可空）")
         Spacer(Modifier.height(10.dp))
         InkField(note, { note = it }, "一句话：他是谁、想要什么（可空）", singleLine = false, minHeight = 76.dp)
+        Spacer(Modifier.height(16.dp))
+        Txt("球的颜色", size = 11f, color = ui.palette.muted)
+        Spacer(Modifier.height(8.dp))
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            GlassChip("自动", color == null) { color = null }
+            accentChoices.forEach { (_, value) ->
+                val hex = "#%06X".format(value and 0xFFFFFF)
+                ColorDot(Color(value), color.equals(hex, true)) { color = hex }
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        val hsv = remember(color) {
+            FloatArray(3).also { out ->
+                val argb = color?.let { runCatching { android.graphics.Color.parseColor(it) }.getOrNull() }
+                    ?: Color(0xFF7A5B3A).toArgb()
+                android.graphics.Color.colorToHSV(argb, out)
+            }
+        }
+        HueSlider(hsv[0]) { hue ->
+            val argb = android.graphics.Color.HSVToColor(floatArrayOf(hue, .50f, .58f))
+            color = String.format("#%06X", argb and 0xFFFFFF)
+        }
         Spacer(Modifier.height(18.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
             GlassButton("取消", onDismiss, Modifier.weight(1f))
             PrimaryButton(
                 "保存",
-                { onSave(name.trim(), role.trim(), note.trim()) },
+                { onSave(name.trim(), role.trim(), note.trim(), color) },
                 Modifier.weight(1f),
                 enabled = name.isNotBlank(),
             )

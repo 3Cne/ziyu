@@ -86,7 +86,7 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlin.math.roundToInt
 
-private val accentChoices = listOf(
+internal val accentChoices = listOf(
     "墨黑" to 0xFF22221E,
     "茶褐" to 0xFF7A5B3A,
     "松绿" to 0xFF3F6350,

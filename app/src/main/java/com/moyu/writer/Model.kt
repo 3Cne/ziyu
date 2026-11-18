@@ -123,6 +123,8 @@ data class StoryCharacter(
     val note: String = "",
     val origin: String = "author",
     val updatedAt: Long = 0L,
+    /** 3.26.24: #RRGGBB set by the writer; null = derive a stable colour from the id. */
+    val color: String? = null,
 )
 
 data class StoryRelation(
@@ -1114,7 +1116,7 @@ internal fun encodeBible(b: BookBible): JSONObject = JSONObject().apply {
     val cs = JSONArray()
     b.characters.forEach { c ->
         cs.put(JSONObject().apply {
-            put("id", c.id); put("name", c.name); put("role", c.role); put("note", c.note); put("origin", c.origin); put("updatedAt", c.updatedAt)
+            put("id", c.id); put("name", c.name); put("role", c.role); put("note", c.note); put("origin", c.origin); put("updatedAt", c.updatedAt) ; put("color", c.color ?: JSONObject.NULL)
         })
     }
     val rs = JSONArray()
@@ -1162,6 +1164,7 @@ internal fun decodeBible(o: JSONObject?): BookBible {
             name = c.optString("name", ""),
             role = c.optString("role", ""),
             note = c.optString("note", ""),
+            color = if (c.isNull("color")) null else c.optString("color").takeIf { it.isNotBlank() },
             origin = c.optString("origin", "author"),
             updatedAt = c.optLong("updatedAt", 0L),
         )
