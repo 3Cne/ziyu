@@ -221,8 +221,8 @@ fun SettingsScreen(store: AppStore, listState: LazyListState, onOpenPage: (Strin
         item {
             SettingGroup("问书") {
                 SettingRow(
-                    "AI 与记忆",
-                    if (s.aiEnabled) "${s.aiModel} · 已启用 · ${if (s.aiAutoMemory) "自动记忆" else "手动记忆"}"
+                    "问书 AI",
+                    if (s.aiEnabled) "${s.aiModel} · 已启用 · ${if (s.aiBibleSync) "自动整理" else "手动整理"}"
                     else "未启用 · ${s.aiModel}",
                     Glyph.Sparkles,
                     onClick = { onOpenPage("ai") },
@@ -1637,10 +1637,11 @@ private fun AiSettingsPage(store: AppStore, onBack: () -> Unit, onOpen: (String)
                 }
                 RowDivider()
                 SettingRow(
-                    "自动记忆",
-                    glyph = Glyph.Note,
+                    "自动整理故事圣经",
+                    "章节保存后，把正文里写定的人物、关系、事件、情节点补进故事圣经；3 分钟内最多一次",
+                    Glyph.Book,
                 ) {
-                    InkToggle(settings.aiAutoMemory) { v -> store.updateSettings { it.copy(aiAutoMemory = v) } }
+                    InkToggle(settings.aiBibleSync) { v -> store.updateSettings { it.copy(aiBibleSync = v) } }
                 }
             }
         }
@@ -1757,10 +1758,6 @@ private fun AiSettingsPage(store: AppStore, onBack: () -> Unit, onOpen: (String)
                 RowDivider()
                 SettingRow("引用上限", "整本 / 章节 / 笔记合计最多发多少字", Glyph.Link) {
                     Txt("${settings.aiQuoteMaxChars} 字", size = 12f, color = ui.palette.muted)
-                }
-                RowDivider()
-                SettingRow("记忆上限", "超出后按「最久没用」淘汰", Glyph.Layers) {
-                    Txt("${settings.aiMemoryLimit} 条", size = 12f, color = ui.palette.muted)
                 }
             }
         }

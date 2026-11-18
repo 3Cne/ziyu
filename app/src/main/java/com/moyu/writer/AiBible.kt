@@ -15,7 +15,7 @@ import java.io.File
  * - 自动整理（`text`）**不覆盖** `origin == "author"` 的条目，只记一条待看冲突。
  */
 object AiBible {
-    private const val MAX_JOURNAL = 60
+    private const val MAX_JOURNAL = 100
 
     private fun dir(ctx: Context): File = File(ctx.filesDir, "ai").apply { mkdirs() }
     private fun journalFile(ctx: Context): File = File(dir(ctx), "bible-journal.json")
@@ -157,14 +157,14 @@ object AiBible {
                 if (action == "delete") {
                     if (old == null) return "圣经里没有角色「$name」"
                     if (source == "text" && old.origin == "author") {
-                        conflict(ctx, "角色「$name」是作者手改的，正文里的变化没有覆盖它")
+                        conflict(ctx, bookId, "角色「$name」是作者手改的，正文里的变化没有覆盖它")
                         return "跳过：角色「$name」是作者手改的"
                     }
                     after = before.copy(characters = before.characters.filterNot { it.id == old.id })
                     label = "删角色 $name"
                 } else {
                     if (old != null && source == "text" && old.origin == "author") {
-                        conflict(ctx, "角色「$name」是作者手改的，正文里的新描述没有覆盖它")
+                        conflict(ctx, bookId, "角色「$name」是作者手改的，正文里的新描述没有覆盖它")
                         return "跳过：角色「$name」是作者手改的"
                     }
                     val next = (old ?: StoryCharacter(id = uuid(), name = name)).copy(
@@ -192,14 +192,14 @@ object AiBible {
                 if (action == "delete") {
                     if (old == null) return "没有「$fromName—$toName」这条关系"
                     if (source == "text" && old.origin == "author") {
-                        conflict(ctx, "「$fromName—$toName」是作者手改的关系，没有删")
+                        conflict(ctx, bookId, "「$fromName—$toName」是作者手改的关系，没有删")
                         return "跳过：关系是作者手改的"
                     }
                     after = before.copy(relations = before.relations.filterNot { it.id == old.id })
                     label = "删关系 $fromName—$toName"
                 } else {
                     if (old != null && source == "text" && old.origin == "author") {
-                        conflict(ctx, "「$fromName—$toName」是作者手改的关系，正文里的新说法没有覆盖它")
+                        conflict(ctx, bookId, "「$fromName—$toName」是作者手改的关系，正文里的新说法没有覆盖它")
                         return "跳过：关系是作者手改的"
                     }
                     val kindValue = RelationKind.entries.firstOrNull { it.name == args.optString("relation") }
@@ -223,14 +223,14 @@ object AiBible {
                 if (action == "delete") {
                     if (old == null) return "没有这个事件"
                     if (source == "text" && old.origin == "author") {
-                        conflict(ctx, "事件「${old.title}」是作者手改的，没有删")
+                        conflict(ctx, bookId, "事件「${old.title}」是作者手改的，没有删")
                         return "跳过：事件是作者手改的"
                     }
                     after = before.copy(events = before.events.filterNot { it.id == old.id })
                     label = "删事件 ${old.title}"
                 } else {
                     if (old != null && source == "text" && old.origin == "author") {
-                        conflict(ctx, "事件「${old.title}」是作者手改的，正文里的新说法没有覆盖它")
+                        conflict(ctx, bookId, "事件「${old.title}」是作者手改的，正文里的新说法没有覆盖它")
                         return "跳过：事件是作者手改的"
                     }
                     val chapterIds = args.optJSONArray("chapterIds")?.let { arr ->
@@ -267,14 +267,14 @@ object AiBible {
                 if (action == "delete_node") {
                     if (old == null) return "${chapter.title} 还没有大纲"
                     if (source == "text" && old.origin == "author") {
-                        conflict(ctx, "${chapter.title} 的大纲是作者手改的，没有删")
+                        conflict(ctx, bookId, "${chapter.title} 的大纲是作者手改的，没有删")
                         return "跳过：大纲是作者手改的"
                     }
                     after = before.copy(outline = before.outline.filterNot { it.id == old.id })
                     label = "删大纲 ${chapter.title}"
                 } else {
                     if (old != null && source == "text" && old.origin == "author") {
-                        conflict(ctx, "${chapter.title} 的大纲是作者手改的，正文里的新情节点没有覆盖它")
+                        conflict(ctx, bookId, "${chapter.title} 的大纲是作者手改的，正文里的新情节点没有覆盖它")
                         return "跳过：大纲是作者手改的"
                     }
                     val current = old ?: OutlineNode(id = uuid(), chapterId = chapter.id, title = chapter.title)
@@ -295,9 +295,10 @@ object AiBible {
                             current.beats.map { if (it.text == from) it.copy(text = to) else it }
                         }
                         else -> args.optJSONArray("beats")?.let { arr ->
+                            val existing = current.beats.associateBy { it.text }
                             (0 until arr.length()).mapNotNull { i ->
                                 val text = arr.optString(i).trim()
-                                if (text.isBlank()) null else OutlineBeat(id = uuid(), text = text)
+                                if (text.isBlank()) null else existing[text] ?: OutlineBeat(id = uuid(), text = text)
                             }
                         } ?: current.beats
                     }.filter { it.text.isNotBlank() }
@@ -309,7 +310,7 @@ object AiBible {
             }
             else -> return "不认识的类别：$kind"
         }
-        if (after === before) return "没有变化"
+        if (after == before) return "没有变化"
         apply(ctx, store, bookId, before, after, source, kind, action, label)
         return "已写入故事圣经：$label"
     }
@@ -337,6 +338,7 @@ object AiBible {
                 put("action", action)
                 put("label", label)
                 put("conflict", false)
+                put("bookId", bookId)
                 put("before", encodeBible(before))
                 put("after", encodeBible(after))
             },
@@ -349,7 +351,11 @@ object AiBible {
         var index = -1
         for (i in 0 until arr.length()) {
             val e = arr.optJSONObject(i) ?: continue
-            if (!e.optBoolean("conflict", false)) { index = i; break }
+            if (e.optBoolean("conflict", false)) continue
+            val owner = e.optString("bookId")
+            if (owner.isNotEmpty() && owner != bookId) continue
+            index = i
+            break
         }
         if (index < 0) return "没有可撤销的改动"
         val entry = arr.optJSONObject(index) ?: return "没有可撤销的改动"
@@ -372,9 +378,24 @@ object AiBible {
         return out
     }
 
+    /**
+     * 3.26.23: input for a whole-book consistency pass — bible facts plus every chapter.
+     * The caller asks the model to flag only passages that contradict the bible.
+     */
+    fun consistencyPrompt(book: Book, maxChars: Int = 12000): String {
+        val sb = StringBuilder()
+        sb.append("故事圣经（唯一事实来源）：\n\n").append(summary(book)).append("\n\n正文：\n")
+        book.chapters.forEach { c ->
+            sb.append("\n【").append(c.title).append("】\n").append(c.content).append('\n')
+        }
+        val text = sb.toString()
+        return if (text.length <= maxChars) text
+        else text.take(maxChars) + "\n…（这次只放了前面这些章节）"
+    }
+
     // ───────────────────────── 内部 ─────────────────────────
 
-    private fun conflict(ctx: Context, message: String) {
+    private fun conflict(ctx: Context, bookId: String, message: String) {
         appendJournal(
             ctx, JSONObject().apply {
                 put("id", uuid())
@@ -384,19 +405,33 @@ object AiBible {
                 put("action", "conflict")
                 put("label", message)
                 put("conflict", true)
+                put("bookId", bookId)
             },
         )
     }
 
+    @Synchronized
     private fun loadJournal(ctx: Context): JSONArray = runCatching {
         val file = journalFile(ctx)
         if (!file.exists()) JSONArray() else JSONArray(file.readText())
     }.getOrElse { JSONArray() }
 
+    @Synchronized
     private fun writeJournal(ctx: Context, arr: JSONArray) {
-        runCatching { journalFile(ctx).writeText(arr.toString()) }
+        runCatching {
+            // Atomic-ish: write a temp file then rename, so a kill mid-write cannot
+            // leave a truncated journal that silently drops the undo history.
+            val target = journalFile(ctx)
+            val tmp = File(target.parentFile, "bible-journal.tmp")
+            tmp.writeText(arr.toString())
+            if (!tmp.renameTo(target)) {
+                target.writeText(arr.toString())
+                tmp.delete()
+            }
+        }
     }
 
+    @Synchronized
     private fun appendJournal(ctx: Context, entry: JSONObject) {
         val arr = loadJournal(ctx)
         val next = JSONArray()

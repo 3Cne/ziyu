@@ -463,6 +463,9 @@ fun WritingScreen(
     // opens on full-width text: the 行文时悬浮 setting decides whether the panel
     // may be shown, not whether it is already open.
     var floatNotePanel by remember(seedKey) { mutableStateOf(false) }
+    // 3.26.23: floating story bible opened from the dock (chapter pages only).
+    var storyFloat by remember(seedKey) { mutableStateOf(false) }
+    var storyJournalTick by remember { mutableIntStateOf(0) }
     // 能力栏（工具 + 符号栏）的展开态：左下角的球收起/展开整块能力栏。
     // 2026-11-15 用户要求「展开和关闭要有记忆性」：初值取设置里的 dockOpen
     // （首次与旧备份默认收起），每次开合写回设置。
@@ -680,18 +683,18 @@ fun WritingScreen(
         proofAsked = true
         scope.launch {
             val parts = Proofing.chunks(proofText)
-            val names = if (proofBookId != null) {
-                runCatching {
-                    (MemoStore.load(context, proofBookId).facts + MemoStore.loadGlobal(context).facts)
-                        .filter { it.enabled && it.name.length in 2..6 }
-                        .map { it.name.trim() }
-                        .distinct()
-                }.getOrElse { emptyList() }
-            } else emptyList()
+            // 3.26.23: names and setting facts now come from the story bible (the AI memory layer).
+            val proofBook = proofBookId?.let { store.book(it) }
+            val names = proofBook?.bible?.characters
+                ?.map { it.name.trim() }
+                ?.filter { it.length in 2..6 }
+                ?.distinct()
+                .orEmpty()
+            val bibleFacts = proofBook?.let { AiBible.summary(it) }?.take(2400).orEmpty()
             var foundAny = false
             for ((index, part) in parts.withIndex()) {
                 proofStatus = if (parts.size == 1) null else "正在读第 " + (index + 1) + "/" + parts.size + " 段…"
-                val (sys, usr) = Proofing.prompt(part, names)
+                val (sys, usr) = Proofing.prompt(part, names, bibleFacts = bibleFacts)
                 var r = AiClient.chat(
                     baseUrl = settings.aiBaseUrl,
                     model = settings.aiModel,
@@ -757,7 +760,10 @@ fun WritingScreen(
             for ((index, part) in parts.withIndex()) {
                 proofStatus = if (parts.size == 1) null
                     else "正在改第 " + (index + 1) + "/" + parts.size + " 段…"
-                val (sys, usr) = Polishing.prompt(part.text)
+                val (sys, usr) = Polishing.prompt(
+                    part.text,
+                    previousTail = if (index > 0) parts[index - 1].text.takeLast(120) else "",
+                )
                 var r = AiClient.chat(
                     baseUrl = settings.aiBaseUrl,
                     model = settings.aiModel,
@@ -887,6 +893,78 @@ fun WritingScreen(
             body = body.copy(selection = TextRange(a, b))
             val ed = bodyEditor
             ed?.post { runCatching { ed.setSelection(a, b) } }
+        }
+    }
+
+    /** 3.26.23：修饰模式下一键采纳本章所有卡片（逐条走 acceptProof，位置判定与撤销都沿用）。 */
+    fun acceptAllPolish() {
+        val cards = proofIssues.toList()
+        if (cards.isEmpty()) return
+        scope.launch {
+            cards.forEach { issue ->
+                acceptProof(issue)
+                delay(40)
+            }
+        }
+    }
+
+    /** 3.26.23：整本书对故事圣经做一致性巡检（人名/关系/时间/设定冲突），结果走同一个校核浮窗。 */
+    fun askConsistencyCheck() {
+        val book = proofBookId?.let { store.book(it) } ?: return
+        val key = AiKey.load(context)
+        if (!settings.aiEnabled || key.isNullOrBlank()) {
+            proofOpen = true
+            polishMode = false
+            proofError = "还没配置 AI：设置 → 问书 AI"
+            return
+        }
+        hideEditorKeyboard()
+        bodyEditor?.setInputLocked(true)
+        proofOpen = true
+        polishMode = false
+        proofIssues = emptyList()
+        proofBusy = true
+        proofAsked = true
+        proofError = null
+        proofStatus = "正在通读全书…"
+        proofText = "全书"
+        scope.launch {
+            val system = "你在做整本书的一致性巡检：只找与故事圣经冲突的地方" +
+                "（人名、关系、时间先后、已经发生/还没发生、既有设定）。" +
+                "只输出 JSON 数组，每项 {\"quote\":\"正文原句\",\"suggestion\":\"改成什么\"," +
+                "\"reason\":\"依据故事圣经里的哪条设定或事件\",\"level\":\"设定\"}。" +
+                "没有冲突就输出 []。不要改文风，不要挑错别字，不要解释。"
+            var r = AiClient.chat(
+                baseUrl = settings.aiBaseUrl,
+                model = settings.aiModel,
+                key = key,
+                temperature = .1f,
+                system = system,
+                user = AiBible.consistencyPrompt(book, 10000),
+                maxTokens = 4000,
+                disableThinking = true,
+            )
+            if (!r.ok && r.error?.contains("空内容") == true) {
+                r = AiClient.chat(
+                    baseUrl = settings.aiBaseUrl,
+                    model = settings.aiModel,
+                    key = key,
+                    temperature = .1f,
+                    system = system,
+                    user = AiBible.consistencyPrompt(book, 10000),
+                    maxTokens = 8000,
+                    disableThinking = true,
+                )
+            }
+            if (r.ok) {
+                proofIssues = Proofing.parse(r.text)
+                if (proofIssues.isEmpty()) ToastBus.show("没发现和故事圣经冲突的地方")
+            } else {
+                proofError = r.error ?: "没拿到结果，再试一次"
+            }
+            proofBusy = false
+            proofStatus = null
+            bodyEditor?.setInputLocked(false)
         }
     }
 
@@ -1665,6 +1743,8 @@ fun WritingScreen(
                 onIgnore = { proofIssues = proofIssues - it },
                 onLocate = { locateProof(it) },
                 onClose = { closeProof() },
+                onAcceptAll = if (polishMode) ({ acceptAllPolish() }) else null,
+                onConsistencyCheck = { askConsistencyCheck() },
                 onWidthAnimating = { bodyEditor?.captureScrollAnchorIfNone() },
                 onWidthSettled = { bodyEditor?.releaseScrollAnchor() },
                 onResizeStart = { bodyEditor?.captureScrollAnchor() },
@@ -1679,6 +1759,25 @@ fun WritingScreen(
                     .fillMaxHeight()
                     .padding(bottom = dockReserve + 12.dp),
             )
+            // 3.26.23: floating story bible (same panes as the story page).
+            val storyBook = proofBookId?.let { store.book(it) }
+            val storyJournal = remember(storyFloat, storyBook?.id, storyJournalTick) {
+                if (storyFloat && storyBook != null) {
+                    AiBible.recent(context, 12).map { it.optString("label") to it.optLong("time") }
+                } else emptyList()
+            }
+            if (storyFloat && storyBook != null) {
+                StoryBibleFloatSheet(
+                    book = storyBook,
+                    onBible = { store.updateBible(storyBook.id, it) },
+                    onDismiss = { storyFloat = false },
+                    journal = storyJournal,
+                    onUndo = {
+                        ToastBus.show(AiBible.undoLast(context, store, storyBook.id))
+                        storyJournalTick++
+                    },
+                )
+            }
             }
             Box(
                 Modifier
@@ -1774,6 +1873,12 @@ fun WritingScreen(
                     onHideKeyboard = {
                         hideEditorKeyboard()
                     },
+                    onStory = if (proofBookId != null) {
+                        {
+                            hideEditorKeyboard()
+                            storyFloat = true
+                        }
+                    } else null,
                     onCollapse = {
                         // 3.26.11：先记住当前滚动位置，再翻状态。
                         // 3.26.15：同时把钉子装进 view，重排当帧就生效。
@@ -4694,6 +4799,7 @@ private fun EditorDock(
     onNotes: (() -> Unit)? = null,
     onNotesLongPress: (() -> Unit)? = null,
     onHideKeyboard: () -> Unit,
+    onStory: (() -> Unit)? = null,
     onCollapse: () -> Unit,
     onSymbol: (String) -> Unit,
     onExpand: () -> Unit,
@@ -4872,6 +4978,9 @@ private fun EditorDock(
                                         }
                                     }
                                 }
+                            }
+                            if (onStory != null) {
+                                DockTool(Glyph.Book, "故事", true, onStory, width = DockToolWidth)
                             }
                             DockTool(Glyph.Font, "排版", true, onType, width = DockToolWidth)
                             if (onNotes != null) {

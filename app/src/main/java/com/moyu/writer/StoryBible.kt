@@ -1393,3 +1393,87 @@ private fun chineseNumber(text: String): Int? {
     }
     return section + number
 }
+/**
+ * 3.26.23: floating story bible for the editor dock. Same panes as the story
+ * page (single source), editable in place. Bottom sheet so the writer keeps
+ * the page context instead of navigating away.
+ */
+@Composable
+internal fun StoryBibleFloatSheet(
+    book: Book,
+    onBible: (BookBible) -> Unit,
+    onDismiss: () -> Unit,
+    journal: List<Pair<String, Long>> = emptyList(),
+    onUndo: (() -> Unit)? = null,
+) {
+    val ui = LocalInk.current
+    var tab by remember { mutableIntStateOf(2) }
+    var showLog by remember { mutableStateOf(false) }
+    val sheetH = (androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp * .60f).dp
+    ModalSheet(onDismiss = onDismiss, imeAware = false) {
+        Column(Modifier.fillMaxWidth().height(sheetH)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                if (showLog) {
+                    Box(
+                        Modifier.size(30.dp).clip(CircleShape).clickable { showLog = false },
+                        contentAlignment = Alignment.Center,
+                    ) { LineIcon(Glyph.Chevron, ui.palette.muted, 15.dp) }
+                    Spacer(Modifier.width(6.dp))
+                }
+                Txt(if (showLog) "AI 改动" else "故事", size = 20f, weight = FontWeight.SemiBold)
+                Spacer(Modifier.weight(1f))
+                if (!showLog && onUndo != null) {
+                    Box(
+                        Modifier.size(30.dp).clip(CircleShape).clickable { onUndo() },
+                        contentAlignment = Alignment.Center,
+                    ) { LineIcon(Glyph.Undo, ui.palette.muted, 15.dp) }
+                }
+                if (!showLog && journal.isNotEmpty()) {
+                    Box(
+                        Modifier.size(30.dp).clip(CircleShape).clickable { showLog = true },
+                        contentAlignment = Alignment.Center,
+                    ) { LineIcon(Glyph.Clock, ui.palette.muted, 15.dp) }
+                }
+                Spacer(Modifier.width(4.dp))
+                Box(
+                    Modifier.size(30.dp).clip(CircleShape).clickable { onDismiss() },
+                    contentAlignment = Alignment.Center,
+                ) { LineIcon(Glyph.Close, ui.palette.muted, 15.dp) }
+            }
+            Spacer(Modifier.height(10.dp))
+            if (showLog) {
+                Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+                    if (journal.isEmpty()) {
+                        Txt("还没有 AI 改动", size = 12f, color = ui.palette.muted)
+                    } else {
+                        journal.forEach { (label, time) ->
+                            Txt(storyStamp(time), size = 10f, color = ui.palette.muted)
+                            Spacer(Modifier.height(2.dp))
+                            Txt(label, size = 13f, lineHeight = 19f)
+                            Spacer(Modifier.height(10.dp))
+                        }
+                    }
+                }
+            } else {
+                Segmented(listOf("角色", "时间线", "大纲"), tab, { tab = it })
+                Spacer(Modifier.height(8.dp))
+                Box(Modifier.weight(1f)) {
+                    when (tab) {
+                        0 -> CharacterPane(book, onBible)
+                        1 -> TimelinePane(book, onBible, onOpenChapter = {})
+                        else -> OutlinePane(book, onBible)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** mm-dd hh:mm for the AI change log lines. */
+private fun storyStamp(ms: Long): String {
+    if (ms <= 0L) return ""
+    val c = java.util.Calendar.getInstance().apply { timeInMillis = ms }
+    fun two(v: Int) = if (v < 10) "0$v" else v.toString()
+    return "${two(c.get(java.util.Calendar.MONTH) + 1)}-${two(c.get(java.util.Calendar.DAY_OF_MONTH))} " +
+        "${two(c.get(java.util.Calendar.HOUR_OF_DAY))}:${two(c.get(java.util.Calendar.MINUTE))}"
+}

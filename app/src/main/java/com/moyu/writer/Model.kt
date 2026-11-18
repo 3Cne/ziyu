@@ -279,6 +279,8 @@ data class AppSettings(
     val aiTemperature: Float = .7f,
     /** Doubao-style: pull 0–3 facts out of each exchange, editable later. */
     val aiAutoMemory: Boolean = true,
+    /** 3.26.23: auto-organize the story bible after a chapter save (3 min throttle). */
+    val aiBibleSync: Boolean = true,
     /** How much pinned text (whole book / chapters / notes) may be sent. */
     val aiQuoteMaxChars: Int = 20_000,
     val aiMemoryLimit: Int = 200,
@@ -497,6 +499,36 @@ class AppStore(context: Context) {
         }
     }
 
+    /**
+     * 3.26.23: single entry for writing the story bible from a composable (writer page / floating panel).
+     */
+    fun updateBible(bookId: String, bible: BookBible) {
+        mutate { d ->
+            val prev = d.books.firstOrNull { it.id == bookId }?.bible
+            // 3.26.23: anything changed by a story-page edit is the writer's own setting, so it
+            // becomes origin=author; untouched entries keep their origin (AI / text).
+            val next = if (prev == null) bible else bible.copy(
+                characters = bible.characters.map { c ->
+                    if (prev.characters.firstOrNull { it.id == c.id } == c) c
+                    else c.copy(origin = "author", updatedAt = now())
+                },
+                relations = bible.relations.map { r ->
+                    if (prev.relations.firstOrNull { it.id == r.id } == r) r
+                    else r.copy(origin = "author", updatedAt = now())
+                },
+                events = bible.events.map { e ->
+                    if (prev.events.firstOrNull { it.id == e.id } == e) e
+                    else e.copy(origin = "author", updatedAt = now())
+                },
+                outline = bible.outline.map { n ->
+                    if (prev.outline.firstOrNull { it.id == n.id } == n) n
+                    else n.copy(origin = "author", updatedAt = now())
+                },
+            )
+            d.copy(books = d.books.map { b -> if (b.id == bookId) b.copy(bible = next) else b })
+        }
+    }
+
     fun updateChapter(bookId: String, chapterId: String, title: String? = null, content: String? = null) {
         mutate { d ->
             var delta = 0
@@ -524,6 +556,12 @@ class AppStore(context: Context) {
                 d.dailyWords.toMutableMap().also { it[today] = max(0, (it[today] ?: 0) + delta) }
             } else d.dailyWords
             d.copy(books = books, dailyWords = daily, lastBookId = bookId, lastChapterId = chapterId)
+        }
+        // 3.26.23: chapter text is the source of truth. Once the body is saved, ask the
+        // auto-organizer to fold what is now written into the story bible (3 min throttle,
+        // it self-checks aiEnabled / aiBibleSync / key, and never blocks the save).
+        if (content != null) {
+            AiBibleSync.noteChapterSaved(appContext, this, bookId, chapterId)
         }
     }
 
@@ -1107,6 +1145,7 @@ internal fun encodeBible(b: BookBible): JSONObject = JSONObject().apply {
         os.put(JSONObject().apply {
             put("id", n.id); put("chapterId", n.chapterId ?: JSONObject.NULL)
             put("title", n.title); put("beats", bs)
+            put("origin", n.origin); put("updatedAt", n.updatedAt)
         })
     }
     put("characters", cs); put("relations", rs); put("events", es); put("outline", os)
@@ -1247,6 +1286,7 @@ private fun encodeSettings(s: AppSettings): JSONObject = JSONObject().apply {
     put("aiTopK", s.aiTopK); put("aiContextChars", s.aiContextChars)
     put("aiTemperature", s.aiTemperature.toDouble())
     put("aiAutoMemory", s.aiAutoMemory)
+    put("aiBibleSync", s.aiBibleSync)
     put("aiQuoteMaxChars", s.aiQuoteMaxChars)
     put("aiMemoryLimit", s.aiMemoryLimit)
     put("aiWeb", s.aiWeb)
@@ -1352,6 +1392,7 @@ private fun decodeSettings(o: JSONObject?) = AppSettings(
     aiContextChars = (o?.optInt("aiContextChars", 3000) ?: 3000).coerceIn(400, 8000),
     aiTemperature = (o?.optDouble("aiTemperature", .7) ?: .7).toFloat().coerceIn(0f, 1.4f),
     aiAutoMemory = o?.optBoolean("aiAutoMemory", true) ?: true,
+    aiBibleSync = o?.optBoolean("aiBibleSync", true) ?: true,
     aiQuoteMaxChars = (o?.optInt("aiQuoteMaxChars", 20_000) ?: 20_000).coerceIn(2_000, 60_000),
     aiMemoryLimit = (o?.optInt("aiMemoryLimit", 200) ?: 200).coerceIn(20, 500),
     aiWeb = o?.optBoolean("aiWeb", false) ?: false,

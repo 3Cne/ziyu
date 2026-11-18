@@ -73,7 +73,12 @@ object Polishing {
         return until
     }
 
-    fun prompt(text: String): Pair<String, String> {
+    fun prompt(text: String, previousTail: String = ""): Pair<String, String> {
+        // 3.26.23：块与块之间要接得上。上一块结尾只做参照，不写进正文。
+        // 空串时不加衔接段（首块没有上一块，提示词与之前一样只描述这一块）。
+        val link = if (previousTail.isBlank()) "" else
+            "\n\n上一块结尾（只用来衔接，不要重复它）：\n" + previousTail.trim() +
+                "\n开头不要重复上一块结尾已经写过的句子或意思；人称、语气、时态和上一块保持一致。"
         val system = """
 你是中文小说编辑。这一趟不挑错，只做一件事：把这段的描写写出来。
 把该看见的东西写出来：器物、光、温度、声音、气味、手上的动作、身体的反应、空间的远近。
@@ -83,9 +88,10 @@ object Polishing {
 对话内容不能改（可以改对话前后的动作与神态）。
 不要写成华丽散文：宁可具体，不要漂亮；不堆比喻，不抒情总结，不在段尾升华，不用「仿佛」「宛如」起头的比喻。
 判断标准是「读完能看见那个场面」，不是「文笔好不好」。
-只改这一段，不要顺带改别的段落，也不要缩短到只剩一句。
-输出 JSON 数组，1 个版本；每项：{"suggestion":"改写后的整段","why":"一句为什么这么改"}。
-规则：不要自己加换行——段落之间只用一个换行，行首不要加空格或全角空格（缩进由程序按原文补回）；
+只改这一段，不要顺带改别的段落，也不要缩短到只剩一句。$link
+输出 JSON 数组，1 个版本；每项：{"suggestion":"改写后的整段","reason":"一句为什么这么改"}。
+规则：reason 不超过 40 字，写清顺在哪里；不要自己加换行——段落之间只用一个换行，
+行首不要加空格或全角空格（缩进由程序按原文补回）；
 不要用 markdown，不要代码块。
 没有可改的就输出 []。不要解释，不要代码块。
 """.trimIndent()
@@ -140,12 +146,17 @@ object Polishing {
             // 下限 0.45 是防模型只交半段（那会吃掉正文）。
             val ratio = suggestion.length.toFloat() / original.length.coerceAtLeast(1)
             if (ratio < .45f || ratio > 3f) continue
+            val why = o.optString("why").trim().take(80)
+            // 3.26.23：新提示词只问 reason；模型仍按旧习惯回 why 时用它兜底，
+            // 卡片不会少一行说明，旧格式（只有 why）也照常解析。
+            val reason = o.optString("reason").trim().take(120).ifEmpty { why }
             out += ProofIssue(
                 kind = "修饰",
                 quote = original,
                 suggestion = suggestion,
-                why = o.optString("why").trim(),
+                why = why,
                 local = false,
+                reason = reason,
             )
         }
         return out.distinctBy { it.suggestion }.take(1)

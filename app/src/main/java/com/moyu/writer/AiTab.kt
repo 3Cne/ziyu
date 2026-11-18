@@ -1,5 +1,6 @@
 package com.moyu.writer
 
+import android.content.Context
 import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -120,8 +121,10 @@ import androidx.compose.ui.unit.dp
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Plain text styled by `Txt`, so the model's markdown leftovers read as noise:
@@ -312,9 +315,11 @@ private fun ThoughtBlock(id: String, reasoning: String) {
  * 输入框上方的工具气泡：只有图标，没有文字。
  *
  * 展开/收起只有两件事：透明度 0↔1、整块在下方 8dp 与落点之间移动（收起反向）。
- * 宽度固定、5 个图标整排同时出现——之前「宽度从 5px 拉幕 + 每个图标错开 18ms
+ * 宽度固定、4 个图标整排同时出现——之前「宽度从 5px 拉幕 + 每个图标错开 18ms
  * 滑入 14dp」三层一起演，读起来太夸张；删掉后玻璃只按最终尺寸栅格化一次，
  * 边缘也不会每帧重新采样。
+ *
+ * 3.26.23：facts 记忆层下线，「记忆」图标移除，宽按 4 图标重算（不留空位）。
  */
 @Composable
 private fun ToolsBubble(
@@ -326,15 +331,14 @@ private fun ToolsBubble(
     onQuote: () -> Unit,
     onDeep: () -> Unit,
     onWeb: () -> Unit,
-    onMemory: () -> Unit,
 ) {
     // 只在「从无到有」那一刻重组一次；之后透明度/位移在组合里读，
     // 但宽度从第一帧就是最终尺寸——玻璃只按最终尺寸栅格化一次，
     // 展开过程中不再重排，边缘也不会因为宽度变了又重采样一次。
     val visible by remember(open) { derivedStateOf { open.value > .001f } }
     if (!visible) return
-    // 5 颗 42dp 图标 + 4 个 2dp 间隔 + 左右各 7dp 内边距。
-    val bubbleWidth = 42.dp * 5f + 2.dp * 4f + 7.dp * 2f
+    // 4 颗 42dp 图标 + 3 个 2dp 间隔 + 左右各 7dp 内边距。
+    val bubbleWidth = 42.dp * 4f + 2.dp * 3f + 7.dp * 2f
     val t = open.value.coerceIn(0f, 1f)
     Box(
         modifier
@@ -359,7 +363,6 @@ private fun ToolsBubble(
                 ToolIcon(Glyph.Link, onClick = onQuote)
                 ToolIcon(Glyph.Sparkles, selected = deepThink, onClick = onDeep)
                 ToolIcon(Glyph.Search, selected = webOn, onClick = onWeb)
-                ToolIcon(Glyph.Book, onClick = onMemory)
             }
         }
     }
@@ -416,12 +419,18 @@ private val FALLBACK_SUGGESTIONS = listOf(
     "接下来三章该怎么走",
 )
 
+/** 3.26.23 一次性清理标记：facts 记忆层下线，只清一次。 */
+private const val MEMO_CLEARED_PREFS = "moyu_ai"
+private const val MEMO_CLEARED_KEY = "bible_memory_cleared_v1"
+
 /**
- * 问书: the AI tab. One brain, three panes.
+ * 问书: the AI tab.
  *
  *  对话 — ask about the book; the pinned material is visible in one row;
- *  记忆 — what it remembers, one line per fact, editable on tap;
- *  设置 — service, key, budget, automatic memory.
+ *
+ * 3.26.23 起记忆层并入故事圣经：旧的 facts 记忆页已下线（对话历史与章节摘要
+ * 缓存保留），AI 的长期记忆只来自 `AiBible.summary(book)`。服务和 Key 等设置
+ * 仍在全局「设置 → 问书」页。
  */
 @Composable
 fun AiScreen(
@@ -439,9 +448,15 @@ fun AiScreen(
     var bookId by rememberSaveable { mutableStateOf(books.firstOrNull()?.id) }
     val book = books.firstOrNull { it.id == bookId } ?: books.firstOrNull()
 
-    var tab by rememberSaveable { mutableIntStateOf(0) }
+    // 3.26.23：facts 记忆层下线（故事圣经是唯一记忆层）。读盘即丢掉旧 facts，
+    // 避免旧条目被 refreshLocalMemo / persist 再写回磁盘；对话与章节摘要照旧。
     var memo by remember(book?.id) {
-        mutableStateOf(book?.let { MemoStore.load(ctx, it.id) } ?: BookMemo(""))
+        mutableStateOf(
+            book?.let { b ->
+                val m = MemoStore.load(ctx, b.id)
+                if (m.facts.isEmpty()) m else m.copy(facts = emptyList())
+            } ?: BookMemo("")
+        )
     }
     LaunchedEffect(book?.id, book?.chapters) {
         val b = book ?: return@LaunchedEffect
@@ -453,6 +468,29 @@ fun AiScreen(
     }
     val index = remember(book?.id, book?.chapters) {
         book?.let { BookIndex(BookText.passages(it)) }
+    }
+
+    // 一次性清掉旧 facts（对话历史与章节摘要缓存保留）：只清记忆层，不动正文。
+    // 用 SharedPreferences 打标记，第二个版本起不再重复扫盘。空书架也清跨书 facts。
+    LaunchedEffect(Unit) {
+        val prefs = ctx.getSharedPreferences(MEMO_CLEARED_PREFS, Context.MODE_PRIVATE)
+        if (prefs.getBoolean(MEMO_CLEARED_KEY, false)) return@LaunchedEffect
+        runCatching {
+            withContext(Dispatchers.IO) {
+                // 用组合期快照的 books，避免在后台线程读 Compose 状态。
+                books.forEach { b ->
+                    val m = MemoStore.load(ctx, b.id)
+                    if (m.facts.isNotEmpty()) MemoStore.save(ctx, m.copy(facts = emptyList()))
+                }
+                val g = MemoStore.loadGlobal(ctx)
+                if (g.facts.isNotEmpty()) MemoStore.saveGlobal(ctx, g.copy(facts = emptyList()))
+            }
+            prefs.edit().putBoolean(MEMO_CLEARED_KEY, true).apply()
+            memo = memo.copy(facts = emptyList())
+            android.util.Log.d("MOYU_AI", "bible_memory_cleared_v1: old MemoFact facts dropped")
+        }.onFailure {
+            android.util.Log.d("MOYU_AI", "bible_memory_cleared_v1 failed: " + (it.message ?: it.javaClass.simpleName))
+        }
     }
 
     if (book == null) {
@@ -498,7 +536,6 @@ fun AiScreen(
     val chat = remember { ChatSession() }
     var answerId by remember { mutableStateOf("") }
     var streamText by remember { mutableStateOf("") }
-    var shown by remember { mutableIntStateOf(0) }
     val follow = remember { ScrollFollow() }
     var lastPrompt by remember { mutableStateOf<AiPrompt?>(null) }
     // 只剩危险操作（删除/覆盖）排在这里，等下面那个确认；安全写入走 applyDirectly。
@@ -514,15 +551,7 @@ fun AiScreen(
     var quotes by remember(bookId) { mutableStateOf<List<QuoteRef>>(emptyList()) }
     var quoteSheet by remember { mutableStateOf(false) }
     var bookPicker by remember { mutableStateOf(false) }
-    var editing by remember { mutableStateOf<MemoFact?>(null) }
     var suggestions by remember(bookId) { mutableStateOf<List<String>>(emptyList()) }
-    // Author-level memory: preferences and habits that follow the writer across
-    // books. Kept in its own file so "清空这本书" never wipes them.
-    var globalFacts by remember { mutableStateOf(MemoStore.loadGlobal(ctx).facts) }
-    // The conversation's scroll position must survive a visit to 记忆: keeping
-    // it inside ChatPane meant the pane was rebuilt at item 0 on the way back
-    // and the list visibly jumped to the bottom one frame later. It also lets
-    // the pane skip its "scroll to newest" pass when nothing new arrived.
     val chatList = rememberLazyListState()
     LaunchedEffect(bookId) {
         chat.load(memo.turns)
@@ -535,7 +564,6 @@ fun AiScreen(
             runCatching { chatList.scrollBy(1_000_000f) }
         }
     }
-    var chatSeen by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
     // Files live for this conversation only: switching the book drops them with
@@ -553,10 +581,6 @@ fun AiScreen(
 
     fun applyQueue(queue: List<AiPending>) {
         if (queue.isEmpty()) return
-        var bookFacts = memo.facts
-        var bookDirty = false
-        var globalList = globalFacts
-        var globalDirty = false
         // A restore replaces the whole store; saying "已采纳 1 处" afterwards
         // would understate what just happened.
         var restoredNow = false
@@ -673,26 +697,11 @@ fun AiScreen(
                         next
                     }
                 }
-                AiPendingKind.Memo -> {
-                    val fact = MemoryOps.newFact(p.memoKind, p.memoName, p.memoDetail, "ai")
-                    bookFacts = MemoryOps.merge(bookFacts, listOf(fact), settings.aiMemoryLimit)
-                    bookDirty = true
-                }
-                AiPendingKind.GlobalMemo -> {
-                    val fact = MemoryOps.newFact(p.memoKind, p.memoName, p.memoDetail, "ai")
-                    globalList = MemoryOps.merge(globalList, listOf(fact), settings.aiMemoryLimit)
-                    globalDirty = true
-                }
-                AiPendingKind.MemoOff -> {
-                    // 停用，不是抹掉：记忆页里还看得见，能一键恢复。删除留给作者亲手做。
-                    if (globalList.any { it.id == p.memoId }) {
-                        globalList = globalList.map { if (it.id == p.memoId) it.copy(enabled = false) else it }
-                        globalDirty = true
-                    } else {
-                        bookFacts = bookFacts.map { if (it.id == p.memoId) it.copy(enabled = false) else it }
-                        bookDirty = true
-                    }
-                }
+                // 3.26.23：facts 记忆层下线（故事圣经是唯一记忆层）。旧的
+                // save_memory / delete_memory 若还被模型调用，不再落盘；
+                // 在 applyDirectly 里已过滤并提示改走 write_story_bible。
+                // 分支保留只为 when 覆盖全部枚举，什么都不做。
+                AiPendingKind.Memo, AiPendingKind.GlobalMemo, AiPendingKind.MemoOff -> Unit
                 AiPendingKind.Export -> {
                     val o = JSONObject(p.payload.ifBlank { "{}" })
                     val format = o.optString("format", "epub")
@@ -771,10 +780,9 @@ fun AiScreen(
                         val b = store.books.firstOrNull()
                         bookId = b?.id
                         // The restored file is the truth: anything the session
-                        // still held (facts, turns, quotes) belongs to the data
-                        // that was just replaced.
-                        memo = b?.let { MemoStore.load(ctx, it.id) } ?: BookMemo("")
-                        globalFacts = MemoStore.loadGlobal(ctx).facts
+                        // still held (turns, quotes) belongs to the data that was
+                        // just replaced. facts 记忆层已下线，不再从盘上载回来。
+                        memo = b?.let { MemoStore.load(ctx, it.id).copy(facts = emptyList()) } ?: BookMemo("")
                         quotes = emptyList()
                         attachments = emptyList()
                         restoredNow = true
@@ -783,15 +791,6 @@ fun AiScreen(
                 }
             }
         }
-        if (bookDirty) {
-            val next = memo.copy(facts = bookFacts)
-            memo = next
-            MemoStore.save(ctx, next)
-        }
-        if (globalDirty) {
-            globalFacts = globalList
-            MemoStore.saveGlobal(ctx, MemoStore.loadGlobal(ctx).copy(facts = globalList))
-        }
         if (!restoredNow) ToastBus.show("已写入 " + queue.size + " 处")
     }
 
@@ -799,7 +798,7 @@ fun AiScreen(
     fun editFor(p: AiPending): ChatEdit {
         val id = java.util.UUID.randomUUID().toString().take(8)
         if (p.kind != AiPendingKind.Append && p.kind != AiPendingKind.Replace) {
-            // 改名 / 建章 / 待办 / 记忆：只留一行说明，没有单条撤销。
+            // 改名 / 建章 / 待办：只留一行说明，没有单条撤销。
             return ChatEdit(id = id, label = p.label, kind = "info")
         }
         val target = store.books.firstOrNull { it.id == p.bookId.ifBlank { book.id } }
@@ -860,9 +859,21 @@ fun AiScreen(
     /** 直接落地：删除与整库恢复以外的写操作，一次回答结束就生效。 */
     fun applyDirectly(queue: List<AiPending>) {
         if (queue.isEmpty()) return
+        // 3.26.23：facts 记忆层下线。模型偶尔还会调 save_memory / delete_memory，
+        // 这类队列项不再落盘、也不再生成卡片，只提示改走故事圣经。
+        val legacyMemory = queue.filter {
+            it.kind == AiPendingKind.Memo ||
+                it.kind == AiPendingKind.GlobalMemo ||
+                it.kind == AiPendingKind.MemoOff
+        }
+        if (legacyMemory.isNotEmpty()) {
+            ToastBus.show("记忆已并入故事圣经：让 AI 用 write_story_bible 记录设定")
+        }
+        val work = queue.filterNot { it in legacyMemory }
+        if (work.isEmpty()) return
         val direct = ArrayList<AiPending>()
         val rest = ArrayList<AiPending>()
-        for (p in queue) {
+        for (p in work) {
             if (p.danger || p.kind == AiPendingKind.Restore) rest += p else direct += p
         }
         if (direct.isNotEmpty()) {
@@ -895,13 +906,10 @@ fun AiScreen(
     }
 
     fun persist(m: BookMemo) {
-        memo = m
-        MemoStore.save(ctx, m)
-    }
-
-    fun persistGlobal(list: List<MemoFact>) {
-        globalFacts = list
-        MemoStore.saveGlobal(ctx, MemoStore.loadGlobal(ctx).copy(facts = list))
+        // facts 层已下线：任何一次保存都只写对话与章节摘要缓存，旧 facts 不再回写磁盘。
+        val clean = if (m.facts.isEmpty()) m else m.copy(facts = emptyList())
+        memo = clean
+        MemoStore.save(ctx, clean)
     }
 
     fun send(text: String, echo: Boolean = true) {
@@ -938,13 +946,15 @@ fun AiScreen(
         } else {
             BookIndex(emptyList())
         }
-        // Both layers go into the prompt: the book's facts and the writer's own
-        // habits, which apply to whatever book he opens next.
+        // 3.26.23：故事圣经是唯一的长期记忆层。facts 层不再进 prompt（memo 传空 facts，
+        // 所以 AiPromptBuilder 的「长期记忆 / 作者偏好」两节自然为空）；圣经摘要补在
+        // 系统提示末尾。对话历史与章节摘要缓存照旧由 build 带进去。
         // 深度思考是发送那一刻的状态：回答中途切开关不影响这一条。
         val deepThink = settings.aiDeepThink
-        val prompt = AiPromptBuilder.build(
+        val bible = AiBible.summary(book)
+        val built = AiPromptBuilder.build(
             book = book,
-            memo = memo.copy(facts = memo.facts + globalFacts),
+            memo = memo.copy(facts = emptyList()),
             index = idx,
             question = q,
             topK = settings.aiTopK,
@@ -959,13 +969,19 @@ fun AiScreen(
             attachments = attachments,
             deepThink = deepThink,
         )
+        val prompt = built.copy(
+            system = built.system +
+                "\n\n「长期记忆」「作者偏好」两节已经并入下面的故事圣经，以故事圣经为准，" +
+                "不要把计划当已发生的事实。需要记住或修改设定、人物、关系、事件、大纲时，" +
+                "用 read_story_bible / write_story_bible 读写圣经；旧的 save_memory / " +
+                "delete_memory 已经没有任何地方可记，不要再调用。\n\n" +
+                bible,
+        )
         lastPrompt = prompt
-        val kindOf = (memo.facts + globalFacts).associateBy { it.id }
         android.util.Log.d(
             "MOYU_AI",
             "send q=" + q.length + " quotes=" + quotes.size + " quoteChars=" + prompt.quoteChars +
-                " user=" + prompt.user.length + " facts=" + prompt.usedFacts.size +
-                " factsKinds=" + prompt.usedFacts.mapNotNull { kindOf[it]?.kind }.joinToString(",") +
+                " user=" + prompt.user.length + " bible=" + bible.length +
                 " history=" + prompt.historyChars +
                 " deep=" + deepThink +
                 " summaries=" + prompt.summaries.joinToString(",") { it.title } +
@@ -981,7 +997,6 @@ fun AiScreen(
         }
         persist(
             memo.copy(
-                facts = MemoryOps.touch(memo.facts, prompt.usedFacts),
                 // Regenerating reuses the question already in the transcript, so
                 // it must not add a second copy of that turn.
                 turns = if (echo) (memo.turns + MemoTurn("user", q)).takeLast(40) else memo.turns,
@@ -992,9 +1007,6 @@ fun AiScreen(
         if (echo) chat.addUser(q, emptyList())
         val id = chat.beginAnswer()
         answerId = id
-        if (prompt.usedFacts.any { id -> globalFacts.any { it.id == id } }) {
-            persistGlobal(MemoryOps.touch(globalFacts, prompt.usedFacts))
-        }
         question = ""
         error = null
         sending = true
@@ -1051,6 +1063,9 @@ fun AiScreen(
             val writeBudget = if (deepThink) 6_000 else 3_000
             // One blank-answer rescue per question, whatever round it happens on.
             var retriedBlank = false
+            // 3.26.23：模型还可能调旧的 save_memory / delete_memory；这些调用不落盘，
+            // 只回一句「改用故事圣经」并把它们的队列项丢掉（计数用于给作者一次提示）。
+            var legacyMemoCalls = 0
             // With an explicit quote the chapter text is already in the prompt;
             // offering the read_chapter tools on top only makes a thinking model
             // spend its budget deciding whether to re-read, and the reply came
@@ -1163,16 +1178,35 @@ fun AiScreen(
                             book,
                             store.notes,
                             queue,
-                            memo.facts,
-                            globalFacts,
-                            toolEnv,
+                            // facts 记忆层已下线：空列表让旧的 delete_memory 自然
+                            // 返回「这一层还没有记忆」，不再产生 MemoFact 数据。
+                            facts = emptyList(),
+                            globalFacts = emptyList(),
+                            env = toolEnv,
                         )
                     }.getOrElse { "error: 工具 " + call.name + " 没跑通（" + (it.message ?: it.javaClass.simpleName) + "）。换个参数或换条路子，别把这句原样转给作者。" }
+                    // 3.26.23：facts 记忆层下线。旧的记忆工具即使被调用也不落盘：
+                    // 回给模型的是「改用故事圣经」，同时清掉 AiTools 刚排进队列的
+                    // Memo / GlobalMemo / MemoOff 项，避免生成卡片或提示已写入。
+                    val legacyMemoTool = call.name == "save_memory" || call.name == "delete_memory"
+                    val reply = if (legacyMemoTool) {
+                        legacyMemoCalls++
+                        queue.removeAll {
+                            it.kind == AiPendingKind.Memo ||
+                                it.kind == AiPendingKind.GlobalMemo ||
+                                it.kind == AiPendingKind.MemoOff
+                        }
+                        "没有写入任何东西：facts 记忆层已经下线，故事圣经（read_story_bible / " +
+                            "write_story_bible）是唯一的长期记忆层。要记设定、人物、关系、事件、大纲，" +
+                            "用 write_story_bible；不要再调用 save_memory / delete_memory。"
+                    } else {
+                        out
+                    }
                     messages.put(
                         JSONObject().apply {
                             put("role", "tool")
                             put("tool_call_id", call.id)
-                            put("content", out)
+                            put("content", reply)
                         }
                     )
                     if (settings.aiToolTrace) {
@@ -1181,8 +1215,8 @@ fun AiScreen(
                             name = call.name,
                             label = AiTools.label(call.name),
                             args = traceArgs(call.args),
-                            result = out.replace(Regex("\\s+"), " ").trim().take(90),
-                            ok = !out.startsWith("error:"),
+                            result = reply.replace(Regex("\\s+"), " ").trim().take(90),
+                            ok = !reply.startsWith("error:"),
                             elapsedMs = System.currentTimeMillis() - started,
                         )
                         chat.setTools(id, traces.toList())
@@ -1273,6 +1307,9 @@ fun AiScreen(
                     " reasoning=" + last.reasoningChars + " tokens=" + spentTokens +
                     " deep=" + deepThink,
             )
+            if (legacyMemoCalls > 0) {
+                ToastBus.show("记忆已并入故事圣经：AI 应改用 write_story_bible 记录设定")
+            }
             pending = queue
             // 除删除/覆盖外的写操作，这里就落地，不等「采纳」。
             applyDirectly(queue)
@@ -1337,55 +1374,8 @@ fun AiScreen(
         persist(next)
         android.util.Log.d("MOYU_AI", "settle answer id=" + id + " len=" + target.length)
         streamText = ""
-
-        // Automatic memory: one small request, 0–2 facts. Own coroutine, so a
-        // recomposition or effect restart can neither lose it nor extend the
-        // streaming bubble. Skipped when the model already maintained memory
-        // through the tools this turn: running both wrote the same correction
-        // twice ("赵乾是色盲" from the extractor + a tool-written version).
-        val touchedMemory = chat.messages.firstOrNull { it.id == id }?.tools.orEmpty()
-            .any { it.name == "save_memory" || it.name == "delete_memory" }
-        if (settings.aiAutoMemory && !touchedMemory) {
-            scope.launch {
-                val key = AiKey.load(ctx)
-                if (!key.isNullOrBlank()) {
-                    val (sys, usr) = MemoryExtractor.request(next.turns, next.facts)
-                    val r = AiClient.chat(
-                        baseUrl = settings.aiBaseUrl,
-                        model = settings.aiModel,
-                        key = key,
-                        temperature = .2f,
-                        system = sys,
-                        user = usr,
-                        maxTokens = 320,
-                    )
-                    if (r.ok) {
-                        val props = MemoryExtractor.parse(r.text)
-                        if (props.isNotEmpty()) {
-                            // 回顾 / 规划 both belong to the book; only the writer's
-                            // own habits (偏好/习惯/…) follow them across books.
-                            // update/drop name an id, so resolve the side by id first.
-                            var bookFacts = next.facts
-                            var globalNext = globalFacts
-                            for (p in props) {
-                                val inGlobal = p.id.isNotBlank() && globalNext.any { it.id == p.id }
-                                val toGlobal = if (p.op != "new") inGlobal else MemoryOps.isGlobal(p.kind)
-                                if (toGlobal) {
-                                    globalNext = MemoryOps.applyProposals(globalNext, listOf(p), 60)
-                                } else {
-                                    bookFacts = MemoryOps.applyProposals(bookFacts, listOf(p), settings.aiMemoryLimit)
-                                }
-                            }
-                            val added = (bookFacts.size - next.facts.size) + (globalNext.size - globalFacts.size)
-                            val touched = added > 0 || props.any { it.op != "new" }
-                            if (bookFacts != next.facts) persist(next.copy(facts = bookFacts))
-                            if (globalNext != globalFacts) persistGlobal(globalNext)
-                            if (touched) ToastBus.show(if (added > 0) "记住 $added 条" else "更新了一条记忆")
-                        }
-                    }
-                }
-            }
-        }
+        // 3.26.23：回答后自动提炼记忆（MemoryExtractor）已下线——故事圣经是唯一记忆层，
+        // 不再有任何分支写 MemoFact；对话与章节摘要的落盘在上面 persist(next) 完成。
     }
 
     Box(Modifier.fillMaxSize()) {
@@ -1401,7 +1391,8 @@ fun AiScreen(
                     Txt("问书", size = 34f, weight = FontWeight.SemiBold, letterSpacing = .4f)
                     Spacer(Modifier.weight(1f))
                     // One conversation per book: the cover is the switch. The
-                    // thread, the memory and the quotes all follow the book.
+                    // thread and the quotes follow the book; the long-term memory
+                    // now lives in that book's 故事圣经.
                     Row(
                         Modifier
                             .clip(SmoothCorner(13.dp))
@@ -1421,35 +1412,17 @@ fun AiScreen(
                         LineIcon(Glyph.ChevronDown, p.muted, 10.dp, 1.8f)
                     }
                 }
-                Spacer(Modifier.height(14.dp))
-                Segmented(
-                    options = listOf("对话", "记忆"),
-                    selected = tab,
-                    onSelect = { tab = it },
-                    modifier = Modifier.fillMaxWidth(),
-                )
                 Spacer(Modifier.height(12.dp))
             }
 
-            // 对话 / 记忆 slide by their relative position, the same gesture the
-            // root tabs use: 0 → 1 travels left, 1 → 0 travels right.
-            AnimatedContent(
-                targetState = tab,
-                transitionSpec = {
-                    val dir = if (targetState > initialState) 1 else -1
-                    (slideInHorizontally(tween(260)) { it * dir } + fadeIn(tween(200)))
-                        .togetherWith(slideOutHorizontally(tween(260)) { -it * dir } + fadeOut(tween(160)))
-                },
-                modifier = Modifier.fillMaxWidth().weight(1f),
-                label = "aiPane",
-            ) { pane ->
-            when (pane) {
-                0 -> ChatPane(
+            // 3.26.23：记忆页下线（故事圣经在书籍详情「故事」里读改），这里只剩对话一屏。
+            // Box + weight：原来由 AnimatedContent 占「剩余高度」，去掉后必须自己撑满列，
+            // 否则 ChatPane 会按整屏高度测量、底部输入栏被挤出屏幕。
+            Box(Modifier.fillMaxWidth().weight(1f)) {
+                ChatPane(
                     book = book,
                     listState = chatList,
                     follow = follow,
-                    isReentry = chatSeen,
-                    onShown = { chatSeen = true },
                     notes = store.notes,
                     quotes = quotes,
                     onAddQuote = { quoteSheet = true },
@@ -1476,7 +1449,6 @@ fun AiScreen(
                     onToggleWeb = {
                         store.updateSettings { it.copy(aiWeb = !it.aiWeb) }
                     },
-                    onOpenMemory = { tab = 1 },
                     messages = chat.messages,
                     question = question,
                     onQuestion = { question = it },
@@ -1616,28 +1588,6 @@ fun AiScreen(
                     },
                     popId = popId,
                 )
-                else -> MemoryPane(
-                    memo = memo,
-                    global = globalFacts,
-                    indexSize = index?.size ?: 0,
-                    onClearChat = {
-                        // Chat only; the memory stays. The old 清空 wiped both,
-                        // which is why one button could not serve both jobs.
-                        chat.load(emptyList())
-                        persist(memo.copy(turns = emptyList()))
-                    },
-                    onClear = {
-                        // Memory only; the transcript stays. Keep the file (it
-                        // also holds turns) and just blank the memory fields.
-                        persist(memo.copy(facts = emptyList(), chapters = emptyList()))
-                    },
-                    onEdit = { editing = it },
-                    onDelete = { f ->
-                        if (MemoryOps.isGlobal(f.kind)) persistGlobal(globalFacts.filterNot { it.id == f.id })
-                        else persist(memo.copy(facts = memo.facts.filterNot { it.id == f.id }))
-                    },
-                )
-            }
             }
         }
     }
@@ -1688,35 +1638,6 @@ fun AiScreen(
                 applyQueue(danger)
             },
             onDismiss = { confirmDanger = false },
-        )
-    }
-
-    editing?.let { fact ->
-        val isGlobal = MemoryOps.isGlobal(fact.kind)
-        FactDialog(
-            fact = fact,
-            onSave = { name, detail ->
-                if (isGlobal) {
-                    persistGlobal(globalFacts.map { if (it.id == fact.id) it.copy(name = name, detail = detail) else it })
-                } else {
-                    persist(memo.copy(facts = memo.facts.map { if (it.id == fact.id) it.copy(name = name, detail = detail) else it }))
-                }
-                editing = null
-            },
-            onToggle = {
-                if (isGlobal) {
-                    persistGlobal(globalFacts.map { if (it.id == fact.id) it.copy(enabled = !it.enabled) else it })
-                } else {
-                    persist(memo.copy(facts = memo.facts.map { if (it.id == fact.id) it.copy(enabled = !it.enabled) else it }))
-                }
-                editing = null
-            },
-            onDelete = {
-                if (isGlobal) persistGlobal(globalFacts.filterNot { it.id == fact.id })
-                else persist(memo.copy(facts = memo.facts.filterNot { it.id == fact.id }))
-                editing = null
-            },
-            onDismiss = { editing = null },
         )
     }
 }
@@ -1806,9 +1727,6 @@ private fun ChatPane(
     book: Book,
     listState: LazyListState,
     follow: ScrollFollow,
-    /** True when 对话 is being composed again after a visit to 记忆. */
-    isReentry: Boolean,
-    onShown: () -> Unit,
     notes: List<Note>,
     quotes: List<QuoteRef>,
     onAddQuote: () -> Unit,
@@ -1824,8 +1742,6 @@ private fun ChatPane(
     /** 问书 · 联网搜索开关（沿用设置里的 aiWeb）。 */
     webOn: Boolean,
     onToggleWeb: () -> Unit,
-    /** 跳到「记忆」页。 */
-    onOpenMemory: () -> Unit,
     messages: List<ChatMsg>,
     question: String,
     onQuestion: (String) -> Unit,
@@ -1933,11 +1849,6 @@ private fun ChatPane(
     }
     BackHandler(enabled = toolsOpen) { toolsOpen = false }
 
-    // First composition of this pane marks it as seen; a later composition is a
-    // return from 记忆, where the list must stay exactly where it was left. The
-    // restored position is already right, so no scroll runs on entry: the
-    // turn-count effect only fires when the count actually grows.
-    LaunchedEffect(Unit) { onShown() }
     // Scroll policy, ported from the DSH chat view's `use-scroll-follow`:
     // intent and motion are separate. Only a reader gesture changes
     // `follow.following`; program scrolls (send, growth, keyboard) leave the
@@ -2568,7 +2479,6 @@ private fun ChatPane(
                         glyph = Glyph.Search,
                     )
                 },
-                onMemory = { toolsOpen = false; onOpenMemory() },
             )
         }
 
@@ -3439,419 +3349,6 @@ private fun AppearingChip(id: String, content: @Composable () -> Unit) {
             expandFrom = Alignment.End,
         ) + fadeIn(tween(120)),
     ) { content() }
-}
-
-/**
- * Memory: one line per fact, no kind chips, no "new" badge, no per-row buttons.
- * Tapping a line opens the editor where 停用 / 删掉 live — the list is meant to
- * be read, not operated.
- */
-@Composable
-private fun MemoryPane(
-    memo: BookMemo,
-    global: List<MemoFact>,
-    indexSize: Int,
-    onClearChat: () -> Unit,
-    onClear: () -> Unit,
-    onEdit: (MemoFact) -> Unit,
-    onDelete: (MemoFact) -> Unit,
-) {
-    val ui = LocalInk.current
-    val p = ui.palette
-    var confirmClear by remember { mutableStateOf(false) }
-    var confirmClearChat by remember { mutableStateOf(false) }
-    // Which branches are open. Empty by default: the eight 大标签 must fit on
-    // one screen as a tree you can aim at, not eight cards you must scroll.
-    var openTops by remember { mutableStateOf(emptySet<String>()) }
-    val bookTree = MemoryOps.treeGroups(memo.facts, global = false)
-    val globalTree = MemoryOps.treeGroups(global, global = true)
-    // 回顾 = 已经写进正文的；规划 = 作者说过的打算。 Chapter summaries are a
-    // review of the manuscript, so they sit in 回顾 instead of posing as 分纲.
-    val reviewTree = bookTree.filterNot { MemoryOps.isPlanningTop(it.first) }
-    val planTree = bookTree.filter { MemoryOps.isPlanningTop(it.first) }
-    val chapterFacts = memo.chapters.map { c ->
-        MemoFact(
-            id = "sum-" + c.chapterId,
-            kind = "章节纲要",
-            name = c.title,
-            detail = c.summary.ifBlank { "（还没有摘要）" },
-            source = "chapter",
-            enabled = true,
-            pinned = false,
-            createdAt = 0L,
-            lastUsedAt = 0L,
-        )
-    }
-    val emptyAll = bookTree.isEmpty() && globalTree.isEmpty() && memo.chapters.isEmpty()
-
-    Column(Modifier.fillMaxSize()) {
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 20.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Txt(
-                "${memo.facts.size + global.size} 条 · ${memo.chapters.size} 章摘要 · $indexSize 段原文",
-                size = 10.5f,
-                color = p.muted,
-            )
-            Spacer(Modifier.weight(1f))
-            GlassChip(label = "清除聊天记录", selected = false, onClick = { confirmClearChat = true })
-            Spacer(Modifier.width(8.dp))
-            GlassChip(label = "清空记忆", selected = false, onClick = { confirmClear = true })
-        }
-        Spacer(Modifier.height(10.dp))
-        LazyColumn(
-            Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 130.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
-            fun drawer(top: String, subs: List<Pair<String, List<MemoFact>>>) {
-                item(key = "t-" + top) {
-                    MemoryTreeDrawer(
-                        top = top,
-                        subs = subs,
-                        open = top in openTops,
-                        onToggle = {
-                            openTops = if (top in openTops) openTops - top else openTops + top
-                        },
-                        onEdit = onEdit,
-                    )
-                }
-            }
-            if (reviewTree.isNotEmpty() || chapterFacts.isNotEmpty()) {
-                item(key = "h-review") {
-                    Txt("回顾 · 已经写进正文", size = 11f, color = p.muted, letterSpacing = .6f)
-                }
-                reviewTree.forEach { (top, subs) -> drawer(top, subs) }
-                if (chapterFacts.isNotEmpty()) {
-                    drawer("章节摘要", listOf("每章一句" to chapterFacts))
-                }
-            }
-            if (planTree.isNotEmpty()) {
-                item(key = "h-plan") {
-                    Txt("规划 · 你打算怎么写", size = 11f, color = p.muted, letterSpacing = .6f)
-                }
-                planTree.forEach { (top, subs) -> drawer(top, subs) }
-            }
-            if (globalTree.isNotEmpty()) {
-                item(key = "h-global") {
-                    Txt("跨书偏好", size = 11f, color = p.muted, letterSpacing = .6f)
-                }
-                globalTree.forEach { (top, subs) -> drawer(top, subs) }
-            }
-            if (emptyAll) {
-                item { MemoryEmpty("还没有记住什么。聊几轮，它会把人物、设定、伏笔和你说的下一章打算分开记。") }
-            }
-        }
-    }
-
-    if (confirmClear) {
-        ConfirmDialog(
-            title = "清空这本书的记忆？",
-            message = "人物、设定、伏笔、时间线会清掉；聊天记录和作者偏好（跨书）保留。正文一个字都不会动。",
-            confirmLabel = "清空记忆",
-            onConfirm = { confirmClear = false; onClear() },
-            onDismiss = { confirmClear = false },
-        )
-    }
-
-    if (confirmClearChat) {
-        ConfirmDialog(
-            title = "清除聊天记录？",
-            message = "只清对话，记忆（人物、设定、伏笔等）保留。正文不动。",
-            confirmLabel = "清除",
-            onConfirm = { confirmClearChat = false; onClearChat() },
-            onDismiss = { confirmClearChat = false },
-        )
-    }
-}
-
-/** One low-contrast card: a header (title + count) over its content. */
-@Composable
-private fun MemoryCard(
-    index: Int,
-    title: String,
-    count: Int,
-    content: @Composable ColumnScope.() -> Unit,
-) {
-    val ui = LocalInk.current
-    val p = ui.palette
-    // Staggered entrance: 40 ms apart, so the three cards settle in order
-    // instead of the whole pane popping in at once.
-    val state = remember { MutableTransitionState(false).apply { targetState = true } }
-    val delay = index * 40
-    AnimatedVisibility(
-        visibleState = state,
-        enter = fadeIn(tween(220, delayMillis = delay)) +
-            slideInVertically(tween(220, delayMillis = delay)) { it / 34 },
-    ) {
-        MoyuSurface(Modifier.fillMaxWidth(), radius = 18f, flat = true) {
-            Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Txt(title, size = 12.5f, weight = FontWeight.Medium, color = p.ink, letterSpacing = .3f)
-                    Spacer(Modifier.weight(1f))
-                    if (count > 0) Txt("$count", size = 10f, color = p.muted)
-                }
-                Spacer(Modifier.height(4.dp))
-                content()
-            }
-        }
-    }
-}
-
-/** The category tag inside a card: faint background, muted text. Low contrast
- *  on purpose — it is a label, not a button. */
-@Composable
-private fun MemoryKindHeader(kind: String, count: Int) {
-    val p = LocalInk.current.palette
-    Row(
-        Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 1.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
-            Modifier
-                .clip(CircleShape)
-                .background(p.faint)
-                .padding(horizontal = 8.dp, vertical = 3.dp)
-        ) {
-            Txt(kind, size = 9.5f, color = p.muted, letterSpacing = .4f)
-        }
-        Spacer(Modifier.width(6.dp))
-        Txt("$count", size = 9f, color = p.muted.copy(alpha = .7f))
-    }
-}
-
-
-
-/**
- * One 大标签 as a drawer, the way a knowledge tree reads: a closed row shows
- * the branch and which leaves hang off it; opening it reveals the leaves and
- * their entries in place. Closed by default, so the eight branches fit one
- * screen and the writer can aim at the one they want.
- */
-@Composable
-private fun MemoryTreeDrawer(
-    top: String,
-    subs: List<Pair<String, List<MemoFact>>>,
-    open: Boolean,
-    onToggle: () -> Unit,
-    onEdit: (MemoFact) -> Unit,
-) {
-    val ui = LocalInk.current
-    val p = ui.palette
-    val count = subs.sumOf { it.second.size }
-    val rot by animateFloatAsState(
-        targetValue = if (open) 180f else 0f,
-        animationSpec = spring(stiffness = 620f, dampingRatio = MOYU_DAMPING),
-        label = "treeRot",
-    )
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .clip(SmoothCorner(18.dp))
-            .background(p.faint),
-    ) {
-        Row(
-            Modifier.fillMaxWidth().bouncy { onToggle() }.padding(horizontal = 14.dp, vertical = 13.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            LineIcon(
-                Glyph.ChevronDown,
-                p.muted,
-                13.dp,
-                1.8f,
-                Modifier.graphicsLayer { rotationZ = rot },
-            )
-            Spacer(Modifier.width(10.dp))
-            Txt(top, size = 13f, weight = FontWeight.Medium, maxLines = 1)
-            Spacer(Modifier.width(8.dp))
-            Txt("$count", size = 10f, color = p.muted)
-            Spacer(Modifier.weight(1f))
-            if (!open) {
-                Txt(
-                    subs.joinToString(" · ") { it.first },
-                    size = 9.5f,
-                    color = p.muted.copy(alpha = .62f),
-                    maxLines = 1,
-                )
-            }
-        }
-        // Both directions animate: closing used to drop the children the same
-        // frame, so the drawer collapsed without a retract.
-        AnimatedVisibility(
-            visible = open,
-            enter = expandVertically(
-                animationSpec = spring(stiffness = 420f, dampingRatio = MOYU_DAMPING),
-                expandFrom = Alignment.Top,
-            ) + fadeIn(tween(160)),
-            exit = shrinkVertically(
-                animationSpec = spring(stiffness = 420f, dampingRatio = MOYU_DAMPING),
-                shrinkTowards = Alignment.Top,
-            ) + fadeOut(tween(120)),
-        ) {
-            Column(Modifier.padding(start = 14.dp, end = 14.dp)) {
-                subs.forEach { (leaf, list) ->
-                    Row(
-                        Modifier.fillMaxWidth().padding(top = 9.dp, bottom = 3.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Txt(leaf, size = 9.5f, color = p.muted.copy(alpha = .7f))
-                        Spacer(Modifier.width(6.dp))
-                        Box(Modifier.weight(1f).height(1.dp).background(p.line.copy(alpha = .5f)))
-                    }
-                    list.forEach { fact -> MemoryFactLine(fact, onEdit) }
-                }
-                Spacer(Modifier.height(8.dp))
-            }
-        }
-    }
-}
-
-/**
- * The settings-root pattern: a small grey caption, then a card holding the rows.
- * (A header inside the card read as one item, not as a group.)
- */
-@Composable
-private fun MemoryKindCard(title: String, count: Int, content: @Composable ColumnScope.() -> Unit) {
-    val ui = LocalInk.current
-    val p = ui.palette
-    Column(Modifier.fillMaxWidth()) {
-        Row(
-            Modifier.fillMaxWidth().padding(start = 6.dp, end = 6.dp, bottom = 7.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Txt(title, size = 10.5f, color = p.muted.copy(alpha = .85f))
-            Spacer(Modifier.weight(1f))
-            Txt("$count", size = 10f, color = p.muted.copy(alpha = .7f))
-        }
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .clip(SmoothCorner(18.dp))
-                .background(p.faint)
-                .padding(vertical = 4.dp, horizontal = 14.dp),
-        ) { content() }
-    }
-}
-
-/** One drawer: folder glyph, name, count, and a chevron that turns when open. */
-@Composable
-private fun FolderRow(label: String, count: Int, open: Boolean, onClick: () -> Unit) {
-    val p = LocalInk.current.palette
-    val rot by animateFloatAsState(
-        targetValue = if (open) 90f else 0f,
-        animationSpec = spring(stiffness = 620f, dampingRatio = MOYU_DAMPING),
-        label = "folderRot",
-    )
-    Row(
-        Modifier.fillMaxWidth().bouncy { onClick() }.padding(vertical = 11.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
-            Modifier
-                .size(26.dp)
-                .clip(SmoothCorner(8.dp))
-                .background(p.faint),
-            contentAlignment = Alignment.Center,
-        ) {
-            LineIcon(Glyph.Folder, p.muted, 14.dp)
-        }
-        Spacer(Modifier.width(10.dp))
-        Txt(
-            label,
-            size = 13.5f,
-            weight = if (open) FontWeight.Medium else FontWeight.Normal,
-            maxLines = 1,
-            modifier = Modifier.weight(1f),
-        )
-        Txt("$count", size = 10f, color = p.muted)
-        Spacer(Modifier.width(8.dp))
-        LineIcon(
-            Glyph.Chevron,
-            p.muted,
-            12.dp,
-            1.8f,
-            modifier = Modifier.graphicsLayer { rotationZ = rot },
-        )
-    }
-}
-
-@Composable
-private fun MemoryEmpty(text: String) {
-    val p = LocalInk.current.palette
-    Txt(text, size = 12f, color = p.muted, lineHeight = 19f, modifier = Modifier.padding(top = 2.dp))
-}
-
-@Composable
-private fun MemoryFactLine(f: MemoFact, onEdit: (MemoFact) -> Unit) {
-    val ui = LocalInk.current
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .bouncy { onEdit(f) }
-            .padding(vertical = 9.dp),
-    ) {
-        Txt(
-            f.name + "　" + f.detail,
-            size = 13f,
-            color = if (f.enabled) ui.palette.ink else ui.palette.muted.copy(alpha = .55f),
-            lineHeight = 20f,
-        )
-        if (!f.enabled) {
-            Spacer(Modifier.height(2.dp))
-            Txt("已停用，不会发给 AI", size = 9.5f, color = ui.palette.muted)
-        }
-    }
-}
-
-@Composable
-private fun FactDialog(
-    fact: MemoFact,
-    onSave: (String, String) -> Unit,
-    onToggle: () -> Unit,
-    onDelete: () -> Unit,
-    onDismiss: () -> Unit,
-) {
-    val ui = LocalInk.current
-    var name by remember { mutableStateOf(fact.name) }
-    var detail by remember { mutableStateOf(fact.detail) }
-    GlassDialog(onDismiss) {
-        DialogTitle("这条记忆")
-        Spacer(Modifier.height(10.dp))
-        InkField(value = name, onValueChange = { name = it }, placeholder = "名称", minHeight = 44.dp, textSize = 13f)
-        Spacer(Modifier.height(8.dp))
-        InkField(
-            value = detail,
-            onValueChange = { detail = it },
-            placeholder = "内容",
-            singleLine = false,
-            maxLines = 4,
-            minHeight = 70.dp,
-            textSize = 13f,
-        )
-        Spacer(Modifier.height(14.dp))
-        PrimaryButton(
-            "保存",
-            { if (name.isNotBlank() && detail.isNotBlank()) onSave(name.trim(), detail.trim()) },
-            Modifier.fillMaxWidth(),
-        )
-        Spacer(Modifier.height(10.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-            GlassButton(
-                if (fact.enabled) "停用" else "启用",
-                onToggle,
-                Modifier.weight(1f),
-            )
-            GlassButton("删掉", onDelete, Modifier.weight(1f))
-        }
-        Spacer(Modifier.height(6.dp))
-        Txt(
-            "停用的条目不会发给 AI，但还留在列表里。",
-            size = 10f,
-            color = ui.palette.muted,
-            lineHeight = 16f,
-        )
-    }
 }
 
 /**

@@ -97,6 +97,11 @@ fun ProofSidePanel(
     askLabel: String? = null,
     emptyText: String? = null,
     headingIcon: Glyph = Glyph.Check,
+    /** 修饰模式的「全部采纳」；**只在修饰模式传**，校核模式传 null 即不显示。
+     *  回调约定：卡片已经全部退场，调用方负责把 issues 一次应用掉并清空。 */
+    onAcceptAll: (() -> Unit)? = null,
+    /** 「全书巡检」入口（头部 / 底部的可选操作）；null 时不显示。 */
+    onConsistencyCheck: (() -> Unit)? = null,
 ) {
     val ui = LocalInk.current
     val p = ui.palette
@@ -145,6 +150,17 @@ fun ProofSidePanel(
         scope.launch {
             delay(if (motion) 170 else 0)
             apply(issue)
+        }
+    }
+    /** 「全部采纳」(3.26.23)：所有卡片先按单卡同样的退场节奏缩高淡出，
+     *  再交给调用方一次落库——不然整列卡片会硬切消失。 */
+    fun leaveAll(apply: () -> Unit) {
+        if (exiting.isNotEmpty()) return
+        if (issues.isEmpty()) return
+        exiting += issues.map { it.id }
+        scope.launch {
+            delay(if (motion) 170 else 0)
+            apply()
         }
     }
     LaunchedEffect(visible) {
@@ -360,6 +376,30 @@ fun ProofSidePanel(
                             }
                         }
                     }
+                    // 3.26.23：底部的两个可选操作。是否出现只由参数决定，
+                    // 校核 / 修饰共用这个浮窗，模式差异交给调用方传参。
+                    val showCheck = onConsistencyCheck != null && !busy
+                    val showAcceptAll = onAcceptAll != null && issues.isNotEmpty() && !busy
+                    if (showCheck || showAcceptAll) {
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(start = 12.dp, end = 12.dp, top = 2.dp, bottom = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            if (showCheck) {
+                                ProofFooterAction("全书巡检", primary = false) {
+                                    onConsistencyCheck?.invoke()
+                                }
+                            }
+                            Spacer(Modifier.weight(1f))
+                            if (showAcceptAll) {
+                                ProofFooterAction("全部采纳", primary = true) {
+                                    leaveAll { onAcceptAll?.invoke() }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -455,6 +495,19 @@ private fun ProofIssueCard(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+            // 3.26.23：reason = 依据（设定冲突写明依据哪条设定/事件，字面错写错在哪）。
+            // 比 why 小一号、更弱；与 why 重复时不再叠一行。
+            if (issue.reason.isNotBlank() && issue.reason != issue.why) {
+                Spacer(Modifier.height(3.dp))
+                Txt(
+                    issue.reason,
+                    size = 8.5f,
+                    color = p.muted.copy(alpha = .7f),
+                    lineHeight = 13f,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
             Spacer(Modifier.height(9.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 ProofAction("采纳", primary = true) { onAccept() }
@@ -486,6 +539,32 @@ private fun RowScope.ProofAction(label: String, primary: Boolean, onClick: () ->
                 p.ink
             },
             weight = FontWeight.Medium,
+        )
+    }
+}
+
+/**
+ * 浮窗底部的小操作（3.26.23）：不描边、不垫底色，只靠字色分主次，
+ * 和浮窗内的卡片保持同一档低饱和；高度 32dp，与 36dp 的卡片药丸区分开。
+ */
+@Composable
+private fun ProofFooterAction(label: String, primary: Boolean, onClick: () -> Unit) {
+    val ui = LocalInk.current
+    val p = ui.palette
+    Box(
+        Modifier
+            .height(32.dp)
+            .bouncy(scale = .96f) { onClick() }
+            .padding(horizontal = 9.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Txt(
+            label,
+            size = if (primary) 11f else 10f,
+            color = if (primary) ui.accent else p.muted,
+            weight = if (primary) FontWeight.Medium else FontWeight.Normal,
+            lineHeight = 15f,
+            maxLines = 1,
         )
     }
 }

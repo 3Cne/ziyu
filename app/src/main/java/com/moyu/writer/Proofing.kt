@@ -7,6 +7,11 @@ import org.json.JSONArray
  *
  * [quote] is the exact text copied out of the body; [suggestion] replaces it
  * verbatim. Nothing is applied automatically — the writer accepts each line.
+ *
+ * 3.26.23 增加两个字段，都带默认值：旧调用、旧数据、没有设定摘要时行为不变。
+ * [reason] 是一句话依据；[level] 是「字面」还是「设定」——设定类表示与故事圣经
+ * 里已有的角色 / 关系 / 事件冲突，reason 写明依据哪一条。浮窗只显示 reason，
+ * level 留给调用方判断（例如设定冲突单独归一组）。
  */
 data class ProofIssue(
     val kind: String,
@@ -19,6 +24,11 @@ data class ProofIssue(
     val start: Int = -1,
     val end: Int = -1,
     val id: String = java.util.UUID.randomUUID().toString().take(8),
+    /** 为什么这么改 / 错在哪：字面错一句话；设定冲突写依据哪条设定或事件。
+     *  旧格式没有这个字段，解析后留空，卡片不显示这一行。 */
+    val reason: String = "",
+    /** "字面" 或 "设定"；旧格式 / 没有故事圣经摘要时一律按字面。 */
+    val level: String = "字面",
 )
 
 /**
@@ -168,18 +178,36 @@ object Proofing {
      *  Names are deliberately out of scope: the model has no authority over a
      *  character's spelling, and with no list it "fixed" 赵意年 into 赵意念 by
      *  frequency. 人名 is checked locally against the memory table instead. */
-    fun prompt(text: String, names: List<String> = emptyList()): Pair<String, String> {
+    fun prompt(
+        text: String,
+        names: List<String> = emptyList(),
+        /** 故事圣经摘要（由调用方用 AiBible.summary 之类的入口拼好）。
+         *  空 = 没有设定可比对，模型按提示词跳过「设定冲突」这一类，只做字面校核。 */
+        bibleFacts: String = "",
+    ): Pair<String, String> {
         val roster = if (names.isEmpty()) "" else
             "\n这本书的人名/地名（以这些写法为准，写成别的就是错别字）：" + names.joinToString("、")
+        // 设定优先（3.26.23）：先拿故事圣经核对，对不上的算「设定」冲突，其余才是字面错。
+        // 摘要为空时这一段整块不出现，调用方只传名字时校核仍是原来的字面三条。
+        val bible = if (bibleFacts.isBlank()) "" else
+            "\n\n这本书记下的设定（故事圣经摘要，以此为准）：\n" +
+                bibleFacts.trim() + "\n" +
+                "核对顺序：先判这一段和上面的设定 / 事件有没有冲突（人物、关系、时间、地点、已经发生过的事）；\n" +
+                "有冲突的 level 填「设定」，reason 写明依据哪一条设定或事件；没有冲突的再按字面错报，\n" +
+                "level 填「字面」，reason 一句话说清错在哪里。"
         val system = """
-            你替作者把这一段查一遍，只做三件事：
-            1 错别字：同音或形近写错（在/再、做/作、那/哪、已/以、帐/账），以及成语里的错字。
-            2 符号：标点用错——半角标点混进中文、重复标点、行首标点、「...」代替省略号、
+            你替作者把这一段查一遍，只做四件事：
+            1 设定冲突：和给出来的故事圣经对不上的地方——人物写错、关系写反、时间或地点对不上、
+              已经发生的事被当成没发生。没有给出设定就不报这一类。
+            2 错别字：同音或形近写错（在/再、做/作、那/哪、已/以、帐/账），以及成语里的错字。
+            3 符号：标点用错——半角标点混进中文、重复标点、行首标点、「...」代替省略号、
               引号或括号不配对、句末漏标点。
-            3 语义：病句、指代不清（谁、哪个人）、逻辑跳跃、同一个意思说两遍、上下句接不上。$roster
+            4 语义：病句、指代不清（谁、哪个人）、逻辑跳跃、同一个意思说两遍、上下句接不上。$roster$bible
+            每条只报一个层级：先判设定冲突（level=设定），不是冲突的按字面错（level=字面）。
             只输出 JSON 数组，不要输出任何别的文字。每项格式：
-            {"quote":"原文片段","suggestion":"改后片段","kind":"错别字|符号|语义","why":"一句话说明"}
+            {"quote":"原文片段","suggestion":"改后片段","kind":"错别字|符号|语义","level":"字面|设定","reason":"一句话"}
             规则：quote 必须从原文逐字复制，2 到 40 个字，不能含换行；suggestion 只改最少的字，保持原意；
+            reason 不超过 40 字——设定冲突写依据哪条设定 / 事件，字面错写错在哪里；
             拿不准的不要报；没有问题就输出 []。
         """.trimIndent()
         val user = "原文：\n$text\n\n请输出 JSON 数组。"
@@ -217,7 +245,8 @@ object Proofing {
     }
 
     /** Tolerant parse: models sometimes wrap the array in prose or fences. */
-    fun parse(raw: String): List<ProofIssue> {        val start = raw.indexOf('[')
+    fun parse(raw: String): List<ProofIssue> {
+        val start = raw.indexOf('[')
         val end = raw.lastIndexOf(']')
         if (start < 0 || end <= start) return emptyList()
         val arr = runCatching { JSONArray(raw.substring(start, end + 1)) }.getOrNull()
@@ -234,12 +263,20 @@ object Proofing {
                 rawKind.contains("符") -> "符号"
                 else -> "语义"
             }
+            // 设定冲突（3.26.23）：level 缺失 / 乱写时按字面处理，旧格式照常解析。
+            val rawLevel = o.optString("level")
+            val level = if (
+                rawLevel.contains("设定") || rawLevel.contains("圣经") ||
+                rawLevel.contains("冲突")
+            ) "设定" else "字面"
             out += ProofIssue(
                 kind = kind,
                 quote = quote,
                 suggestion = suggestion,
                 why = o.optString("why").trim().take(80),
                 local = false,
+                reason = o.optString("reason").trim().take(120),
+                level = level,
             )
         }
         return dedupe(out)
