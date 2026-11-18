@@ -1679,13 +1679,19 @@ fun GlassDialog(
 }
 
 @Composable
-private fun DialogBlur() {
+private fun DialogBlur(active: Boolean = true) {
     val view = LocalView.current
     val ui = LocalInk.current
-    LaunchedEffect(Unit) {
+    LaunchedEffect(active) {
         val window = (view.parent as? DialogWindowProvider)?.window ?: return@LaunchedEffect
-        window.addFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND)
-        window.setDimAmount(0.08f)
+        if (active) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND)
+            window.setDimAmount(0.08f)
+        } else {
+            // 3.26.26: drop the dialog window dim the moment closing flips, before the exit spring ends.
+            window.setDimAmount(0f)
+            window.clearFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND)
+        }
         window.navigationBarColor = android.graphics.Color.TRANSPARENT
         if (Build.VERSION.SDK_INT >= 29) {
             window.isNavigationBarContrastEnforced = false
@@ -1694,7 +1700,7 @@ private fun DialogBlur() {
             .isAppearanceLightNavigationBars = !ui.palette.isDark
         if (Build.VERSION.SDK_INT >= 31) {
             try {
-                window.setBackgroundBlurRadius(58)
+                window.setBackgroundBlurRadius(if (active) 58 else 0)
             } catch (_: Throwable) {
             }
         }
@@ -2134,7 +2140,7 @@ fun ModalSheet(
         onDismissRequest = { close() },
         properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
     ) {
-        DialogBlur()
+        DialogBlur(active = !closing)
         Box(
             Modifier
                 .fillMaxSize()
