@@ -121,6 +121,8 @@ data class StoryCharacter(
     val role: String = "",
     /** 一句话：他是谁、想要什么。 */
     val note: String = "",
+    val origin: String = "author",
+    val updatedAt: Long = 0L,
 )
 
 data class StoryRelation(
@@ -128,6 +130,8 @@ data class StoryRelation(
     val from: String,
     val to: String,
     val kind: RelationKind = RelationKind.OTHER,
+    val origin: String = "author",
+    val updatedAt: Long = 0L,
 )
 
 data class StoryEvent(
@@ -139,6 +143,8 @@ data class StoryEvent(
     /** 3.26.21：一个事件可以同时发生在多个章节；空 = 不关联。 */
     val chapterIds: List<String> = emptyList(),
     val characterIds: List<String> = emptyList(),
+    val origin: String = "author",
+    val updatedAt: Long = 0L,
 )
 
 data class OutlineBeat(
@@ -153,6 +159,8 @@ data class OutlineNode(
     val chapterId: String? = null,
     val title: String = "",
     val beats: List<OutlineBeat> = emptyList(),
+    val origin: String = "author",
+    val updatedAt: Long = 0L,
 )
 
 data class BookBible(
@@ -1064,17 +1072,17 @@ private fun encodeGroups(groups: List<Group>): JSONArray {
 }
 
 /** 故事圣经的编码。四个 list 全写；空对象也写，读回来是空 bible，不做字段猜测。 */
-private fun encodeBible(b: BookBible): JSONObject = JSONObject().apply {
+internal fun encodeBible(b: BookBible): JSONObject = JSONObject().apply {
     val cs = JSONArray()
     b.characters.forEach { c ->
         cs.put(JSONObject().apply {
-            put("id", c.id); put("name", c.name); put("role", c.role); put("note", c.note)
+            put("id", c.id); put("name", c.name); put("role", c.role); put("note", c.note); put("origin", c.origin); put("updatedAt", c.updatedAt)
         })
     }
     val rs = JSONArray()
     b.relations.forEach { r ->
         rs.put(JSONObject().apply {
-            put("id", r.id); put("from", r.from); put("to", r.to); put("kind", r.kind.name)
+            put("id", r.id); put("from", r.from); put("to", r.to); put("kind", r.kind.name); put("origin", r.origin); put("updatedAt", r.updatedAt)
         })
     }
     val es = JSONArray()
@@ -1085,7 +1093,7 @@ private fun encodeBible(b: BookBible): JSONObject = JSONObject().apply {
             // 3.26.21：多章归属写 chapterIds；chapterId 只写第一个值，供旧备份/旧版本兼容。
             put("chapterIds", JSONArray(e.chapterIds))
             put("chapterId", e.chapterIds.firstOrNull() ?: JSONObject.NULL)
-            put("characterIds", JSONArray(e.characterIds))
+            put("characterIds", JSONArray(e.characterIds)); put("origin", e.origin); put("updatedAt", e.updatedAt)
         })
     }
     val os = JSONArray()
@@ -1104,7 +1112,7 @@ private fun encodeBible(b: BookBible): JSONObject = JSONObject().apply {
     put("characters", cs); put("relations", rs); put("events", es); put("outline", os)
 }
 
-private fun decodeBible(o: JSONObject?): BookBible {
+internal fun decodeBible(o: JSONObject?): BookBible {
     if (o == null) return BookBible()
     val chars = mutableListOf<StoryCharacter>()
     val ca = o.optJSONArray("characters") ?: JSONArray()
@@ -1115,6 +1123,8 @@ private fun decodeBible(o: JSONObject?): BookBible {
             name = c.optString("name", ""),
             role = c.optString("role", ""),
             note = c.optString("note", ""),
+            origin = c.optString("origin", "author"),
+            updatedAt = c.optLong("updatedAt", 0L),
         )
     }
     val rels = mutableListOf<StoryRelation>()
@@ -1129,6 +1139,8 @@ private fun decodeBible(o: JSONObject?): BookBible {
             from = from,
             to = to,
             kind = RelationKind.entries.firstOrNull { it.name == r.optString("kind") } ?: RelationKind.OTHER,
+            origin = r.optString("origin", "author"),
+            updatedAt = r.optLong("updatedAt", 0L),
         )
     }
     val events = mutableListOf<StoryEvent>()
@@ -1147,6 +1159,8 @@ private fun decodeBible(o: JSONObject?): BookBible {
             note = e.optString("note", ""),
             chapterIds = ids,
             characterIds = decodeStringList(e, "characterIds"),
+            origin = e.optString("origin", "author"),
+            updatedAt = e.optLong("updatedAt", 0L),
         )
     }
     val outline = mutableListOf<OutlineNode>()
@@ -1168,6 +1182,8 @@ private fun decodeBible(o: JSONObject?): BookBible {
             chapterId = if (n.isNull("chapterId")) null else n.optString("chapterId"),
             title = n.optString("title", ""),
             beats = beats,
+            origin = n.optString("origin", "author"),
+            updatedAt = n.optLong("updatedAt", 0L),
         )
     }
     // 悬空引用清一遍：关系端点、事件里的角色必须还在角色表里，否则图上会画出空节点。

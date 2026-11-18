@@ -1335,7 +1335,7 @@ private fun normalizeStoryTime(text: String): String {
 }
 
 /** 把「11 月 7 日 / 三年前 / 2026-11-07」这类自由文本压成一个粗略可比的整数；解析不了返回 null。 */
-private fun storyTimeKey(raw: String): Int? {
+internal fun storyTimeKey(raw: String): Int? {
     if (raw.isBlank()) return null
     val text = normalizeStoryTime(raw)
     storyIsoDate.find(text)?.let { m ->

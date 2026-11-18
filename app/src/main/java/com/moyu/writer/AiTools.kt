@@ -133,7 +133,10 @@ object AiTools {
       {"type":"function","function":{"name":"import_attachment","description":"把附件导入成一本新书或一条新笔记；要等作者确认","parameters":{"type":"object","properties":{"name":{"type":"string"},"as":{"type":"string","enum":["book","note"]}},"required":["name"]}}},
       {"type":"function","function":{"name":"set_reminder","description":"给某条笔记里的待办设提醒；要等作者确认","parameters":{"type":"object","properties":{"note_title":{"type":"string"},"todo_text":{"type":"string"},"at":{"type":"string","description":"本地时间，如 2026-11-13 09:00"}},"required":["note_title","todo_text","at"]}}},
       {"type":"function","function":{"name":"set_daily_goal","description":"改每日写作目标（100–100000 字）；要等作者确认","parameters":{"type":"object","properties":{"words":{"type":"integer"}},"required":["words"]}}},
-      {"type":"function","function":{"name":"restore_backup","description":"用某份备份覆盖当前全部数据；不可撤销。作者明确同意后才会执行，执行前还会再确认一次","parameters":{"type":"object","properties":{"name":{"type":"string","description":"list_backups 返回的文件名"}},"required":["name"]}}}
+      {"type":"function","function":{"name":"restore_backup","description":"用某份备份覆盖当前全部数据；不可撤销。作者明确同意后才会执行，执行前还会再确认一次","parameters":{"type":"object","properties":{"name":{"type":"string","description":"list_backups 返回的文件名"}},      {"type":"function","function":{"name":"read_story_bible","description":"读故事圣经（AI 的长期记忆）：角色/关系/事件/大纲；不传 section 给全貌","parameters":{"type":"object","properties":{"book":{"type":"string","description":"书名，不填=当前书"},"section":{"type":"string","enum":["characters","relations","events","outline"],"description":"只看一类"}}}}},
+      {"type":"function","function":{"name":"read_chapter_deep","description":"一次读完一章：正文+本章情节点+本章事件+出场角色（比 read_chapter 更深）","parameters":{"type":"object","properties":{"title":{"type":"string"},"book":{"type":"string"}},"required":["title"]}}},
+      {"type":"function","function":{"name":"write_story_bible","description":"写故事圣经（立即写入并留一条可撤销记录）。kind=character/relation/event/outline；action=upsert/delete，outline 另支持 add_beat/update_beat/delete_beat/clear_beats/delete_node","parameters":{"type":"object","properties":{"book":{"type":"string"},"kind":{"type":"string","enum":["character","relation","event","outline"]},"action":{"type":"string","description":"默认 upsert"},"name":{"type":"string","description":"角色名"},"role":{"type":"string"},"note":{"type":"string"},"from":{"type":"string","description":"关系起点角色名"},"to":{"type":"string","description":"关系终点角色名"},"relation":{"type":"string","description":"亲近/对立/其他 或 枚举名"},"whenText":{"type":"string","description":"事件故事时间，自由文本"},"title":{"type":"string","description":"事件标题"},"chapters":{"type":"array","items":{"type":"string"},"description":"事件所属章节标题，可多个"},"characters":{"type":"array","items":{"type":"string"},"description":"事件涉及角色名"},"chapter":{"type":"string","description":"大纲所在章节标题"},"text":{"type":"string","description":"情节点文字 / update_beat 的原文字"},"to_text":{"type":"string","description":"update_beat 改后的文字"},"beats":{"type":"array","items":{"type":"string"},"description":"整章情节点（替换）"}},"required":["kind"]}}},
+      {"type":"function","function":{"name":"undo_bible_change","description":"撤销最近一次 AI 对故事圣经的改动（含章节保存后的自动整理）","parameters":{"type":"object","properties":{"book":{"type":"string"}}}}},
     ]
     """.trimIndent()
 
@@ -183,6 +186,10 @@ object AiTools {
         "set_reminder" -> "设提醒"
         "set_daily_goal" -> "改目标"
         "restore_backup" -> "恢复备份"
+        "read_story_bible" -> "读圣经"
+        "read_chapter_deep" -> "深读一章"
+        "write_story_bible" -> "改圣经"
+        "undo_bible_change" -> "撤销圣经"
         else -> name
     }
 
@@ -1071,6 +1078,44 @@ object AiTools {
                         "已记下这次恢复，等你在下面确认；它会覆盖当前全部数据"
                     }
                 }
+            }
+        }
+
+
+        "read_story_bible" -> {
+            val b = findBook(store, args.optString("book")) ?: book
+            val section = args.optString("section", "")
+            if (section.isBlank()) AiBible.summary(b) else AiBible.readSection(b, section)
+        }
+
+        "read_chapter_deep" -> {
+            val b = findBook(store, args.optString("book")) ?: book
+            AiBible.deepChapter(b, args.optString("title"))
+        }
+
+        "write_story_bible" -> {
+            val ctx = env?.context
+            if (ctx == null) "当前没有运行环境，写不了故事圣经"
+            else {
+                val b = findBook(store, args.optString("book")) ?: book
+                AiBible.mutate(
+                    ctx = ctx,
+                    store = store,
+                    bookId = b.id,
+                    kind = args.optString("kind"),
+                    action = args.optString("action", "upsert").ifBlank { "upsert" },
+                    args = args,
+                    source = "ai",
+                )
+            }
+        }
+
+        "undo_bible_change" -> {
+            val ctx = env?.context
+            if (ctx == null) "当前没有运行环境"
+            else {
+                val b = findBook(store, args.optString("book")) ?: book
+                AiBible.undoLast(ctx, store, b.id)
             }
         }
 
