@@ -559,8 +559,8 @@ private fun TimelinePane(book: Book, onBible: (BookBible) -> Unit, onOpenChapter
     var deleting by remember { mutableStateOf<StoryEvent?>(null) }
     val events = book.bible.events
 
-    // 3.26.19：时间线改成「章节刻度竖轴」——每章一个刻度点，事件挂在章下，
-    // 同章按故事时间升序；没关联章节的事件进顶部「未定位」组。
+    // 3.26.20：时间线主轴改成「事件」——所有事件按故事时间排成一条竖轴，
+    // 章名只作为卡片上的归属标签；解析不出时间的排最后，加「时间不详」分组。
     Column(Modifier.fillMaxSize()) {
         Box(Modifier.weight(1f).fillMaxWidth()) {
             if (events.isEmpty()) {
@@ -572,43 +572,41 @@ private fun TimelinePane(book: Book, onBible: (BookBible) -> Unit, onOpenChapter
                     )
                 }
             } else {
-                val knownChapters = book.chapters.map { it.id }.toSet()
-                val groups = book.chapters.map { chapter ->
-                    chapter to events.filter { it.chapterId == chapter.id }
-                        .sortedWith(compareBy({ storyTimeKey(it.whenText) ?: Int.MAX_VALUE }))
-                }
-                val loose = events.filter { it.chapterId !in knownChapters }
-                    .sortedWith(compareBy({ storyTimeKey(it.whenText) ?: Int.MAX_VALUE }))
-                val groupCount = groups.size + if (loose.isEmpty()) 0 else 1
+                val known = events
+                    .mapNotNull { e -> storyTimeKey(e.whenText)?.let { key -> key to e } }
+                    .sortedWith(compareBy({ it.first }))
+                    .map { it.second }
+                val unknown = events.filter { storyTimeKey(it.whenText) == null }
+                val total = known.size + unknown.size + if (unknown.isEmpty()) 0 else 1
                 var drawn = 0
                 Column(
                     Modifier
                         .fillMaxSize()
                         .verticalScroll(rememberScrollState()),
                 ) {
-                    if (loose.isNotEmpty()) {
-                        TimelineGroup(
-                            label = "未定位",
-                            events = loose,
+                    known.forEach { e ->
+                        TimelineEventRow(
+                            event = e,
                             book = book,
-                            isFirst = drawn == 0,
-                            isLast = drawn == groupCount - 1,
-                            onEdit = { editing = it },
-                            onDelete = { deleting = it },
+                            isLast = drawn == total - 1,
+                            onEdit = { editing = e },
+                            onDelete = { deleting = e },
                         )
                         drawn++
                     }
-                    groups.forEach { (chapter, list) ->
-                        TimelineGroup(
-                            label = chapter.title,
-                            events = list,
-                            book = book,
-                            isFirst = drawn == 0,
-                            isLast = drawn == groupCount - 1,
-                            onEdit = { editing = it },
-                            onDelete = { deleting = it },
-                        )
+                    if (unknown.isNotEmpty()) {
+                        TimelineSectionLabel("时间不详")
                         drawn++
+                        unknown.forEach { e ->
+                            TimelineEventRow(
+                                event = e,
+                                book = book,
+                                isLast = drawn == total - 1,
+                                onEdit = { editing = e },
+                                onDelete = { deleting = e },
+                            )
+                            drawn++
+                        }
                     }
                     Spacer(Modifier.height(8.dp))
                 }
@@ -654,13 +652,11 @@ private fun TimelinePane(book: Book, onBible: (BookBible) -> Unit, onOpenChapter
     }
 }
 
-// 3.26.19：章节刻度的一行——左边竖线 + 刻度点，右边章名与该章事件卡。
+// 3.26.20：时间轴上的一条事件——左边竖线 + 事件点，右边事件卡。
 @Composable
-private fun TimelineGroup(
-    label: String,
-    events: List<StoryEvent>,
+private fun TimelineEventRow(
+    event: StoryEvent,
     book: Book,
-    isFirst: Boolean,
     isLast: Boolean,
     onEdit: (StoryEvent) -> Unit,
     onDelete: (StoryEvent) -> Unit,
@@ -673,9 +669,9 @@ private fun TimelineGroup(
         ) {
             Box(
                 Modifier
-                    .padding(top = 5.dp)
+                    .padding(top = 8.dp)
                     .size(7.dp)
-                    .background(if (isFirst) ui.accent else ui.palette.muted, CircleShape),
+                    .background(ui.palette.muted, CircleShape),
             )
             if (!isLast) {
                 Box(
@@ -686,24 +682,32 @@ private fun TimelineGroup(
                 )
             }
         }
-        Column(Modifier.weight(1f).padding(start = 10.dp, bottom = if (isLast) 4.dp else 18.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Txt(label, size = 13f, weight = FontWeight.Medium)
-                Spacer(Modifier.width(8.dp))
-                Txt("${events.size} 个事件", size = 10.5f, color = ui.palette.muted)
-            }
-            if (events.isNotEmpty()) {
-                Spacer(Modifier.height(8.dp))
-                events.forEach { e ->
-                    EventCard(
-                        event = e,
-                        book = book,
-                        onEdit = { onEdit(e) },
-                        onDelete = { onDelete(e) },
-                    )
-                    Spacer(Modifier.height(8.dp))
-                }
-            }
+        Column(Modifier.weight(1f).padding(start = 10.dp, bottom = if (isLast) 4.dp else 14.dp)) {
+            EventCard(
+                event = event,
+                book = book,
+                chapterLabel = book.chapters.firstOrNull { it.id == event.chapterId }?.title
+                    ?: "未关联",
+                onEdit = { onEdit(event) },
+                onDelete = { onDelete(event) },
+            )
+        }
+    }
+}
+
+// 「时间不详」分组：轴不断，只加一行小标题。
+@Composable
+private fun TimelineSectionLabel(label: String) {
+    val ui = LocalInk.current
+    Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
+        Column(
+            Modifier.width(22.dp).fillMaxHeight(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Box(Modifier.width(1.dp).fillMaxHeight().background(ui.palette.line))
+        }
+        Column(Modifier.weight(1f).padding(start = 10.dp, top = 4.dp, bottom = 10.dp)) {
+            Txt(label, size = 11f, color = ui.palette.muted)
         }
     }
 }
@@ -712,6 +716,7 @@ private fun TimelineGroup(
 private fun EventCard(
     event: StoryEvent,
     book: Book,
+    chapterLabel: String,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
 ) {
@@ -726,6 +731,15 @@ private fun EventCard(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Txt(event.whenText.ifBlank { "未标时间" }, size = 10.5f, color = ui.palette.muted)
                 Spacer(Modifier.weight(1f))
+                // 章名只作归属标签（时间线主轴是事件时间）。
+                Txt(
+                    chapterLabel,
+                    size = 10.5f,
+                    color = ui.accent,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.width(6.dp))
                 Box(
                     Modifier
                         .size(26.dp)
@@ -776,12 +790,14 @@ private fun OutlinePane(book: Book, onBible: (BookBible) -> Unit) {
             Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),
         ) {
             book.chapters.forEachIndexed { index, chapter ->
-        val node = bible.outline.firstOrNull { it.chapterId == chapter.id }
+        // 3.26.20：空大纲节点按「待写」显示，不再报 0/0；编辑时仍复用这条空节点，避免越堆越多。
+        val rawNode = bible.outline.firstOrNull { it.chapterId == chapter.id }
+        val node = rawNode?.takeIf { it.beats.isNotEmpty() }
         MoyuSurface(Modifier.fillMaxWidth(), radius = 18f, flat = true) {
             Column(
                 Modifier
                     .fillMaxWidth()
-                    .clickable { beatTarget = node ?: OutlineNode(chapterId = chapter.id, title = chapter.title) }
+                    .clickable { beatTarget = rawNode ?: OutlineNode(chapterId = chapter.id, title = chapter.title) }
                     .padding(14.dp),
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -816,7 +832,7 @@ private fun OutlinePane(book: Book, onBible: (BookBible) -> Unit) {
                             .size(30.dp)
                             .clip(CircleShape)
                             .clickable {
-                                beatTarget = node ?: OutlineNode(
+                                beatTarget = rawNode ?: OutlineNode(
                                     chapterId = chapter.id,
                                     title = chapter.title,
                                 )
@@ -897,11 +913,16 @@ private fun OutlinePane(book: Book, onBible: (BookBible) -> Unit) {
             message = "「${beat.text}」会从这一章的大纲移除。",
             confirmLabel = "删除",
             onConfirm = {
+                val remaining = node.beats.filterNot { it.id == beat.id }
                 onBible(
                     bible.copy(
-                        outline = bible.outline.map { n ->
-                            if (n.id != node.id) n
-                            else n.copy(beats = n.beats.filterNot { it.id == beat.id })
+                        // 3.26.20：删掉最后一条情节点时连空节点一起清掉，章卡回到「待写」。
+                        outline = if (remaining.isEmpty()) {
+                            bible.outline.filterNot { it.id == node.id }
+                        } else {
+                            bible.outline.map { n ->
+                                if (n.id != node.id) n else n.copy(beats = remaining)
+                            }
                         },
                     ),
                 )
@@ -952,11 +973,8 @@ private fun OutlinePane(book: Book, onBible: (BookBible) -> Unit) {
             onConfirm = {
                 onBible(
                     bible.copy(
-                        outline = if (clearOnly) {
-                            bible.outline.map { if (it.id == node.id) it.copy(beats = emptyList()) else it }
-                        } else {
-                            bible.outline.filterNot { it.id == node.id }
-                        },
+                        // 3.26.20：清空情节点 = 这一章回到「待写」，空节点不留在数据里。
+                        outline = bible.outline.filterNot { it.id == node.id },
                     ),
                 )
                 confirmNode = null
