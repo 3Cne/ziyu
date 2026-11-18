@@ -121,12 +121,17 @@ internal fun MoyuTabBar(
     // 它仍继承 CornerBasedShape，drawBackdrop 的 lens() 才不会抛
     // "Only CornerBasedShape is supported in lens effects"；折射仍按圆弧半径
     // 计算，所以角上 1–3dp 与裁剪路径略有偏差，正好被加宽后的边缘带盖住。
+    // 3.26.21：用户要求「像水滴一样圆满圆润」。镜片从 75.35×54dp 的 22dp 圆角矩形
+    // 改成 65.55×57dp（比例 1.15）的完整胶囊——视觉直边最短，读作水滴；
+    // 圆角取高度一半，SmoothCornerShape 在 CornerBasedShape 上才能继续用 lens() 折射。
     val lensShape: androidx.compose.foundation.shape.CornerBasedShape = SmoothCornerShape(
-        androidx.compose.foundation.shape.CornerSize(22.dp),
-        androidx.compose.foundation.shape.CornerSize(22.dp),
-        androidx.compose.foundation.shape.CornerSize(22.dp),
-        androidx.compose.foundation.shape.CornerSize(22.dp),
+        androidx.compose.foundation.shape.CornerSize(28.5.dp),
+        androidx.compose.foundation.shape.CornerSize(28.5.dp),
+        androidx.compose.foundation.shape.CornerSize(28.5.dp),
+        androidx.compose.foundation.shape.CornerSize(28.5.dp),
     )
+    val lensTargetW = 65.55.dp
+    val lensTargetH = 57.dp
     val glassEnabled = backdrop != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
     val count = names.size.coerceAtLeast(1)
     val scope = rememberCoroutineScope()
@@ -283,12 +288,13 @@ internal fun MoyuTabBar(
                     )
             )
 
-            // 镜片：只占自己那一格。外层管位置与抬起（中心锚点），内层管速度拉伸（前端锚点）。
+            // 镜片：外层是整格槽位（管位置与抬起），内层是水滴本体（管速度拉伸）。
+            // 3.26.21：本体固定 65.55×57dp、在槽内居中；槽宽与命中区域不变，
+            // 只是视觉变圆润（用户点的时候还是要整格可点）。
             Box(
                 Modifier
                     .width(lensWidth)
                     .fillMaxHeight()
-                    .padding(vertical = 5.dp)
                     .graphicsLayer {
                         // 浮点位移，不用 Modifier.offset：那是布局属性，
                         // 每帧动画都会 relayout，和图层缩放不同步。
@@ -298,65 +304,72 @@ internal fun MoyuTabBar(
                         scaleX = 1f + .04f * lift
                         scaleY = 1f + .04f * lift
                         transformOrigin = TransformOrigin(.5f, .5f)
-                    }
-                    .graphicsLayer {
-                        // 速度拉伸：原点放在运动方向的前端（前端先到、后端拖尾）。
-                        transformOrigin = TransformOrigin(if (lensRightward) 1f else 0f, .5f)
-                        scaleX = ViscousDrop.along(lensStretch) * (1f - lensImpact * .18f)
-                        scaleY = ViscousDrop.perp(lensStretch) * (1f + lensImpact * .22f)
-                    }
-                    .border(
-                        .5.dp,
-                        // 3.26.9：不再随 lift 变亮。点击切页时 clickLift 会在 260ms
-                        // 里把边框、外阴影、内阴影一起推高再收回，用户读作「点一下
-                        // 镜片边缘亮一下」。抬起感只留位置与 4% 缩放，材质三处恒定。
-                        if (p.isDark) Color.White.copy(alpha = .07f)
-                        else p.ink.copy(alpha = .06f),
-                        lensShape,
-                    )
-                    .then(
-                        if (glassEnabled) {
-                            Modifier.drawBackdrop(
-                                backdrop = backdrop!!,
-                                shape = { lensShape },
-                                effects = {
-                                    vibrancy()
-                                    if (s.lensBlur > 0f) blur(s.lensBlur.dp.toPx())
-                                    if (s.lensRefraction > 0f) {
-                                        lens(
-                                            refractionHeight = s.lensRefraction.dp.toPx(),
-                                            refractionAmount = (s.lensRefraction * 1.2f).dp.toPx(),
-                                            depthEffect = true,
-                                            chromaticAberration = s.lensDispersion,
-                                        )
-                                    }
-                                },
-                                highlight = null,
-                                shadow = {
-                                    Shadow(
-                                        radius = 12.dp,
-                                        alpha = s.lensShadow,
-                                    )
-                                },
-                                innerShadow = { InnerShadow(radius = 6.dp, alpha = s.lensShadow + .07f) },
-                                layerBlock = {
-                                    scaleX = 1f
-                                    scaleY = 1f
-                                },
-                                onDrawSurface = {
-                                    drawRect(selectedTint)
-                                    val v = s.tabLensOpacity.coerceIn(0f, 1f)
-                                    if (v > 0f) drawRect(p.paper.copy(alpha = v * .94f))
-                                    glassEdgeBand(lensShape, p, s.lensEdge)
-                                },
-                            )
-                        } else {
-                            Modifier
-                                .clip(lensShape)
-                                .background(if (p.isDark) p.ink.copy(alpha = .18f) else p.ink.copy(alpha = .88f))
+                    },
+                contentAlignment = androidx.compose.ui.Alignment.Center,
+            ) {
+                Box(
+                    Modifier
+                        .width(lensTargetW)
+                        .height(lensTargetH)
+                        .graphicsLayer {
+                            // 速度拉伸：原点放在运动方向的前端（前端先到、后端拖尾）。
+                            transformOrigin = TransformOrigin(if (lensRightward) 1f else 0f, .5f)
+                            scaleX = ViscousDrop.along(lensStretch) * (1f - lensImpact * .18f)
+                            scaleY = ViscousDrop.perp(lensStretch) * (1f + lensImpact * .22f)
                         }
-                    )
-            )
+                        .border(
+                            .5.dp,
+                            // 3.26.9：不再随 lift 变亮。点击切页时 clickLift 会在 260ms
+                            // 里把边框、外阴影、内阴影一起推高再收回，用户读作「点一下
+                            // 镜片边缘亮一下」。抬起感只留位置与 4% 缩放，材质三处恒定。
+                            if (p.isDark) Color.White.copy(alpha = .07f)
+                            else p.ink.copy(alpha = .06f),
+                            lensShape,
+                        )
+                        .then(
+                            if (glassEnabled) {
+                                Modifier.drawBackdrop(
+                                    backdrop = backdrop!!,
+                                    shape = { lensShape },
+                                    effects = {
+                                        vibrancy()
+                                        if (s.lensBlur > 0f) blur(s.lensBlur.dp.toPx())
+                                        if (s.lensRefraction > 0f) {
+                                            lens(
+                                                refractionHeight = s.lensRefraction.dp.toPx(),
+                                                refractionAmount = (s.lensRefraction * 1.2f).dp.toPx(),
+                                                depthEffect = true,
+                                                chromaticAberration = s.lensDispersion,
+                                            )
+                                        }
+                                    },
+                                    highlight = null,
+                                    shadow = {
+                                        Shadow(
+                                            radius = 12.dp,
+                                            alpha = s.lensShadow,
+                                        )
+                                    },
+                                    innerShadow = { InnerShadow(radius = 6.dp, alpha = s.lensShadow + .07f) },
+                                    layerBlock = {
+                                        scaleX = 1f
+                                        scaleY = 1f
+                                    },
+                                    onDrawSurface = {
+                                        drawRect(selectedTint)
+                                        val v = s.tabLensOpacity.coerceIn(0f, 1f)
+                                        if (v > 0f) drawRect(p.paper.copy(alpha = v * .94f))
+                                        glassEdgeBand(lensShape, p, s.lensEdge)
+                                    },
+                                )
+                            } else {
+                                Modifier
+                                    .clip(lensShape)
+                                    .background(if (p.isDark) p.ink.copy(alpha = .18f) else p.ink.copy(alpha = .88f))
+                            }
+                        )
+                )
+            }
 
             Row(
                 Modifier

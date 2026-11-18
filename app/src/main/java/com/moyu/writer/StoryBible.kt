@@ -686,8 +686,10 @@ private fun TimelineEventRow(
             EventCard(
                 event = event,
                 book = book,
-                chapterLabel = book.chapters.firstOrNull { it.id == event.chapterId }?.title
-                    ?: "未关联",
+                chapterLabel = event.chapterIds
+                    .mapNotNull { id -> book.chapters.firstOrNull { it.id == id }?.title }
+                    .joinToString("、")
+                    .ifBlank { "未关联" },
                 onEdit = { onEdit(event) },
                 onDelete = { onDelete(event) },
             )
@@ -1094,7 +1096,9 @@ private fun EventEditor(
     var whenText by remember { mutableStateOf(initial?.whenText ?: "") }
     var title by remember { mutableStateOf(initial?.title ?: "") }
     var note by remember { mutableStateOf(initial?.note ?: "") }
-    var chapterId by remember { mutableStateOf(initial?.chapterId) }
+    // 3.26.21：一个事件可属多章；章节选择改成「一行摘要 + 底部抽屉多选」。
+    var chapterIds by remember { mutableStateOf(initial?.chapterIds ?: emptyList()) }
+    var pickerOpen by remember { mutableStateOf(false) }
     var picked by remember { mutableStateOf(initial?.characterIds ?: emptyList()) }
     GlassDialog(onDismiss, dismissOnOutsideClick = false) {
         DialogTitle(if (initial == null) "新建事件" else "编辑事件")
@@ -1108,14 +1112,27 @@ private fun EventEditor(
             Spacer(Modifier.height(14.dp))
             Txt("发生在哪一章", size = 11f, color = ui.palette.muted)
             Spacer(Modifier.height(8.dp))
+            val chapterSummary = book.chapters
+                .filter { it.id in chapterIds }
+                .joinToString("、") { it.title }
+                .ifBlank { "不关联" }
             Row(
-                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                Modifier
+                    .fillMaxWidth()
+                    .clip(SmoothCorner(14.dp))
+                    .background(ui.palette.faint)
+                    .clickable { pickerOpen = true }
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                GlassChip("不关联", chapterId == null) { chapterId = null }
-                book.chapters.forEach { c ->
-                    GlassChip(c.title, chapterId == c.id) { chapterId = c.id }
-                }
+                Txt(
+                    chapterSummary,
+                    size = 13f,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                LineIcon(Glyph.Chevron, ui.palette.muted, 16.dp)
             }
         }
         if (book.bible.characters.isNotEmpty()) {
@@ -1148,7 +1165,7 @@ private fun EventEditor(
                             whenText = whenText.trim(),
                             title = title.trim(),
                             note = note.trim(),
-                            chapterId = chapterId,
+                            chapterIds = chapterIds.distinct(),
                             characterIds = picked,
                         ),
                     )
@@ -1156,6 +1173,44 @@ private fun EventEditor(
                 Modifier.weight(1f),
                 enabled = title.isNotBlank() || whenText.isNotBlank(),
             )
+        }
+        // 3.26.21：底部抽屉多选——事件可同时发生在多章。
+        if (pickerOpen) {
+            ModalSheet(onDismiss = { pickerOpen = false }) {
+                DialogTitle(
+                    "发生在哪一章",
+                    subtitle = "可多选；都不选表示不关联",
+                    onClose = { pickerOpen = false },
+                )
+                Spacer(Modifier.height(12.dp))
+                book.chapters.forEach { c ->
+                    val checked = c.id in chapterIds
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(SmoothCorner(12.dp))
+                            .bouncy {
+                                chapterIds = if (checked) chapterIds - c.id
+                                else (chapterIds + c.id).distinct()
+                            }
+                            .padding(horizontal = 6.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Txt(c.title, size = 14f)
+                        Spacer(Modifier.weight(1f))
+                        SelectMark(
+                            checked = checked,
+                            onToggle = { on ->
+                                chapterIds = if (on) (chapterIds + c.id).distinct()
+                                else chapterIds - c.id
+                            },
+                            size = 22.dp,
+                        )
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                PrimaryButton("完成", { pickerOpen = false }, Modifier.fillMaxWidth())
+            }
         }
     }
 }

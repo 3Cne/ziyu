@@ -136,7 +136,8 @@ data class StoryEvent(
     val whenText: String = "",
     val title: String = "",
     val note: String = "",
-    val chapterId: String? = null,
+    /** 3.26.21：一个事件可以同时发生在多个章节；空 = 不关联。 */
+    val chapterIds: List<String> = emptyList(),
     val characterIds: List<String> = emptyList(),
 )
 
@@ -181,7 +182,10 @@ data class BookBible(
 
     fun withoutChapter(chapterId: String): BookBible = copy(
         outline = outline.filterNot { it.chapterId == chapterId },
-        events = events.map { if (it.chapterId == chapterId) it.copy(chapterId = null) else it },
+        // 3.26.21：事件可属多章，删章只把这一章从列表里摘掉，其它章节归属保留。
+        events = events.map { e ->
+            if (chapterId in e.chapterIds) e.copy(chapterIds = e.chapterIds - chapterId) else e
+        },
     )
 }
 
@@ -1077,7 +1081,10 @@ private fun encodeBible(b: BookBible): JSONObject = JSONObject().apply {
     b.events.forEach { e ->
         es.put(JSONObject().apply {
             put("id", e.id); put("whenText", e.whenText); put("title", e.title)
-            put("note", e.note); put("chapterId", e.chapterId ?: JSONObject.NULL)
+            put("note", e.note)
+            // 3.26.21：多章归属写 chapterIds；chapterId 只写第一个值，供旧备份/旧版本兼容。
+            put("chapterIds", JSONArray(e.chapterIds))
+            put("chapterId", e.chapterIds.firstOrNull() ?: JSONObject.NULL)
             put("characterIds", JSONArray(e.characterIds))
         })
     }
@@ -1128,12 +1135,17 @@ private fun decodeBible(o: JSONObject?): BookBible {
     val ea = o.optJSONArray("events") ?: JSONArray()
     for (i in 0 until ea.length()) {
         val e = ea.optJSONObject(i) ?: continue
+        // 3.26.21：优先读 chapterIds；旧数据只有单个 chapterId，读成单元素列表。
+        val ids = decodeStringList(e, "chapterIds").ifEmpty {
+            val single = if (e.isNull("chapterId")) null else e.optString("chapterId")
+            if (single.isNullOrBlank()) emptyList() else listOf(single)
+        }
         events += StoryEvent(
             id = e.optString("id", uuid()),
             whenText = e.optString("whenText", ""),
             title = e.optString("title", ""),
             note = e.optString("note", ""),
-            chapterId = if (e.isNull("chapterId")) null else e.optString("chapterId"),
+            chapterIds = ids,
             characterIds = decodeStringList(e, "characterIds"),
         )
     }

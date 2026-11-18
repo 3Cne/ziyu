@@ -227,13 +227,10 @@ fun ChapterNotesSheet(
             transitionSpec = {
                 val forward = targetState.first &&
                     (!initialState.first || (targetState.second && !initialState.second))
-                if (forward) {
-                    (slideInHorizontally(tween(180)) { it / 3 } + fadeIn(tween(150))) togetherWith
-                        (slideOutHorizontally(tween(140)) { -it / 3 } + fadeOut(tween(120)))
-                } else {
-                    (slideInHorizontally(tween(180)) { -it / 3 } + fadeIn(tween(150))) togetherWith
-                        (slideOutHorizontally(tween(140)) { it / 3 } + fadeOut(tween(120)))
-                }
+                val dir = if (forward) 1 else -1
+                // 3.26.21：只滑不淡 + 整宽（与故事面板同口径），每层自带 SheetPane 纸底。
+                slideInHorizontally(spring(MOYU_DAMPING, 420f)) { it * dir } togetherWith
+                    slideOutHorizontally(spring(MOYU_DAMPING, 420f)) { -it * dir }
             },
             label = "linkPicker",
         ) { state ->
@@ -241,7 +238,7 @@ fun ChapterNotesSheet(
             val inFolder = state.second
             val folderId = state.third
             when {
-                !isPicking -> Column {
+                !isPicking -> SheetPane(Modifier.fillMaxWidth()) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         SectionLabel("已绑定")
                         Spacer(Modifier.weight(1f))
@@ -272,7 +269,7 @@ fun ChapterNotesSheet(
                     }
                 }
 
-                !inFolder -> Column {
+                !inFolder -> SheetPane(Modifier.fillMaxWidth()) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         GlassChip("取消", false) { picking = false }
                         Spacer(Modifier.weight(1f))
@@ -302,7 +299,7 @@ fun ChapterNotesSheet(
                     )
                 }
 
-                else -> Column {
+                else -> SheetPane(Modifier.fillMaxWidth()) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         GlassChip("‹ 笔记夹", false) { browsing = false }
                         Spacer(Modifier.width(9.dp))

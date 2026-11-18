@@ -3058,12 +3058,13 @@ private fun QuoteSheet(
             targetState = level,
             transitionSpec = {
                 val dir = if (targetState > initialState) 1 else -1
-                (slideInHorizontally(tween(180)) { it / 4 * dir } + fadeIn(tween(140)))
-                    .togetherWith(slideOutHorizontally(tween(140)) { -it / 4 * dir } + fadeOut(tween(110)))
+                // 3.26.21：只滑不淡 + 整宽（与故事面板同口径），每层自带 SheetPane 纸底。
+                slideInHorizontally(spring(MOYU_DAMPING, 420f)) { it * dir } togetherWith
+                    slideOutHorizontally(spring(MOYU_DAMPING, 420f)) { -it * dir }
             },
             label = "quoteLevel",
         ) { lv ->
-            Column {
+            SheetPane(Modifier.fillMaxWidth()) {
                 when (lv) {
                     0 -> {
                         Spacer(Modifier.height(6.dp))

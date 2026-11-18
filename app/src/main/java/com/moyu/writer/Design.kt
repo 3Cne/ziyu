@@ -1790,8 +1790,9 @@ fun ConfirmDialog(
 @Composable
 fun InlineModalSheet(
     onDismiss: () -> Unit,
-    /** 面板底色。默认是「纸 + 4% 反色」的卡片色；整块留白为主的面板传 `palette.paper`，
-     *  让它和 `SheetPane` 铺的纸底完全同色，否则内容区会显成一块更暗的矩形。 */
+    /** 面板底色。3.26.21 起不再区分：所有同窗口面板统一铺与 `SheetPane` 同色的纸底，
+     *  免得同一个 App 里「有的菜单偏灰、有的偏纸」，用户读作「各种分色」（用户原话）。
+     *  传 null 时按 `palette.paper` 处理；保留参数只为兼容既有调用点。 */
     tone: Color? = null,
     /** true = 面板跟随 IME 抬高；纯展示、没有输入框的面板传 false。
      *  3.26.18：故事面板传 false——它的输入都在独立 GlassDialog 里，面板跟着 IME
@@ -1921,7 +1922,8 @@ fun InlineModalSheet(
                     radius = sheetCorner,
                     shape = panelShape,
                     flat = true,
-                    tone = tone,
+                    // 3.26.21：统一纸底——所有面板同色，卡片仍靠 paper+4% 分层。
+                    tone = tone ?: ui.palette.paper,
                 ) {
                     if (fillHeight) {
                         // 工作台：头固定、内容区填满剩余高度并自己滚（每个 pane 自己 verticalScroll）。
