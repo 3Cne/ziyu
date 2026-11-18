@@ -1988,6 +1988,8 @@ private fun ChatPane(
             modifier = Modifier
                 .fillMaxSize()
                 .layerBackdrop(listBackdrop)
+                // 3.26.27: glass must sample paper, not just transparent text.
+                .background(p.paper)
                 // 景深：整块对话围绕按下那条的中心缩 3%，读作一起后退；
                 // 被按下的那一条在自己的 item 层里反向缩回，保持原尺寸。
                 // 没有模糊，多长的消息都不会被单条图层尺寸吃掉。
