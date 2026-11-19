@@ -76,6 +76,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -208,6 +209,7 @@ import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 private data class EditorSnapshot(
     val title: String,
@@ -237,6 +239,22 @@ data class NoteLinkUi(
 )
 
 data class SelectionBar(val x1: Int, val y1: Int, val x2: Int, val y2: Int)
+
+/**
+ * 3.26.41：工具栏横滑移光标时的状态。
+ *
+ * 手势在 [EditorDock] 里（非选区工具行），状态提到 [WritingScreen] 页面层：
+ * 进度条 HUD（[DockScrubHud]）画在能力栏正上方，是覆盖层，不参与测量，
+ * 所以既不挤压正文、也不抬高能力栏。读 ratio/chars/total 的只有 HUD 那一小块
+ * （见 ScrubHudLayer），每跨一个字不会重组整页。
+ */
+private class ScrubHudState {
+    var visible by mutableStateOf(false)
+    var dragging by mutableStateOf(false)
+    var ratio by mutableFloatStateOf(0f)
+    var chars by mutableIntStateOf(0)
+    var total by mutableIntStateOf(0)
+}
 
 private data class TodoAction(val id: String, val bounds: Rect)
 
@@ -516,6 +534,17 @@ fun WritingScreen(
     val densityNow = androidx.compose.ui.platform.LocalDensity.current
     val dockReserve = with(densityNow) { dockHeightPx.toDp() } *
         abilityT.value.coerceIn(0f, 1f)
+    // 3.26.41：工具栏横滑移光标。手势在 EditorDock 的非选区工具行，状态放在页面层，
+    // 这样 HUD（进度条 + 当前/总字数）能画在能力栏正上方的同一段布局里。
+    val scrub = remember { ScrubHudState() }
+    // 抬手后 220ms 再卸载；这 220ms 里又开始滑就取消这次卸载（dragging 重新为 true）。
+    // 能力栏收起（abilityT < .5）时由下面的挂载条件立即卸载，不需要等这个计时。
+    var scrubEndTick by remember { mutableIntStateOf(0) }
+    LaunchedEffect(scrubEndTick) {
+        if (scrubEndTick == 0) return@LaunchedEffect
+        delay(220)
+        if (!scrub.dragging) scrub.visible = false
+    }
     // 章节头收起（2026-11-15 用户定）：收起比例**实时跟着正文滚动量走**（不是过阈值跳变）。
     // 只有标题正在编辑时保持展开。
     var bodyScrollY by remember { mutableIntStateOf(0) }
@@ -1965,6 +1994,22 @@ fun WritingScreen(
                 )
             }
             }
+            // 3.26.41：横滑移光标时的 HUD。挂在能力栏**之前**（先画、垫在栏体下面），
+            // 弹出来那一段被栏顶压住，读作从能力栏里挤出来；它只是覆盖层，
+            // 不参与测量，所以正文高度和能力栏位置都不动。
+            if (scrub.visible && dockHeightPx > 0) {
+                // 能力栏收起（< 50%）时立即卸载；展开过程也只在过半后出现。
+                if (abilityT.value.coerceIn(0f, 1f) >= .5f) {
+                    val hudGap = (with(densityNow) { dockHeightPx.toDp() } - 6.dp)
+                        .coerceAtLeast(0.dp)
+                    ScrubHudLayer(
+                        state = scrub,
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = hudGap),
+                    )
+                }
+            }
             Box(
                 Modifier
                     .align(Alignment.BottomCenter)
@@ -2112,6 +2157,23 @@ fun WritingScreen(
                     epoch = bodyScrollTick.intValue,
                     scrollTick = bodyScrollTick,
                     bodyEditor = bodyEditor,
+                    // 3.26.41：工具栏横滑移光标。HUD 状态在页面层，这里只上报。
+                    onScrubStart = {
+                        scrub.dragging = true
+                        scrub.visible = true
+                        // 归零会重启下面那个延迟卸载的 effect（提前 return），
+                        // 于是「上一次抬手才 100ms 又按下」不会把 HUD 卸掉。
+                        scrubEndTick = 0
+                    },
+                    onScrubMove = { ratio, chars, total ->
+                        scrub.ratio = ratio
+                        scrub.chars = chars
+                        scrub.total = total
+                    },
+                    onScrubEnd = {
+                        scrub.dragging = false
+                        scrubEndTick++
+                    },
                 )
                 }
                 // 常驻球：展开时在左下显示收起箭头，收起时显示键盘图标，点击切换。
@@ -2210,6 +2272,23 @@ fun WritingScreen(
     if (showType) {
         TypographySheet(store = LocalStore.current, onDismiss = { showType = false })
     }
+}
+
+/**
+ * 3.26.41：HUD 的读取层。ratio/chars/total 只在这里读——每跨一个字只重组
+ * 这一小块（以及它里面的 DockScrubHud），不把整页 WritingScreen 拖进重组。
+ */
+@Composable
+private fun ScrubHudLayer(
+    state: ScrubHudState,
+    modifier: Modifier = Modifier,
+) {
+    DockScrubHud(
+        ratio = state.ratio,
+        chars = state.chars,
+        total = state.total,
+        modifier = modifier,
+    )
 }
 
 @Composable
@@ -5013,6 +5092,11 @@ private fun EditorDock(
      *  contains liquidGlassBar, so the backdrop is re-sampled on every scroll. */
     scrollTick: androidx.compose.runtime.MutableIntState? = null,
     bodyEditor: BodyEditText? = null,
+    /** 3.26.41：非选区工具行横向拖动 = 移正文光标。开始 / 进度 / 结束上报给页面层，
+     *  页面层据此在能力栏正上方挂 HUD。 */
+    onScrubStart: () -> Unit = {},
+    onScrubMove: (Float, Int, Int) -> Unit = { _, _, _ -> },
+    onScrubEnd: () -> Unit = {},
 ) {
     val ui = LocalInk.current
     val p = ui.palette
@@ -5026,6 +5110,14 @@ private fun EditorDock(
     val bar = dockTone(ui)
     val onBar = p.ink
     val onBarDim = p.muted
+    // 3.26.41：工具栏横滑移光标（手势挂在非选区工具行上）。
+    // 手势器只在第一次组合时启动，用 rememberUpdatedState 保证每次都能读到最新的
+    // editor 与回调——bodyEditor 是 AndroidView 的 factory 跑完才有的，一开始是 null。
+    val latestEditor by rememberUpdatedState(bodyEditor)
+    val latestScrubStart by rememberUpdatedState(onScrubStart)
+    val latestScrubMove by rememberUpdatedState(onScrubMove)
+    val latestScrubEnd by rememberUpdatedState(onScrubEnd)
+    val haptic = LocalHaptic.current
     var dockTopInWindow by remember { mutableStateOf(0f) }
     // AGSL lens for the dock: real per-pixel refraction + RGB dispersion on the
     // sampled body slice. null below API 33, where the bar falls back to blur.
@@ -5116,19 +5208,28 @@ private fun EditorDock(
                                         DockTool(Glyph.Sparkles, "AI", true, onClick = { aiOpen = true })
                                     } else {
                                         Row(verticalAlignment = Alignment.CenterVertically) {
-                                            DockTool(Glyph.Check, "校核", true, onClick = {
-                                                aiOpen = false
-                                                onProof?.invoke()
-                                            })
-                                            DockTool(Glyph.Edit, "修饰", true, onClick = {
-                                                aiOpen = false
-                                                onPolish?.invoke()
-                                            })
-                                            if (onAsk != null) {
-                                                DockTool(Glyph.Sparkles, "问", true, onClick = {
+                                            // 3.26.41：三格内部错层（0 / 12% / 24% 起步、76% 追平）。
+                                            // 整组宽度仍是外层 DockCell(1f + 2f*aiT) 的平滑摊开，
+                                            // 这里只让三格依次出现/收回，不再整排同时闪一下。
+                                            AiCellStagger(aiT, 0) {
+                                                DockTool(Glyph.Check, "校核", true, onClick = {
                                                     aiOpen = false
-                                                    onAsk?.invoke()
+                                                    onProof?.invoke()
                                                 })
+                                            }
+                                            AiCellStagger(aiT, 1) {
+                                                DockTool(Glyph.Edit, "修饰", true, onClick = {
+                                                    aiOpen = false
+                                                    onPolish?.invoke()
+                                                })
+                                            }
+                                            if (onAsk != null) {
+                                                AiCellStagger(aiT, 2) {
+                                                    DockTool(Glyph.Sparkles, "问", true, onClick = {
+                                                        aiOpen = false
+                                                        onAsk?.invoke()
+                                                    })
+                                                }
                                             }
                                         }
                                     }
@@ -5146,8 +5247,20 @@ private fun EditorDock(
                         // 工具行：8 格固定 36dp，整行 SpaceEvenly 均分。
                         // 8×36=288dp，360dp 屏去掉两边 12dp 还剩 336dp，一屏
                         // 放得下就不再横滑翻页；窄屏只收紧格间空隙，格宽不变。
+                        // 3.26.41：在这一行上横向拖动 = 移正文光标（每 8dp 一个字）。
+                        // 手势器自带水平 slop——位移不到 slop 时根本不启动，工具的点按照旧；
+                        // 纵向位移走 cross-axis 取消，不会被这里抢（由正文自己滚）。
                         Row(
-                            Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                            Modifier
+                                .fillMaxWidth()
+                                .dockScrubGesture(
+                                    editor = { latestEditor },
+                                    haptic = haptic,
+                                    onStart = { latestScrubStart() },
+                                    onMove = { r, c, t -> latestScrubMove(r, c, t) },
+                                    onEnd = { latestScrubEnd() },
+                                )
+                                .padding(horizontal = 4.dp),
                             horizontalArrangement = Arrangement.SpaceEvenly,
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
@@ -5252,6 +5365,112 @@ private fun androidx.compose.foundation.layout.RowScope.DockCell(
     )
 }
 
+/**
+ * 3.26.41：AI 三格展开时的内部错层。
+ *
+ * 3.26.39 已经把整组的宽度做成 aiT 驱动的动画（外层 DockCell 权重 1f + 2f*aiT），
+ * 这里只补三格内部先后推出的顺序感：第 i 格在 aiT 走到 i*12% 之后才开始动，
+ * 到 76% 追平——位移 12dp、透明度同步，所以三格读完是一条「依次被挤出来」的带。
+ */
+@Composable
+private fun AiCellStagger(
+    aiT: Float,
+    index: Int,
+    content: @Composable () -> Unit,
+) {
+    val ti = ((aiT - index * .12f) / .76f).coerceIn(0f, 1f)
+    Box(
+        Modifier.graphicsLayer {
+            alpha = ti
+            translationX = -(1f - ti) * 12.dp.toPx()
+        },
+        contentAlignment = Alignment.Center,
+    ) { content() }
+}
+
+/**
+ * 3.26.41：非选区工具行上的横向拖动 = 移正文光标。
+ *
+ * 用 [detectHorizontalDragGestures]（自带水平 slop）：
+ *  - 点按：位移不到 slop，手势器根本不启动，`DockTool` 的点击照旧；
+ *  - 纵向拖动：cross-axis 超 slop 就取消这个手势器，不会误移光标。
+ *    （代价：起点正好落在工具行这条窄带上的纵向拖动不再穿透给下面的正文——
+ *    与 3.26.34 那一版的行为一致，正文区本身不受影响。）
+ *
+ * 手感：每 8dp 一个字；同一帧里横向速度越快，位移放大越多（6000dp/s 封顶 6 倍）；
+ * 拉到 0 / 末尾之后继续拖，越界部分只按 0.35 记进虚拟位置（橡皮筋），
+ * 手指回头要先走完这段才重新带动光标。每跨 8 个字补一下轻触感。
+ */
+private fun Modifier.dockScrubGesture(
+    editor: () -> BodyEditText?,
+    haptic: (Int) -> Unit,
+    onStart: () -> Unit,
+    onMove: (Float, Int, Int) -> Unit,
+    onEnd: () -> Unit,
+): Modifier = pointerInput(Unit) {
+    val pxPerChar = 8.dp.toPx()
+    var pos = 0f
+    var lastAt = 0L
+    var lastChunk = 0
+    var live = false
+    fun finish() {
+        if (live) {
+            live = false
+            onEnd()
+        }
+    }
+    detectHorizontalDragGestures(
+        onDragStart = {
+            val ed = editor()
+            live = ed != null
+            if (ed != null) {
+                val total = ed.text?.length ?: 0
+                pos = ed.selectionStart.coerceIn(0, total).toFloat()
+                lastAt = 0L
+                lastChunk = (pos / 8f).toInt()
+                haptic(1)
+                onStart()
+                onMove(if (total > 0) pos / total else 0f, pos.toInt(), total)
+            }
+        },
+        onDragEnd = { finish() },
+        onDragCancel = { finish() },
+    ) { change, dx ->
+        if (live) {
+            val ed = editor()
+            if (ed != null) {
+                change.consume()
+                val total = ed.text?.length ?: 0
+                if (total > 0) {
+                    // 快滑加速：按这一帧的横向速度放大位移，最多 6 倍。
+                    val now = change.uptimeMillis
+                    val dt = if (lastAt == 0L) 16L else (now - lastAt).coerceIn(1L, 80L)
+                    lastAt = now
+                    val speed = abs(dx) / density / (dt / 1000f)
+                    val boost = 1f + 5f * (speed / 6000f).coerceIn(0f, 1f)
+                    var next = pos + dx * boost / pxPerChar
+                    val maxPos = total.toFloat()
+                    val clamped = next.coerceIn(0f, maxPos)
+                    // 两端橡皮筋：越界的部分只走 0.35。
+                    next = clamped + (next - clamped) * .35f
+                    pos = next
+                    val caret = next.roundToInt().coerceIn(0, total)
+                    if (caret != ed.selectionStart) {
+                        ed.setSelection(caret)
+                        runCatching { ed.bringPointIntoView(caret) }
+                    }
+                    val chunk = caret / 8
+                    if (chunk != lastChunk) {
+                        lastChunk = chunk
+                        haptic(0)
+                    }
+                    onMove(caret.toFloat() / total, caret, total)
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun DockTool(
     glyph: Glyph,
@@ -5281,7 +5500,6 @@ private fun DockTool(
             .bouncy(
                 enabled,
                 scale = .88f,
-                hapticType = 1,
                 overshoot = true,
                 onLongPress = currentOnLong,
                 onPressChange = { pressed = it },
