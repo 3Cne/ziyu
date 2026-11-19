@@ -1643,6 +1643,22 @@ private fun AiSettingsPage(store: AppStore, onBack: () -> Unit, onOpen: (String)
                 ) {
                     InkToggle(settings.aiBibleSync) { v -> store.updateSettings { it.copy(aiBibleSync = v) } }
                 }
+                RowDivider()
+                SettingRow(
+                    "改稿方式",
+                    when (settings.aiWriteMode) {
+                        0 -> "只读：只回答，不改正文也不改圣经"
+                        1 -> "询问：改正文前给对比，你点接受才写"
+                        else -> "自动：回答结束直接写，可一步撤销"
+                    },
+                    Glyph.Edit,
+                ) {
+                    Segmented(
+                        listOf("只读", "询问", "自动"),
+                        settings.aiWriteMode.coerceIn(0, 2),
+                        { i -> store.updateSettings { it.copy(aiWriteMode = i) } },
+                    )
+                }
             }
         }
         item {

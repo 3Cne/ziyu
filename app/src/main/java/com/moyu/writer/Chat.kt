@@ -54,6 +54,14 @@ data class ChatEdit(
     /** 写进去的片段。 */
     val after: String = "",
     val undone: Boolean = false,
+    /**
+     * 3.26.29：patch 生命周期。
+     * applied = 已写进正文；pending = 等作者接受；rejected = 作者拒了；stale = 原文已变，作废。
+     * 老卡片没有这个字段时默认 applied（就是以前「已落地」的语义）。
+     */
+    val state: String = "applied",
+    /** 提出补丁那一刻的正文指纹；接受时比对，防「这期间被改过」。 */
+    val baseHash: String = "",
 )
 
 data class ChatMsg(
@@ -139,6 +147,15 @@ class ChatSession {
         if (i < 0) return
         messages[i] = messages[i].copy(
             edits = messages[i].edits.map { if (it.id == editId) it.copy(undone = true) else it },
+        )
+    }
+
+    /** 3.26.29：补丁状态流转（accepted / rejected / stale），只改这一张卡。 */
+    fun markEdit(id: String, editId: String, state: String) {
+        val i = messages.indexOfFirst { it.id == id }
+        if (i < 0) return
+        messages[i] = messages[i].copy(
+            edits = messages[i].edits.map { if (it.id == editId) it.copy(state = state) else it },
         )
     }
 

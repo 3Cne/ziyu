@@ -13,6 +13,8 @@ enum class AiPendingKind {
     Group, GroupEdit, GroupOff, GroupBind,
     BindNote, Todo, TodoDone, Style,
     Export, Backup, Import, Reminder, Goal, Restore,
+    /** 3.26.29：把一章恢复成某个历史版本。 */
+    ChapterRestore,
 }
 
 /** A change the model proposed. Nothing is written until the writer accepts it. */
@@ -60,6 +62,8 @@ class AiToolEnv(
     val attachments: List<Attachment> = emptyList(),
     val webEnabled: Boolean = false,
     val webMax: Int = 3,
+    /** 0 只读 / 1 询问 / 2 自动。只读档下写工具一律不执行。 */
+    val writeMode: Int = 1,
     val key: String = "",
     val baseUrl: String = "",
     val openBook: (String) -> Unit = {},
@@ -87,6 +91,27 @@ object AiTools {
     private const val READ_MAX = 1200
 
     private const val READ_NOTE_MAX = 2400
+
+    /**
+     * 3.26.29：会改东西的工具。只读档下这些一律不执行——
+     * 作者选「只读」就是只要回答，不要任何写盘动作（含圣经、导出、备份）。
+     */
+    private val WRITE_TOOLS = setOf(
+        "create_book", "edit_book", "delete_book",
+        "create_chapter", "rename_chapter", "delete_chapter",
+        "append_to_chapter", "replace_in_chapter", "restore_chapter_history",
+        "create_note", "edit_note", "delete_note", "bind_note",
+        "create_group", "rename_group", "delete_group", "move_to_group",
+        "add_todo", "complete_todo", "set_style",
+        "export_item", "backup_now", "import_attachment",
+        "set_reminder", "set_daily_goal", "restore_backup",
+        "write_story_bible", "undo_bible_change",
+    )
+
+    /** 询问档下只排补丁、当场不落地的三个工具。 */
+    private val PATCH_TOOLS = setOf(
+        "append_to_chapter", "replace_in_chapter", "restore_chapter_history",
+    )
 
     val DEFS: String = """
     [
@@ -135,7 +160,10 @@ object AiTools {
       {"type":"function","function":{"name":"read_story_bible","description":"读故事圣经（AI 的长期记忆）：角色/关系/事件/大纲；不传 section 给全貌","parameters":{"type":"object","properties":{"book":{"type":"string","description":"书名，不填=当前书"},"section":{"type":"string","enum":["characters","relations","events","outline"],"description":"只看一类"}}}}},
       {"type":"function","function":{"name":"read_chapter_deep","description":"一次读完一章：正文+本章情节点+本章事件+出场角色（比 read_chapter 更深）","parameters":{"type":"object","properties":{"title":{"type":"string"},"book":{"type":"string"}},"required":["title"]}}},
       {"type":"function","function":{"name":"write_story_bible","description":"写故事圣经（立即写入并留一条可撤销记录）。kind=character/relation/event/outline；action=upsert/delete，outline 另支持 add_beat/update_beat/delete_beat/clear_beats/delete_node","parameters":{"type":"object","properties":{"book":{"type":"string"},"kind":{"type":"string","enum":["character","relation","event","outline"]},"action":{"type":"string","description":"默认 upsert"},"name":{"type":"string","description":"角色名"},"role":{"type":"string"},"note":{"type":"string"},"from":{"type":"string","description":"关系起点角色名"},"to":{"type":"string","description":"关系终点角色名"},"relation":{"type":"string","description":"亲近/对立/其他 或 枚举名"},"whenText":{"type":"string","description":"事件故事时间，自由文本"},"title":{"type":"string","description":"事件标题"},"chapters":{"type":"array","items":{"type":"string"},"description":"事件所属章节标题，可多个"},"characters":{"type":"array","items":{"type":"string"},"description":"事件涉及角色名"},"chapter":{"type":"string","description":"大纲所在章节标题"},"text":{"type":"string","description":"情节点文字 / update_beat 的原文字"},"to_text":{"type":"string","description":"update_beat 改后的文字"},"beats":{"type":"array","items":{"type":"string"},"description":"整章情节点（替换）"}},"required":["kind"]}}},
-      {"type":"function","function":{"name":"undo_bible_change","description":"撤销最近一次 AI 对故事圣经的改动（含章节保存后的自动整理）","parameters":{"type":"object","properties":{"book":{"type":"string"}}}}}
+      {"type":"function","function":{"name":"undo_bible_change","description":"撤销最近一次 AI 对故事圣经的改动（含章节保存后的自动整理）","parameters":{"type":"object","properties":{"book":{"type":"string"}}}}},
+      {"type":"function","function":{"name":"list_chapter_history","description":"列出一章的历史版本：时间与字数。改坏了可以用它找回来","parameters":{"type":"object","properties":{"title":{"type":"string","description":"章节标题"},"book":{"type":"string","description":"书名，不填=当前书"}},"required":["title"]}}},
+      {"type":"function","function":{"name":"read_chapter_history","description":"读某一章的某个历史版本（最多 6000 字）","parameters":{"type":"object","properties":{"title":{"type":"string"},"at":{"type":"string","description":"list_chapter_history 返回的时间戳"},"book":{"type":"string"}},"required":["title","at"]}}},
+      {"type":"function","function":{"name":"restore_chapter_history","description":"把某一章恢复成某个历史版本；要等作者确认（询问档出确认卡，自动档直接恢复）","parameters":{"type":"object","properties":{"title":{"type":"string"},"at":{"type":"string","description":"时间戳"},"book":{"type":"string"}},"required":["title","at"]}}}
     ]
     """.trimIndent()
 
@@ -189,6 +217,9 @@ object AiTools {
         "read_chapter_deep" -> "深读一章"
         "write_story_bible" -> "改圣经"
         "undo_bible_change" -> "撤销圣经"
+        "list_chapter_history" -> "列历史"
+        "read_chapter_history" -> "读历史"
+        "restore_chapter_history" -> "恢复历史"
         else -> name
     }
 
@@ -225,7 +256,11 @@ object AiTools {
         facts: List<MemoFact> = emptyList(),
         globalFacts: List<MemoFact> = emptyList(),
         env: AiToolEnv? = null,
-    ): String = when (name) {
+    ): String {
+        if (env?.writeMode == 0 && name in WRITE_TOOLS) {
+            return "现在是只读档：只回答，不改稿。请直接用文字告诉作者要怎么改。"
+        }
+        val out = when (name) {
         "list_books" -> store.books.joinToString("\n") { b ->
             "· 《" + b.title + "》" + b.chapters.size + " 章 · " + b.words + " 字" +
                 (if (b.id == book.id) "（当前）" else "")
@@ -1118,8 +1153,81 @@ object AiTools {
             }
         }
 
+        "list_chapter_history" -> {
+            val ctx = env?.context
+            val b = findBook(store, args.optString("book")) ?: book
+            val c = findChapter(b, args.optString("title"))
+            when {
+                ctx == null -> "当前没有运行环境，读不了历史"
+                c == null -> "没有叫「" + args.optString("title") + "」的章节"
+                else -> {
+                    val vs = ChapterHistory.list(ctx, c.id)
+                    if (vs.isEmpty()) "「" + c.title + "」还没有历史版本"
+                    else "「" + c.title + "」有 " + vs.size + " 个历史版本（新的在前）：\n" +
+                        vs.joinToString("\n") { "· " + stamp(it.ts) + "（" + it.words + " 字）· at=" + it.ts }
+                }
+            }
+        }
+
+        "read_chapter_history" -> {
+            val ctx = env?.context
+            val b = findBook(store, args.optString("book")) ?: book
+            val c = findChapter(b, args.optString("title"))
+            val at = args.optString("at").trim().toLongOrNull()
+            when {
+                ctx == null -> "当前没有运行环境，读不了历史"
+                c == null -> "没有叫「" + args.optString("title") + "」的章节"
+                at == null -> "at 要填 list_chapter_history 给的时间戳（一串数字）"
+                else -> {
+                    val body = ChapterHistory.read(ctx, c.id, at)
+                    when {
+                        body == null -> "「" + c.title + "」没有 " + stamp(at) + " 这一版"
+                        body.length <= 6000 -> "「" + c.title + "」" + stamp(at) + " 的版本：\n\n" + body
+                        else -> "「" + c.title + "」" + stamp(at) + " 的版本（只给前 6000 字）：\n\n" + body.take(6000)
+                    }
+                }
+            }
+        }
+
+        "restore_chapter_history" -> {
+            val ctx = env?.context
+            val b = findBook(store, args.optString("book")) ?: book
+            val c = findChapter(b, args.optString("title"))
+            val at = args.optString("at").trim().toLongOrNull()
+            when {
+                ctx == null -> "当前没有运行环境，改不了历史"
+                c == null -> "没有叫「" + args.optString("title") + "」的章节"
+                at == null -> "at 要填 list_chapter_history 给的时间戳（一串数字）"
+                else -> {
+                    val body = ChapterHistory.read(ctx, c.id, at)
+                    if (body == null) "「" + c.title + "」没有 " + stamp(at) + " 这一版"
+                    else {
+                        pending += AiPending(
+                            label = "把「" + c.title + "」恢复到 " + stamp(at) + " 的版本",
+                            kind = AiPendingKind.ChapterRestore,
+                            chapterId = c.id,
+                            bookId = b.id,
+                            text = at.toString(),
+                        )
+                        "已排好：把「" + c.title + "」恢复到 " + stamp(at) + " 的版本，等作者确认"
+                    }
+                }
+            }
+        }
+
         else -> "没有这个工具"
+        }
+        // 询问档：正文改动只是排成补丁，别让模型回「已写入」。
+        return if (env?.writeMode == 1 && name in PATCH_TOOLS) {
+            "已排成补丁，等作者在回答下面点「接受」；现在还没写进正文。"
+        } else {
+            out
+        }
     }
+
+    private fun stamp(ts: Long): String =
+        java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault())
+            .format(java.util.Date(ts))
 
     private fun readChapter(store: AppStore, args: JSONObject, book: Book): String {
         val b = findBook(store, args.optString("book")) ?: book

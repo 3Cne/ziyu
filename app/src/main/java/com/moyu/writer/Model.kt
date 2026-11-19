@@ -294,6 +294,11 @@ data class AppSettings(
     val aiToolTrace: Boolean = true,
     /** 问书 · 深度思考：先拆问题、逐条核对原文再答，回答可以更长。 */
     val aiDeepThink: Boolean = false,
+    /**
+     * AI 改正文的方式：0 只读（只回答，不改稿）/ 1 询问（出补丁，作者点接受）/ 2 自动（回答结束落地）。
+     * 3.26.29 起默认询问：正文改动不再默认直接写进去。
+     */
+    val aiWriteMode: Int = 1,
     /** 整理笔记：带上按下这条之前几条对话；0 = 全部。 */
     val noteContextCount: Int = 8,
     /** 整理笔记：输出预算（token）。4000 标准 / 8000 长。 */
@@ -935,6 +940,7 @@ class AppStore(context: Context) {
             aiQuoteMaxChars = settings.aiQuoteMaxChars.coerceIn(2_000, 60_000),
             aiMemoryLimit = settings.aiMemoryLimit.coerceIn(20, 500),
             aiWebMax = settings.aiWebMax.coerceIn(1, 5),
+            aiWriteMode = settings.aiWriteMode.coerceIn(0, 2),
             fieldGlassOpacity = settings.fieldGlassOpacity.coerceIn(0f, 1f),
             fieldGlassBlur = settings.fieldGlassBlur.coerceIn(0f, 40f),
             fieldGlassEdge = settings.fieldGlassEdge.coerceIn(0f, 2f),
@@ -1296,6 +1302,7 @@ private fun encodeSettings(s: AppSettings): JSONObject = JSONObject().apply {
     put("aiWebMax", s.aiWebMax)
     put("aiToolTrace", s.aiToolTrace)
     put("aiDeepThink", s.aiDeepThink)
+    put("aiWriteMode", s.aiWriteMode)
     put("noteContextCount", s.noteContextCount)
     put("noteMaxTokens", s.noteMaxTokens)
     put("fieldGlassOpacity", s.fieldGlassOpacity.toDouble())
@@ -1402,6 +1409,8 @@ private fun decodeSettings(o: JSONObject?) = AppSettings(
     aiWebMax = (o?.optInt("aiWebMax", 3) ?: 3).coerceIn(1, 5),
     aiToolTrace = o?.optBoolean("aiToolTrace", true) ?: true,
     aiDeepThink = o?.optBoolean("aiDeepThink", false) ?: false,
+    // 旧备份没有这个字段 = 询问档：宁可多点一次，也不默认替作者改正文。
+    aiWriteMode = (o?.optInt("aiWriteMode", 1) ?: 1).coerceIn(0, 2),
     noteContextCount = (o?.optInt("noteContextCount", 8) ?: 8)
         .let { if (it == 0) 0 else it.coerceIn(2, 40) },
     noteMaxTokens = (o?.optInt("noteMaxTokens", 8000) ?: 8000)

@@ -625,6 +625,18 @@ fun AiScreen(
                         }
                     )
                 }
+                AiPendingKind.ChapterRestore -> {
+                    val body = ChapterHistory.read(ctx, p.chapterId, p.text.toLongOrNull() ?: 0L)
+                    val target = store.books.firstOrNull { it.id == p.bookId.ifBlank { book.id } }
+                    val old = target?.chapters?.firstOrNull { it.id == p.chapterId }?.content
+                    if (body == null || old == null) {
+                        ToastBus.show("这一版历史找不到了")
+                    } else if (!ChapterHistory.record(ctx, p.chapterId, old)) {
+                        ToastBus.show("没能留底，这次不恢复")
+                    } else {
+                        store.updateChapter(p.bookId.ifBlank { book.id }, p.chapterId, content = body)
+                    }
+                }
                 AiPendingKind.Book -> {
                     val o = JSONObject(p.payload.ifBlank { "{}" })
                     store.addBook(
@@ -794,16 +806,36 @@ fun AiScreen(
         if (!restoredNow) ToastBus.show("已写入 " + queue.size + " 处")
     }
 
-    /** 把一条已落地的写操作变成回答下面的一张卡；正文改动带 before / after。 */
-    fun editFor(p: AiPending): ChatEdit {
+    /**
+     * 一张改动卡。正文类的带 before / after；恢复历史带整章前后（显示时截断）；
+     * 其余（改名 / 建章 / 待办）只留一行说明，没有单条撤销。
+     */
+    fun cardFor(p: AiPending, state: String): ChatEdit {
         val id = java.util.UUID.randomUUID().toString().take(8)
+        val target = store.books.firstOrNull { it.id == p.bookId.ifBlank { book.id } }
+            ?: store.books.firstOrNull { it.id == book.id }
+        val chapter = target?.chapters?.firstOrNull { it.id == p.chapterId }
+        if (p.kind == AiPendingKind.ChapterRestore) {
+            val old = chapter?.content.orEmpty()
+            val body = chapter?.let {
+                ChapterHistory.read(ctx, it.id, p.text.toLongOrNull() ?: 0L)
+            } ?: ""
+            return ChatEdit(
+                id = id,
+                label = p.label.ifBlank { "恢复「" + (chapter?.title ?: "这一章") + "」的历史版本" },
+                kind = "restore",
+                bookId = target?.id ?: "",
+                chapterId = p.chapterId,
+                before = old,
+                after = body,
+                state = state,
+                baseHash = ChapterHistory.fingerprint(old),
+            )
+        }
         if (p.kind != AiPendingKind.Append && p.kind != AiPendingKind.Replace) {
             // 改名 / 建章 / 待办：只留一行说明，没有单条撤销。
             return ChatEdit(id = id, label = p.label, kind = "info")
         }
-        val target = store.books.firstOrNull { it.id == p.bookId.ifBlank { book.id } }
-            ?: store.books.firstOrNull { it.id == book.id }
-        val chapter = target?.chapters?.firstOrNull { it.id == p.chapterId }
         val append = p.kind == AiPendingKind.Append
         val size = if (append) p.text.length else p.findText.length
         return ChatEdit(
@@ -815,8 +847,16 @@ fun AiScreen(
             chapterId = p.chapterId,
             before = if (append) "" else p.findText,
             after = p.text,
+            state = state,
+            baseHash = ChapterHistory.fingerprint(chapter?.content.orEmpty()),
         )
     }
+
+    /** 把一条已落地的写操作变成回答下面的一张卡；正文改动带 before / after。 */
+    fun editFor(p: AiPending): ChatEdit = cardFor(p, "applied")
+
+    /** 3.26.29：询问档的同一张卡，状态是「等确认」。 */
+    fun patchFor(p: AiPending): ChatEdit = cardFor(p, "pending")
 
     /**
      * 逐条撤销一处正文改动。
@@ -826,7 +866,7 @@ fun AiScreen(
      * 静默覆盖会吃掉作者的新内容，所以让它走整轮撤销。
      */
     fun undoEdit(edit: ChatEdit): Boolean {
-        if (edit.kind != "append" && edit.kind != "replace") return false
+        if (edit.kind != "append" && edit.kind != "replace" && edit.kind != "restore") return false
         if (edit.after.isEmpty()) return false
         val b = store.books.firstOrNull { it.id == edit.bookId } ?: return false
         val c = b.chapters.firstOrNull { it.id == edit.chapterId } ?: return false
@@ -837,6 +877,10 @@ fun AiScreen(
                 content == edit.after -> ""
                 content.endsWith("\n\n" + edit.after) -> content.dropLast(edit.after.length + 2)
                 else -> return false
+            }
+            "restore" -> {
+                // 恢复的是整章：内容必须还是那一版，作者后来又改过就不倒回去。
+                if (content == edit.after) edit.before else return false
             }
             else -> {
                 val first = content.indexOf(edit.after)
@@ -856,7 +900,16 @@ fun AiScreen(
         return true
     }
 
-    /** 直接落地：删除与整库恢复以外的写操作，一次回答结束就生效。 */
+    fun isBodyWrite(p: AiPending): Boolean =
+        p.kind == AiPendingKind.Append || p.kind == AiPendingKind.Replace ||
+            p.kind == AiPendingKind.ChapterRestore
+
+    /**
+     * 一轮回答结束时的落地口。3.26.29 起按「改稿方式」分三档：
+     *  - 只读：工具层已经拦掉写调用，这里再丢一次，避免出现「已写入」的假象；
+     *  - 询问：正文改动（追加 / 改写 / 恢复历史）不落地，改成等确认的补丁卡；
+     *  - 自动：照旧直接落地，落地前先留快照，留不下就不写。
+     */
     fun applyDirectly(queue: List<AiPending>) {
         if (queue.isEmpty()) return
         // 3.26.23：facts 记忆层下线。模型偶尔还会调 save_memory / delete_memory，
@@ -871,23 +924,96 @@ fun AiScreen(
         }
         val work = queue.filterNot { it in legacyMemory }
         if (work.isEmpty()) return
+        if (settings.aiWriteMode == 0) {
+            pending = emptyList()
+            return
+        }
         val direct = ArrayList<AiPending>()
         val rest = ArrayList<AiPending>()
+        val patches = ArrayList<AiPending>()
         for (p in work) {
-            if (p.danger || p.kind == AiPendingKind.Restore) rest += p else direct += p
+            when {
+                p.danger || p.kind == AiPendingKind.Restore -> rest += p
+                settings.aiWriteMode == 1 && isBodyWrite(p) -> patches += p
+                else -> direct += p
+            }
+        }
+        val target = answerId.ifBlank {
+            chat.messages.lastOrNull { it.role != "user" }?.id ?: ""
+        }
+        if (patches.isNotEmpty()) {
+            // 卡片要在任何写入之前造：标题读的是改动前的书，baseHash 也是那一刻的。
+            chat.addEdits(target, patches.map { patchFor(it) })
         }
         if (direct.isNotEmpty()) {
-            undoSnapshot = store.data
-            undoCount = direct.size
-            // 卡片要在 applyQueue 之前造：标题读的是改动前的书，before/after 来自队列本身。
-            val cards = direct.map { editFor(it) }
-            applyQueue(direct)
-            val target = answerId.ifBlank {
-                chat.messages.lastOrNull { it.role != "user" }?.id ?: ""
+            val safe = ArrayList<AiPending>()
+            for (p in direct) {
+                if (!isBodyWrite(p)) {
+                    safe += p
+                    continue
+                }
+                val b = store.books.firstOrNull { it.id == p.bookId.ifBlank { book.id } }
+                val c = b?.chapters?.firstOrNull { it.id == p.chapterId }
+                if (c == null) {
+                    safe += p
+                } else if (ChapterHistory.record(ctx, c.id, c.content)) {
+                    safe += p
+                } else {
+                    ToastBus.show("没能留底，这一处不写")
+                }
             }
-            if (cards.isNotEmpty()) chat.addEdits(target, cards)
+            if (safe.isNotEmpty()) {
+                undoSnapshot = store.data
+                undoCount = safe.size
+                // 卡片要在 applyQueue 之前造：标题读的是改动前的书，before/after 来自队列本身。
+                val cards = safe.map { editFor(it) }
+                applyQueue(safe)
+                if (cards.isNotEmpty()) chat.addEdits(target, cards)
+            }
         }
         pending = rest
+    }
+
+    /**
+     * 接受一张补丁：先比正文指纹（这期间被改过就作废），再留底，最后写。
+     * 三步任何一步不过都不写——宁可让作者再生成一次，也不静默覆盖。
+     */
+    fun acceptPatch(msgId: String, e: ChatEdit): Boolean {
+        val b = store.books.firstOrNull { it.id == e.bookId } ?: return false
+        val c = b.chapters.firstOrNull { it.id == e.chapterId } ?: return false
+        if (e.baseHash.isNotBlank() && ChapterHistory.fingerprint(c.content) != e.baseHash) {
+            chat.markEdit(msgId, e.id, "stale")
+            ToastBus.show("这一章在这期间改过，补丁作废")
+            return false
+        }
+        val next = when (e.kind) {
+            "append" -> if (c.content.isBlank()) e.after else c.content.trimEnd() + "\n\n" + e.after
+            "restore" -> e.after
+            else -> when {
+                e.before.isBlank() -> c.content
+                c.content.contains(e.before) -> c.content.replaceFirst(e.before, e.after)
+                else -> c.content
+            }
+        }
+        if (e.kind != "append" && next == c.content) {
+            chat.markEdit(msgId, e.id, "stale")
+            ToastBus.show("原文已经找不到，补丁作废")
+            return false
+        }
+        if (!ChapterHistory.record(ctx, c.id, c.content)) {
+            ToastBus.show("没能留底，这次不写")
+            return false
+        }
+        store.updateBook(b.id) { bb ->
+            bb.copy(
+                chapters = bb.chapters.map {
+                    if (it.id != c.id) it
+                    else it.copy(content = next, updatedAt = System.currentTimeMillis())
+                },
+            )
+        }
+        chat.markEdit(msgId, e.id, "applied")
+        return true
     }
 
     /** 一步撤销：整库回到本轮写入前那一刻。 */
@@ -974,7 +1100,14 @@ fun AiScreen(
                 "\n\n「长期记忆」「作者偏好」两节已经并入下面的故事圣经，以故事圣经为准，" +
                 "不要把计划当已发生的事实。需要记住或修改设定、人物、关系、事件、大纲时，" +
                 "用 read_story_bible / write_story_bible 读写圣经；旧的 save_memory / " +
-                "delete_memory 已经没有任何地方可记，不要再调用。\n\n" +
+                "delete_memory 已经没有任何地方可记，不要再调用。" +
+                // 3.26.29：改稿方式必须让模型知道，否则它会照着「已经改好」的口吻回话。
+                when (settings.aiWriteMode) {
+                    0 -> "\n现在是只读档：只回答，不改正文、不改圣经，也不排任何写入。"
+                    1 -> "\n现在是询问档：正文改动只会排成补丁，作者点「接受」才写进正文；" +
+                        "不要说「已经改好了」，说「改好了，等你在下面确认」。"
+                    else -> "\n现在是自动档：正文改动在你答完就写入，作者可以一步撤销。"
+                } + "\n\n" +
                 bible,
         )
         lastPrompt = prompt
@@ -1034,6 +1167,7 @@ fun AiScreen(
                 attachments = attachments,
                 webEnabled = settings.aiWeb,
                 webMax = settings.aiWebMax,
+                writeMode = settings.aiWriteMode,
                 key = key,
                 baseUrl = settings.aiBaseUrl,
                 openBook = onOpenBook,
@@ -1338,6 +1472,15 @@ fun AiScreen(
         }
     }
 
+    /** 拒绝一张补丁；写了理由就带着理由让 AI 只重出这一处。 */
+    fun rejectPatch(msgId: String, e: ChatEdit, reason: String) {
+        chat.markEdit(msgId, e.id, "rejected")
+        val why = reason.trim()
+        if (why.isNotBlank()) {
+            send("刚才那处改动我拒绝了，因为：" + why + "。请只重出这一处。", echo = true)
+        }
+    }
+
     // Starter questions come from the model, for what is pinned right now.
     LaunchedEffect(book.id, quotes, chat.messages.size, settings.aiEnabled, settings.aiModel) {
         if (!settings.aiEnabled || chat.messages.isNotEmpty()) return@LaunchedEffect
@@ -1475,6 +1618,8 @@ fun AiScreen(
                             ToastBus.show("这一段后面又改过了，只能整轮撤销")
                         }
                     },
+                    onAcceptEdit = { msgId, edit -> acceptPatch(msgId, edit) },
+                    onRejectEdit = { msgId, edit, why -> rejectPatch(msgId, edit, why) },
                     suggestions = suggestions.ifEmpty { FALLBACK_SUGGESTIONS },
                     onSend = { send(question) },
                     onSample = { send(it) },
@@ -1657,9 +1802,14 @@ private fun ChatEditList(
     msgId: String,
     edits: List<ChatEdit>,
     onUndo: (String, ChatEdit) -> Unit,
+    onAccept: (String, ChatEdit) -> Unit,
+    onReject: (String, ChatEdit, String) -> Unit,
 ) {
     val ui = LocalInk.current
     val p = ui.palette
+    // 拒绝并说明：点「拒绝」先问一句理由（可空），填了才回给 AI 重来。
+    var rejecting by remember { mutableStateOf<ChatEdit?>(null) }
+    var why by remember { mutableStateOf("") }
     Column(
         Modifier
             .fillMaxWidth()
@@ -1673,25 +1823,56 @@ private fun ChatEditList(
                 .background(p.line.copy(alpha = .5f)),
         )
         edits.forEach { e ->
+            val pending = e.state == "pending"
+            val dead = e.state == "rejected" || e.state == "stale"
+            val suffix = when {
+                pending -> " · 待确认"
+                e.state == "rejected" -> " · 已拒绝"
+                e.state == "stale" -> " · 已作废"
+                e.undone -> " · 已撤销"
+                else -> ""
+            }
             Column(Modifier.fillMaxWidth()) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Txt(
-                        e.label + if (e.undone) " · 已撤销" else "",
+                        e.label + suffix,
                         size = 10.5f,
-                        color = p.muted.copy(alpha = if (e.undone) .55f else 1f),
+                        color = p.muted.copy(alpha = if (dead || e.undone) .55f else 1f),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f),
                     )
-                    if (e.kind != "info" && !e.undone) {
-                        Spacer(Modifier.width(8.dp))
-                        Box(
-                            Modifier
-                                .bouncy { onUndo(msgId, e) }
-                                .background(p.ink, SmoothCorner(999.dp))
-                                .padding(horizontal = 11.dp, vertical = 5.dp),
-                        ) {
-                            Txt("撤销", size = 11f, color = p.paper, weight = FontWeight.SemiBold)
+                    when {
+                        pending -> {
+                            Spacer(Modifier.width(8.dp))
+                            Box(
+                                Modifier
+                                    .bouncy { why = ""; rejecting = e }
+                                    .background(p.faint, SmoothCorner(999.dp))
+                                    .padding(horizontal = 11.dp, vertical = 5.dp),
+                            ) {
+                                Txt("拒绝", size = 11f, color = p.ink, weight = FontWeight.SemiBold)
+                            }
+                            Spacer(Modifier.width(6.dp))
+                            Box(
+                                Modifier
+                                    .bouncy { onAccept(msgId, e) }
+                                    .background(p.ink, SmoothCorner(999.dp))
+                                    .padding(horizontal = 11.dp, vertical = 5.dp),
+                            ) {
+                                Txt("接受", size = 11f, color = p.paper, weight = FontWeight.SemiBold)
+                            }
+                        }
+                        e.kind != "info" && !dead && !e.undone -> {
+                            Spacer(Modifier.width(8.dp))
+                            Box(
+                                Modifier
+                                    .bouncy { onUndo(msgId, e) }
+                                    .background(p.ink, SmoothCorner(999.dp))
+                                    .padding(horizontal = 11.dp, vertical = 5.dp),
+                            ) {
+                                Txt("撤销", size = 11f, color = p.paper, weight = FontWeight.SemiBold)
+                            }
                         }
                     }
                 }
@@ -1700,7 +1881,7 @@ private fun ChatEditList(
                     Txt(
                         "原文：" + e.before,
                         size = 11f,
-                        color = p.muted.copy(alpha = if (e.undone) .55f else 1f),
+                        color = p.muted.copy(alpha = if (dead || e.undone) .55f else 1f),
                         lineHeight = 15f,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
@@ -1711,12 +1892,35 @@ private fun ChatEditList(
                     Txt(
                         "改后：" + e.after,
                         size = 11.5f,
-                        color = p.ink.copy(alpha = if (e.undone) .5f else 1f),
+                        color = p.ink.copy(alpha = if (dead || e.undone) .5f else 1f),
                         lineHeight = 16f,
                         maxLines = 3,
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
+            }
+        }
+    }
+    val target = rejecting
+    if (target != null) {
+        GlassDialog(onDismiss = { rejecting = null }, dismissOnOutsideClick = false) {
+            DialogTitle("拒绝这处改动")
+            Spacer(Modifier.height(8.dp))
+            Txt("可以留空；写了理由就回给 AI，让它只重出这一处。", size = 11f, color = p.muted)
+            Spacer(Modifier.height(10.dp))
+            InkField(why, { why = it }, "为什么不要（可空）", singleLine = false, minHeight = 64.dp)
+            Spacer(Modifier.height(16.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                GlassButton("取消", { rejecting = null }, Modifier.weight(1f))
+                PrimaryButton(
+                    "拒绝",
+                    {
+                        val e = target
+                        rejecting = null
+                        onReject(msgId, e, why)
+                    },
+                    Modifier.weight(1f),
+                )
             }
         }
     }
@@ -1758,6 +1962,9 @@ private fun ChatPane(
     undoCount: Int,
     /** 逐条撤销一处正文改动（msgId, edit）。 */
     onUndoEdit: (String, ChatEdit) -> Unit,
+    /** 3.26.29：接受 / 拒绝一张待确认补丁（msgId, edit[, 理由]）。 */
+    onAcceptEdit: (String, ChatEdit) -> Unit,
+    onRejectEdit: (String, ChatEdit, String) -> Unit,
     suggestions: List<String>,
     onSend: () -> Unit,
     onSample: (String) -> Unit,
@@ -2264,7 +2471,7 @@ private fun ChatPane(
                                     if (msg.edits.isNotEmpty() && !running &&
                                         msg.id == messages.lastOrNull { it.role != "user" }?.id
                                     ) {
-                                        ChatEditList(msg.id, msg.edits, onUndoEdit)
+                                        ChatEditList(msg.id, msg.edits, onUndoEdit, onAcceptEdit, onRejectEdit)
                                     }
                                     // The confirm strip lives INSIDE the bubble
                                     // that asked for the change: it belongs to
