@@ -341,6 +341,11 @@ data class AppSettings(
     val paperStyle: String = "plain",
     val paperLineAlpha: Float = .5f,
     val onboardingDone: Boolean = false,
+    /**
+     * 已教过的教练组 id（如 `tutorial.landing`）。进 moyu.json；旧备份没有这个字段 =
+     * 空列表（= 一组都没教过）。不参与 normalize 的清理：这里只追加，不删。
+     */
+    val tutorialDone: List<String> = emptyList(),
     /** Chapter editor: keep the bound notes floating beside the body. Off by default. */
     val noteFloat: Boolean = false,
     /** Where the floating note card is pinned: right or left of the body. */
@@ -1389,6 +1394,7 @@ private fun encodeSettings(s: AppSettings): JSONObject = JSONObject().apply {
     put("autoUpdate", s.autoUpdate); put("paperStyle", s.paperStyle)
     put("paperLineAlpha", s.paperLineAlpha.toDouble())
     put("onboardingDone", s.onboardingDone)
+    put("tutorialDone", JSONArray(s.tutorialDone))
     put("noteFloat", s.noteFloat)
     put("noteFloatX", s.noteFloatX.toDouble()); put("noteFloatY", s.noteFloatY.toDouble())
     put("noteFloatW", s.noteFloatW.toDouble()); put("noteFloatH", s.noteFloatH.toDouble())
@@ -1492,6 +1498,9 @@ private fun decodeSettings(o: JSONObject?) = AppSettings(
     },
     paperLineAlpha = (o?.optDouble("paperLineAlpha", .5) ?: .5).toFloat(),
     onboardingDone = o?.optBoolean("onboardingDone", false) ?: false,
+    // 旧备份没有 tutorialDone：空列表 = 一组都没教过。解码走已有的容错列表读取，
+    // 坏值/空串/重复项都会被压掉，不会让整份设置读失败。
+    tutorialDone = decodeStringList(o, "tutorialDone"),
     noteFloat = o?.optBoolean("noteFloat", false) ?: false,
     noteFloatX = (o?.optDouble("noteFloatX", .62) ?: .62).toFloat().coerceIn(0f, 1f),
     noteFloatY = (o?.optDouble("noteFloatY", 0.0) ?: 0.0).toFloat().coerceIn(0f, 1f),

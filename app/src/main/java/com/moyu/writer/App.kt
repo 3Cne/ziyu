@@ -60,6 +60,7 @@ import androidx.compose.runtime.produceState
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -123,6 +124,19 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         noteFromIntent = intent?.getStringExtra("open_note")
         val store = (application as MoyuApplication).store
+        // 教练式引导：锚点表 + 当前组放在 Activity 层，页面与引导层共用同一份。
+        // Manifest 里 configChanges 已兜住旋转/昼夜，Activity 不会因此重建；进程重建时
+        // 未完成的组会重新弹（tutorialDone 只在走完/退出时才写）。
+        val tutorialRegistry = TutorialRegistry()
+        val tutorial = TutorialController { groupId ->
+            store.updateSettings { s ->
+                s.copy(
+                    tutorialDone = (s.tutorialDone + groupId).distinct(),
+                    // 旧标记保留语义：走完上手 6 步就等于看过首次引导。
+                    onboardingDone = if (groupId == TutorialGroups.LANDING) true else s.onboardingDone,
+                )
+            }
+        }
         val systemNight = (resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
             android.content.res.Configuration.UI_MODE_NIGHT_YES
         val night = when (store.settings.theme) {
@@ -137,7 +151,11 @@ class MainActivity : ComponentActivity() {
         )
         setContent {
             MoyuTheme(store.data.settings) {
-                CompositionLocalProvider(LocalStore provides store) {
+                CompositionLocalProvider(
+                    LocalStore provides store,
+                    LocalTutorialRegistry provides tutorialRegistry,
+                    LocalTutorialController provides tutorial,
+                ) {
                     MoyuRoot(store, noteFromIntent) { noteFromIntent = null }
                 }
             }
@@ -214,6 +232,23 @@ private fun MoyuRoot(store: AppStore, initialNote: String?, consumeInitialNote: 
     // TabBar 是 root 的兄弟节点、画在页面之上，不收面板底部会被盖住、点不到。
     var sheetSuppressed by remember { mutableStateOf(false) }
     val suppressSheet: (Boolean) -> Unit = remember { { v -> sheetSuppressed = v } }
+
+    // 教练式引导：控制器与锚点表由 MainActivity 的 CompositionLocal 提供。
+    val tutorial = LocalTutorialController.current
+    val tutorialRegistry = LocalTutorialRegistry.current
+    LaunchedEffect(tutorial, store) {
+        if (tutorial == null) return@LaunchedEffect
+        // 等底层页面完成首帧再起：锚点在 onGloballyPositioned 里注册，早一帧会被当成目标不存在。
+        withFrameNanos { }
+        withFrameNanos { }
+        val s = store.data.settings
+        // 首次启动（没有 onboardingDone、也没教过 tutorial.landing）才弹上手 6 步。
+        // 老用户 onboardingDone=true 但 tutorialDone 缺省为空：不重播上手，
+        // 页内首次教学由后续接线按各自的组 id 触发。
+        if (!s.onboardingDone && TutorialGroups.LANDING !in s.tutorialDone) {
+            tutorial.start(LANDING_TUTORIAL)
+        }
+    }
 
     LaunchedEffect(Unit) {
         if (store.data.settings.autoUpdate && BuildConfig.UPDATE_REPO.isNotBlank()) {
@@ -460,7 +495,11 @@ DepthStack(
             visible = rootVisible && !sheetSuppressed,
             enter = slideInVertically(initialOffsetY = { it / 2 }, animationSpec = spring(MOYU_DAMPING, 380f)) + fadeIn(tween(180)),
             exit = slideOutVertically(targetOffsetY = { it }, animationSpec = tween(200)) + fadeOut(tween(140)),
-            modifier = Modifier.align(Alignment.BottomCenter),
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                // 自检示例锚点：页面侧照这个写法，把要指的控件用 Modifier.tutorialAnchor(id)
+                // 登记到 TutorialRegistry；Lead 后续把真实锚点逐个加到页面里。
+                .tutorialAnchor("app.tabBar"),
         ) {
             // 同一套规则就近再算一次：设置永远在，其余按开关过滤，顺序固定。
             val barKeys = listOf("library", "notes", "stats", "ai", "settings")
@@ -494,12 +533,6 @@ DepthStack(
             )
         }
 
-        if (!ui.settings.onboardingDone) {
-            OnboardingOverlay {
-                store.updateSettings { it.copy(onboardingDone = true) }
-            }
-        }
-
         if (ui.settings.showFps) {
             FpsMeter(
                 Modifier
@@ -507,6 +540,18 @@ DepthStack(
                     .navigationBarsPadding()
                     .padding(start = 17.dp, bottom = if (rootVisible) 96.dp else 112.dp)
             )
+        }
+
+        // 教练式引导画在最上层：盖住 TabBar、Toast 和 FPS，蒙层自己吃触摸。
+        if (tutorial != null && tutorialRegistry != null) {
+            val activeTutorial = tutorial.current
+            if (activeTutorial != null) {
+                TutorialOverlay(
+                    group = activeTutorial,
+                    registry = tutorialRegistry,
+                    onFinished = { tutorial.finish() },
+                )
+            }
         }
     }
 }
