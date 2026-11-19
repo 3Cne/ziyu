@@ -409,6 +409,8 @@ fun WritingScreen(
     chapterTags: (@Composable () -> Unit)? = null,
     /** Book whose memory supplies name-consistency checks; null for a note. */
     proofBookId: String? = null,
+    /** 3.26.48：章节页「··· → 历史版本」。每 +1 打开一次历史面板；笔记页不用。 */
+    historyTick: Int = 0,
 ) {
     val ui = LocalInk.current
     val p = ui.palette
@@ -669,6 +671,13 @@ fun WritingScreen(
     var askRange by remember { mutableStateOf(0 to 0) }
     var askExpanded by remember { mutableStateOf(false) }
     var askSeq by remember { mutableIntStateOf(0) }
+    // 3.26.48：流式回答已收到的部分。边收边画，落定（或失败）后清空。
+    var askStream by remember { mutableStateOf("") }
+    // 3.26.48：章节历史面板。入口在章节「···」菜单；面板自己留底，恢复只负责写回。
+    var historyOpen by remember(seedKey) { mutableStateOf(false) }
+    LaunchedEffect(historyTick) {
+        if (historyTick > 0) historyOpen = true
+    }
 
     fun startProof() {
         val a = min(body.selection.start, body.selection.end).coerceIn(0, body.text.length)
@@ -936,6 +945,7 @@ fun WritingScreen(
         askRange = a to b
         askTurns = emptyList()
         askInput = ""
+        askStream = ""
         askError = null
         askBusy = false
         askExpanded = false
@@ -959,7 +969,10 @@ fun WritingScreen(
         }
     }
 
-    /** 发一条：上下文只带这一段 + 前后 200 字 + 章名 + 圣经摘要，不跑工具。 */
+    /**
+     * 发一条：上下文交给 [AskContextBuilder]（选区/上文/章名/摘要/圣经/对话），
+     * 回答走 [AskStream] 流式，边收边画；落定后才成一条可替换的 [AskTurn]。
+     */
     fun sendAsk() {
         val q = askInput.trim()
         if (q.isEmpty() || askBusy) return
@@ -972,41 +985,48 @@ fun WritingScreen(
             askError = "还没配置 AI：设置 → 问书 AI"
             return
         }
-        val (a, b) = askRange
-        val book = proofBookId?.let { store.book(it) }
-        val facts = book?.let { AiBible.summary(it) }?.take(2000).orEmpty()
-        val before = body.text.substring(max(0, a - 200), a.coerceIn(0, body.text.length))
-        val history = askTurns.joinToString("\n") { (if (it.mine) "作者：" else "AI：") + it.text }
-        val user = buildString {
-            append("【章节】").append(title.ifBlank { "未命名" }).append('\n')
-            if (facts.isNotBlank()) append("【设定】").append(facts).append('\n')
-            if (before.isNotBlank()) append("【紧接在上文】").append(before).append('\n')
-            append("【选中】\n").append(askPreview).append('\n')
-            if (history.isNotBlank()) append("【对话】\n").append(history).append('\n')
-            append("作者：").append(q)
-        }
+        // 本轮提问自己不进「历史对话」：问题由 AskContextBuilder 的 question 给，
+        // 历史只放这之前的轮次，否则同一句会出现两次（一次是作者：q，一次是问题行）。
+        val priorTurns = askTurns
         askInput = ""
         askError = null
+        askStream = ""
         askBusy = true
         askSeq += 1
         askTurns = askTurns + AskTurn("q" + askSeq, true, q)
         scope.launch {
-            val r = AiClient.chat(
+            val askCtx = AskContextBuilder.forBook(
+                context,
+                proofBookId?.let { store.book(it) },
+                seedKey,
+                chapterTitle = title.ifBlank { "未命名" },
+                preview = askPreview,
+                before = body.text.substring(0, askRange.first.coerceIn(0, body.text.length)),
+                question = q,
+                history = priorTurns,
+                chapterWords = body.text.length,
+            )
+            val r = AskStream.chat(
                 baseUrl = settings.aiBaseUrl,
                 model = settings.aiModel,
                 key = key,
                 temperature = .6f,
                 system = ASK_SYSTEM,
-                user = user,
-                maxTokens = 1600,
-                disableThinking = false,
-            )
+                user = askCtx.user,
+            ) { delta -> askStream += delta }
             askBusy = false
-            if (r.ok && r.text.isNotBlank()) {
-                askSeq += 1
-                askTurns = askTurns + AskTurn("q" + askSeq, false, r.text.trim())
-            } else {
-                askError = r.error ?: "没拿到回答，再试一次"
+            askStream = ""
+            when {
+                r.ok -> {
+                    askSeq += 1
+                    askTurns = askTurns + AskTurn("q" + askSeq, false, r.text.trim())
+                }
+                r.partial -> {
+                    // 半路断流：收到的残句不落成可替换的回答（面板按「完整一条」才给
+                    // 「替换选中」），只提示没写完，作者重发一次即可。
+                    askError = "回答没写完（收到 ${r.text.length} 字），再发一次试试"
+                }
+                else -> askError = r.error ?: "没拿到回答，再试一次"
             }
         }
     }
@@ -1956,6 +1976,7 @@ fun WritingScreen(
                     canWrite = settings.aiEnabled && settings.aiWriteMode != 0,
                     onSend = { sendAsk() },
                     onApply = { applyAsk(it) },
+                    streaming = askStream,
                 )
             }
             // 3.26.23: floating story bible (same panes as the story page).
@@ -2224,6 +2245,19 @@ fun WritingScreen(
 
     if (showType) {
         TypographySheet(store = LocalStore.current, onDismiss = { showType = false })
+    }
+    if (historyOpen) {
+        ChapterHistorySheet(
+            chapterId = seedKey,
+            chapterTitle = title,
+            currentText = body.text,
+            // 面板点「恢复」前已经用 ChapterHistory.record 把当前正文留了一份底，
+            // 这里只负责写回；不要再 record，否则一次恢复会多出两条一样的版本。
+            onRestore = { text ->
+                bodyEditor?.replaceKeepingViewport(0, body.text.length, text)
+            },
+            onDismiss = { historyOpen = false },
+        )
     }
 }
 
@@ -4955,17 +4989,34 @@ private fun EditorTopBar(
             Spacer(Modifier.width(5.dp))
             GlassIconButton(Glyph.More, onMore, size = 40.dp, strength = .45f)
         }
-        if (chips != null) {
+        // 3.26.48：章节 chip 行随「关联章节」出现/消失整行展开、收起。
+        // 退出动画期间上层已经把 chips 传成 null；这里留住最后一次非空内容，
+        // 否则内容先空掉、没有东西可收，看起来还是硬切。
+        val lastChips = remember { mutableStateOf<(@Composable () -> Unit)?>(null) }
+        SideEffect { if (chips != null && lastChips.value !== chips) lastChips.value = chips }
+        AnimatedVisibility(
+            visible = chips != null,
+            enter = expandVertically(
+                animationSpec = spring(dampingRatio = .6f, stiffness = 380f),
+            ),
+            exit = shrinkVertically(
+                animationSpec = spring(dampingRatio = .6f, stiffness = 380f),
+            ),
+            label = "chapterChips",
+        ) {
             // 呼吸：chip 行与右侧按钮之间留 8dp、与底边留 6dp。
             // 2026-11-15 用户点名：贴按钮太紧，以后同类位置都要留一点空隙。
-            Spacer(Modifier.height(8.dp))
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End,
-            ) {
-                chips()
+            val row = chips ?: lastChips.value
+            if (row != null) {
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                ) {
+                    row()
+                }
+                Spacer(Modifier.height(6.dp))
             }
-            Spacer(Modifier.height(6.dp))
         }
     }
 }
@@ -5547,8 +5598,8 @@ private fun TypographySheet(store: AppStore, onDismiss: () -> Unit) {
     val ui = LocalInk.current
     val s = ui.settings
     val themes = listOf("paper" to "纸白", "mist" to "雾灰", "white" to "纯白", "sepia" to "茶褐", "night" to "夜黑")
-    InlineModalSheet(onDismiss) { _ ->
-        DialogTitle("排版", "改动会立刻作用到编辑器和提笔的手感。", onClose = onDismiss)
+    InlineModalSheet(onDismiss) { close ->
+        DialogTitle("排版", "改动会立刻作用到编辑器和提笔的手感。", onClose = close)
         Spacer(Modifier.height(16.dp))
         MoyuSurface(Modifier.fillMaxWidth(), radius = 20f, flat = true) {
             Column(Modifier.padding(16.dp)) {
@@ -5667,6 +5718,9 @@ fun BookEditorScreen(
     var exportOpen by remember { mutableStateOf(false) }
     var notesOpen by remember { mutableStateOf(false) }
     var pendingMenuAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    // 3.26.48：历史版本面板挂在这页的菜单上，但恢复要走编辑器自己的 replaceKeepingViewport，
+    // 所以只把「打开」的触发计数传给 WritingScreen，由它把面板和正文放一起。
+    var historyTick by remember { mutableIntStateOf(0) }
     val boundNotes = store.data.notesOfChapter(chapter)
     val noteLinks = NoteLinkUi(
         notes = boundNotes,
@@ -5703,6 +5757,7 @@ fun BookEditorScreen(
             onBack = onBack,
             onMore = { menuOpen = true },
             proofBookId = book.id,
+            historyTick = historyTick,
         )
 
         if (notesOpen) {
@@ -5748,6 +5803,11 @@ fun BookEditorScreen(
                             })
                             RowDivider()
                             SettingRow("章节笔记", "绑定笔记、行文时悬浮", Glyph.Link, onClick = { level = 1 })
+                            RowDivider()
+                            SettingRow("历史版本", "改正文前自动留的底，可以退回去", Glyph.Clock, onClick = {
+                                pendingMenuAction = { historyTick++ }
+                                close()
+                            })
                             RowDivider()
                             SettingRow("导出这本书", "EPUB / TXT", Glyph.Export, onClick = { level = 2 })
                             RowDivider()
