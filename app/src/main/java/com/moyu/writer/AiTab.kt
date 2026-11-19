@@ -29,6 +29,7 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
@@ -2331,6 +2332,20 @@ private fun ChatPane(
     // adds a line at a time; without slack the new line lands under the input
     // for a frame before the scroll corrects it, which reads as twitching.
     val tailRoom = if (sending || messages.any { it.status == ChatStatus.Running }) 22.dp else 0.dp
+    // 3.26.47：引用/附件行改成展开动画，列表底部让位就不能还是阶梯 ——
+    // 那一行一出现 bottom 从 54dp 直接给到 92dp，列表尾、输入区和工具气泡落点
+    // 会在同一帧上跳 38dp。54 <-> 92 和整行展开走同一条 spring(.6, 380)，
+    // 两边同一帧起步、同一帧收尾，让位看起来是「被行顶上去」而不是跳上去。
+    val quoteRowShown = quotes.isNotEmpty() || attachments.isNotEmpty()
+    val quoteRowBottom by animateDpAsState(
+        targetValue = if (quoteRowShown) 92.dp else 54.dp,
+        animationSpec = if (ui.settings.motion == "none") {
+            tween(0)
+        } else {
+            spring(dampingRatio = .6f, stiffness = 380f)
+        },
+        label = "quoteRowBottom",
+    )
     Box(
         Modifier
             .fillMaxSize()
@@ -2390,8 +2405,9 @@ private fun ChatPane(
                 // bottomGap is where the input row STARTS; the row itself is
                 // ~46dp tall, so the list needs bottomGap + rowHeight to clear
                 // it. 12dp put the last line under the glass; 62dp left a hole.
-                bottom = bottomGap + 54.dp + tailRoom +
-                    if (quotes.isEmpty() && attachments.isEmpty()) 0.dp else 38.dp,
+                // 3.26.47：54dp 是基准，引用/附件行显示时多让 38dp（即 92dp），
+                // 这个让位跟那一行的展开/收起同一条 spring，不再同帧跳变。
+                bottom = bottomGap + tailRoom + quoteRowBottom,
             ),
             // A short conversation leaves the rows stuck to the TOP with a hole
             // under them, and then no scroll can fix it: the content is shorter
@@ -2885,7 +2901,32 @@ private fun ChatPane(
         // One row: what is pinned (if anything) and the way to change it. No
         // status line, no character-count label — that lived in two more chips
         // and read as clutter.
-        if (quotes.isNotEmpty() || attachments.isNotEmpty()) {
+        //
+        // 3.26.47：整行也有进出了。以前是 if 直接加/删一层 LazyRow，行出现或
+        // 消失的那一帧，输入区、列表尾、工具气泡落点整块上跳/下落 38dp。
+        // 这里 enter/exit 与列表 contentPadding 的让位共用 spring(.6, 380)；
+        // motion=none 时降级成 tween(0)，跟本文件其它动效的写法一致。
+        val rowMoves = ui.settings.motion != "none"
+        AnimatedVisibility(
+            visible = quoteRowShown,
+            enter = expandVertically(
+                animationSpec = if (rowMoves) {
+                    spring(dampingRatio = .6f, stiffness = 380f)
+                } else {
+                    tween(0)
+                },
+                // 行贴在输入行上方：高度向上长出来，收起时缩回输入行里。
+                expandFrom = Alignment.Bottom,
+            ) + fadeIn(tween(if (rowMoves) 140 else 0)),
+            exit = shrinkVertically(
+                animationSpec = if (rowMoves) {
+                    spring(dampingRatio = .6f, stiffness = 380f)
+                } else {
+                    tween(0)
+                },
+                shrinkTowards = Alignment.Bottom,
+            ) + fadeOut(tween(if (rowMoves) 120 else 0)),
+        ) {
             // LazyRow + animateItem: a removed chip fades out while the others
             // slide closed. The old enter-only AppearingChip had no exit at all;
             // fading it in place would have let the row snap shut first.
