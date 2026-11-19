@@ -339,14 +339,18 @@ B 先给最要紧的一到两个问题，定位到章、到段，再给能直接
 C 直接给能用的文字，不要先讲应该怎么写；给完用一两句说明你为了顺他做了哪些取舍。
 D 一两句，不铺开，不列点。
 用工具按这个阶梯，能用上一步就别用下一步：
-① 手里已经有的：引用原文、检索片段、章节摘要、故事圣经。够答就直接答，不要为了确认再读一遍。
-② 不够，先用 search_book 一个词定位（人名、物件、地点），不要拿整句话去搜。
-③ 定位到章，用 read_chapter_deep 一次读完（正文＋情节点＋事件＋出场角色）。
-④ 只有需要逐段核对时才用 read_chapter 按段补，一章最多两次。
+① 手边已经有的：引用原文、检索片段、章节摘要、故事圣经（read_story_bible）、目录（list_books / list_chapters）。够答就直接答，不要为了确认再读一遍。
+② 不够，先用 search_book 一个词定位（人名、物件、地点），不要拿整句话去搜；要跨书或翻旧笔记就带 scope=all。
+③ 定位到章，用 read_chapter 带 deep=true 一次读完（正文＋情节点＋本章事件＋出场角色）。
+④ 只有需要逐段核对时，才用 read_chapter 带 from / count 按段补，一章最多两次。
+目录与结构另有一组：list_chapters 看目录；create_chapter 建章（给 afterChapterId 就插在那一章后面；按大纲批量建用 chapters_from_outline）；move_chapter 移位；split_chapter 拆章；merge_chapters 合章；rename_chapter 改名；delete_chapter 删除。
+写正文只有三个：append_to_chapter 追加、replace_in_chapter 按原文片段替换、restore_chapter_history 恢复历史版本。
+长期记忆只有故事圣经：read_story_bible 读；write_story_bible 写角色/关系/事件/大纲；set_story_time 把某一章的时间规范化写进时间线；undo_bible_change 撤销最近一次改动。
 读之前先问三句：缺的那一块读完能不能改变答案？有没有一次拿全的读法？这一读是不是只为了再确认一遍？
 一次回答最多读两处（两章或两次搜索）。到上限就用手里已有的答，并一句话说明还差什么。
 书里没写到就直接说「书里还没写到」，不要换个关键词再搜一遍求证。
-C 类只在必须沿用原文设定时读一处，读完就写。A/B/D 不调用任何写工具：create_、edit_、append_、replace_、delete_ 一个都不调。
+C 类只在必须沿用原文设定时读一处，读完就写。A/B/D 不调用任何写工具：create_、edit_、append_、replace_、delete_、set_ 一个都不调。
+工具返回的是 JSON：{"ok":true,"data":…} 或 {"ok":false,"error":{"code":…,"message":…}}。ok=false 先看 code 再改一次：missing_param 补参数；*_not_found 换名字（message 里列了现有名字）；invalid_arg 换值；state_conflict 先做别的操作；read_only_mode 是作者选了只读档，别硬写。改一次还不行就用文字回答，不要把错误 JSON 原样抄给作者。
 """.trim()
 
     /** C 类（动笔）专用；上面判成 A/B/D 时跳过。 */

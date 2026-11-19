@@ -2263,6 +2263,7 @@ private fun BiblePages(
     mine: @Composable () -> Unit,
     ai: @Composable () -> Unit,
 ) {
+    val motion = LocalInk.current.settings.motion != "none"
     Column(Modifier.fillMaxSize()) {
         Segmented(listOf("我的", "AI"), page, onPage, Modifier.fillMaxWidth())
         Spacer(Modifier.height(10.dp))
@@ -2272,8 +2273,12 @@ private fun BiblePages(
             transitionSpec = {
                 val dir = if (targetState > initialState) 1 else -1
                 // 3.26.45：整幅横移、不淡入淡出；MOYU_DAMPING 与文件里其它滑动同一手感。
-                slideInHorizontally(spring(MOYU_DAMPING, 420f)) { it * dir } togetherWith
-                    slideOutHorizontally(spring(MOYU_DAMPING, 420f)) { -it * dir }
+                // 关闭动效时直接切终态（协议 §5），不留在半途。
+                val enter = if (motion) slideInHorizontally(spring(MOYU_DAMPING, 420f)) { it * dir }
+                else slideInHorizontally(tween(0)) { it * dir }
+                val exit = if (motion) slideOutHorizontally(spring(MOYU_DAMPING, 420f)) { -it * dir }
+                else slideOutHorizontally(tween(0)) { -it * dir }
+                enter togetherWith exit
             },
             label = "biblePage",
         ) { p ->
@@ -2495,14 +2500,21 @@ private fun PendingChangeCard(
     resolve: (StoryPendingChange, Boolean) -> Unit,
 ) {
     val ui = LocalInk.current
+    val motion = ui.settings.motion != "none"
     val vt = remember { MutableTransitionState(false).apply { targetState = true } }
     var decision by remember { mutableStateOf<Boolean?>(null) }
     AnimatedVisibility(
         visibleState = vt,
-        enter = slideInVertically(spring(dampingRatio = .6f, stiffness = 380f)) { it } +
-            fadeIn(tween(140)),
-        exit = slideOutVertically(spring(dampingRatio = .6f, stiffness = 380f)) { it } +
-            fadeOut(tween(120)),
+        enter = if (motion) {
+            slideInVertically(spring(dampingRatio = .6f, stiffness = 380f)) { it } + fadeIn(tween(140))
+        } else {
+            slideInVertically(tween(0)) { it } + fadeIn(tween(0))
+        },
+        exit = if (motion) {
+            slideOutVertically(spring(dampingRatio = .6f, stiffness = 380f)) { it } + fadeOut(tween(120))
+        } else {
+            slideOutVertically(tween(0)) { it } + fadeOut(tween(0))
+        },
     ) {
         MoyuSurface(Modifier.fillMaxWidth(), radius = 18f, flat = true) {
             Column(Modifier.fillMaxWidth().padding(14.dp)) {
@@ -2563,6 +2575,7 @@ private fun PendingChangeCard(
 @Composable
 private fun AiSyncFooter(book: Book, pager: StoryPagerState) {
     val ui = LocalInk.current
+    val motion = ui.settings.motion != "none"
     // 预览行来自 AiBible.previewMerge；非 null = 预览面板开着。
     var previewRows by remember { mutableStateOf<List<BibleChange>?>(null) }
     val total = aiBibleCount(book.bible)
@@ -2570,10 +2583,16 @@ private fun AiSyncFooter(book: Book, pager: StoryPagerState) {
     Column(Modifier.fillMaxWidth()) {
         AnimatedVisibility(
             visible = synced > 0,
-            enter = slideInVertically(spring(dampingRatio = .6f, stiffness = 380f)) { it } +
-                fadeIn(tween(140)),
-            exit = slideOutVertically(spring(dampingRatio = .6f, stiffness = 380f)) { it } +
-                fadeOut(tween(120)),
+            enter = if (motion) {
+                slideInVertically(spring(dampingRatio = .6f, stiffness = 380f)) { it } + fadeIn(tween(140))
+            } else {
+                slideInVertically(tween(0)) { it } + fadeIn(tween(0))
+            },
+            exit = if (motion) {
+                slideOutVertically(spring(dampingRatio = .6f, stiffness = 380f)) { it } + fadeOut(tween(120))
+            } else {
+                slideOutVertically(tween(0)) { it } + fadeOut(tween(0))
+            },
         ) {
             Row(
                 Modifier
