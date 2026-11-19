@@ -3,7 +3,8 @@ package com.moyu.writer
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ContentTransform
-import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FiniteAnimationSpec
 import androidx.compose.animation.core.MutableTransitionState
@@ -55,7 +56,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -91,7 +91,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import kotlin.math.PI
 import kotlin.math.cos
@@ -112,7 +111,8 @@ import org.json.JSONObject
  *
  * 层级 = **来源 → 视图**：顶部先「我的 / AI」两段，下面再「角色 / 时间线 / 大纲」。
  * 3.26.48 起两页不再是「各写一套、看着差不多」，而是**同一份页面骨架**：
- * [StoryPageScaffold] 管滚动区 / 待同意差异卡 / 底部（已同步结果行 + 主按钮），
+ * [StoryPageScaffold] 管滚动区 / 底部（待同意入口 + 已同步结果行 + 主按钮），
+ * 待同意的 AI 改动收进底部抽屉（3.26.58，页面不再铺卡）。
  * [CharacterPane] / [TimelinePane] / [OutlinePane] 每个视图只有**一个** composable，
  * 用 `readOnly` 换行为（可编辑 / 只读）——元素清单、间距、字号、颜色、圆角、分隔线、内边距
  * 全部是同一份代码，两页之间不允许再出现第二套数值。
@@ -139,7 +139,8 @@ fun StorySheet(
 ) {
     // 3.26.47：导航 = 来源（我的/AI）→ 视图（角色/时间线/大纲）；默认停在「我的 · 大纲」（写作前规划台）。
     val pager = remember { StoryPagerState() }
-    // 3.26.45：待同意的 AI 改动（AiBible 侧车 → 差异卡；映射在文件末尾 storyPendingChanges）。
+    // 3.26.45：待同意的 AI 改动（AiBible 侧车 → 待同意抽屉；映射见 storyPendingChanges）。
+    // 3.26.58：抽屉是页面级的一处（[StoryPendingDrawer]），两侧来源 × 三个视图看到的是同一份。
     var pending by remember(book.id) { mutableStateOf(storyPendingChanges(book.id)) }
     LaunchedEffect(book.bible) { pending = storyPendingChanges(book.id) }
     fun resolveChange(change: StoryPendingChange, accept: Boolean) {
@@ -2834,7 +2835,7 @@ private fun storyStamp(ms: Long): String {
 //
 // 数据层不加字段：`origin` 早就有（author / text / ai）。工作台先按「来源」分页——
 // 「我的」只放 origin == "author"；「AI」放其余，只读；每页再按「视图」分角色 / 时间线 / 大纲。
-// AI 想改作者条目要经过差异卡（同意 / 拒绝）；AI 写的新东西走「同步 AI 内容到我的」整批并入
+// AI 想改作者条目要经过「待同意」抽屉（同意 / 拒绝）；AI 写的新东西走「同步 AI 内容到我的」整批并入
 // 作者页，做完一步可撤销。
 
 private const val BIBLE_ORIGIN_AUTHOR = "author"
@@ -2867,20 +2868,22 @@ private class StoryPagerState {
     var syncTick by mutableIntStateOf(0)
 }
 
-/** AI 对作者条目提出的一处改动——差异卡的一条。 */
+/** AI 对作者条目提出的一处改动——待同意抽屉里的一条。 */
 private data class StoryPendingChange(
     val id: String,
     /** [BIBLE_SECTION_CHARACTER] / [BIBLE_SECTION_TIMELINE] / [BIBLE_SECTION_OUTLINE] */
     val section: Int,
-    /** 谁：角色「李四」/ 关系「李四—王五」/ 事件「雨夜」/ 大纲「第三章」 */
-    val who: String,
+    /** AI 条目的原始类型：character / relation / event / outline（抽屉行的类型图标用它）。 */
+    val kind: String,
+    /** 名称：角色「李四」/ 关系「李四—王五」/ 事件「雨夜」/ 大纲「第三章」。 */
+    val title: String,
     /** 哪个字段：身份 / 一句话 / 关系 / 故事时间 / 情节点 */
     val field: String,
     val before: String,
     val after: String,
 )
 
-/** AI 条目类型 → 中文（差异卡 / 同步预览同用）。 */
+/** AI 条目类型 → 中文（同步预览、待同意抽屉的老侧车兜底同用）。 */
 private fun bibleKindLabel(kind: String): String = when (kind) {
     "character" -> "角色"
     "relation" -> "关系"
@@ -2890,8 +2893,9 @@ private fun bibleKindLabel(kind: String): String = when (kind) {
 }
 
 /**
- * 待同意的 AI 改动：把 AiBible 的字段级差异 [BibleChange] 映射成差异卡的一条。
- * 角色 / 关系归角色 tab，事件归时间线，大纲归大纲。
+ * 待同意的 AI 改动：把 AiBible 的字段级差异 [BibleChange] 映射成待同意抽屉的一条。
+ * 角色 / 关系归角色 tab，事件归时间线，大纲归大纲；三个视图看到的是**同一份**列表
+ * （3.26.58：不再按视图过滤，抽屉是页面级的一处，计数也按全书待同意算）。
  */
 private fun storyPendingChanges(bookId: String): List<StoryPendingChange> =
     pendingChanges(bookId).map { c ->
@@ -2902,7 +2906,8 @@ private fun storyPendingChanges(bookId: String): List<StoryPendingChange> =
                 "outline" -> BIBLE_SECTION_OUTLINE
                 else -> BIBLE_SECTION_CHARACTER
             },
-            who = "${bibleKindLabel(c.kind)}「${c.title}」",
+            kind = c.kind,
+            title = c.title.ifBlank { bibleKindLabel(c.kind) },
             field = c.field,
             before = c.before,
             after = c.after,
@@ -2995,7 +3000,8 @@ private fun StoryNavBody(
                         book = book,
                         onBible = onBible,
                         syncHost = syncHost,
-                        pending = pending.filter { it.section == BIBLE_SECTION_CHARACTER },
+                        // 3.26.58：三个视图看到的是同一份待同意列表——入口计数与抽屉内容不再按视图分。
+                        pending = pending,
                         resolve = resolve,
                         synced = synced,
                         readOnly = readOnly,
@@ -3005,7 +3011,7 @@ private fun StoryNavBody(
                         onBible = onBible,
                         onOpenChapter = onOpenChapter,
                         syncHost = syncHost,
-                        pending = pending.filter { it.section == BIBLE_SECTION_TIMELINE },
+                        pending = pending,
                         resolve = resolve,
                         synced = synced,
                         readOnly = readOnly,
@@ -3014,7 +3020,7 @@ private fun StoryNavBody(
                         book = book,
                         onBible = onBible,
                         syncHost = syncHost,
-                        pending = pending.filter { it.section == BIBLE_SECTION_OUTLINE },
+                        pending = pending,
                         resolve = resolve,
                         synced = synced,
                         readOnly = readOnly,
@@ -3025,85 +3031,178 @@ private fun StoryNavBody(
     }
 }
 
-// ───────────────────────── 同意卡（两页共用） ─────────────────────────
+// ───────────────────────── 待同意抽屉（两页共用 · 3.26.58） ─────────────────────────
 //
 // 3.26.48：AI 页不再是「另一套 pane」——角色 / 时间线 / 大纲三页各只有**一个** composable
 // （[CharacterPane] / [TimelinePane] / [OutlinePane]），我的页与 AI 页用同一段代码、同一个
 // [StoryPageScaffold]，只用 `readOnly` 换行为（唯一允许的差异：点开是编辑还是只读详情）。
-// 这一节只剩两页共用的一块：待同意的 AI 改动差异卡（[PendingChangeCard]）。
+//
+// 3.26.58：AI 想改的条目不再逐张铺在页面上（3.26.57 是页面顶上 28% 高的卡区，用户仍读作
+// 「都堆一起」），统一收进底部抽屉 [StoryPendingDrawer]：页面只留 footer 里一行「待同意 · N」，
+// 抽屉里**一条一行**，点行展开字段级差异（[PendingChangeDetail]）。
+// 差异的呈现只有这一份、落库仍只有 [storyResolveChange]/`resolveChange` 一条路径。
+
+/** 待同意一行的类型图标：角色 / 关系 / 事件 / 大纲。 */
+private fun pendingKindGlyph(change: StoryPendingChange): Glyph = when (change.kind) {
+    "character" -> Glyph.Note
+    "relation" -> Glyph.Link
+    "event" -> Glyph.Clock
+    "outline" -> Glyph.List
+    // 老侧车缺 kind 时回落到它归属的视图，至少不给出错误类型。
+    else -> when (change.section) {
+        BIBLE_SECTION_TIMELINE -> Glyph.Clock
+        BIBLE_SECTION_OUTLINE -> Glyph.List
+        else -> Glyph.Note
+    }
+}
+
+/** 一条一行的字段摘要：旧 → 新，压成一行（值里的换行换成空格，空值写「空」）。 */
+private fun pendingFieldSummary(change: StoryPendingChange): String {
+    fun oneLine(s: String) = s.replace('\n', ' ').replace('\r', ' ').trim().ifBlank { "空" }
+    return "${change.field}：${oneLine(change.before)} → ${oneLine(change.after)}"
+}
 
 /**
- * 同意机制的差异卡：谁、改哪个字段、原文 → 新文，按钮「同意 / 拒绝」。
+ * 字段级差异：改「哪个字段」+ 原文（划掉）→ 新文。
  *
- * 3.26.45：从底部挤出、来去都有动画，弹簧用用户点名的 `spring(.6f, 380f)`。
- * 点按钮先让卡片滑出去，退场完再真的同意/拒绝（`MutableTransitionState` 空闲后再落库）。
+ * 3.26.58 从旧 `PendingChangeCard` 原样抽出：抽屉行的展开态直接复用这一段，
+ * 差异的呈现全项目只有这一份。
  */
 @Composable
-private fun PendingChangeCard(
+private fun PendingChangeDetail(change: StoryPendingChange) {
+    val ui = LocalInk.current
+    Txt("改「${change.field}」", size = 10.5f, color = ui.palette.muted)
+    Spacer(Modifier.height(10.dp))
+    Txt("原", size = 9.5f, color = ui.palette.muted)
+    Spacer(Modifier.height(2.dp))
+    Txt(
+        change.before,
+        size = 12f,
+        color = ui.palette.muted,
+        lineHeight = 18f,
+        decoration = TextDecoration.LineThrough,
+    )
+    Spacer(Modifier.height(8.dp))
+    Txt("新", size = 9.5f, color = ui.palette.muted)
+    Spacer(Modifier.height(2.dp))
+    Txt(change.after, size = 12.5f, lineHeight = 19f)
+}
+
+/** 抽屉行右侧的小胶囊按钮（同意 / 拒绝）：纸色调底、按下跟手；同意用点缀色。 */
+@Composable
+private fun PendingRowAction(
+    label: String,
+    primary: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    val ui = LocalInk.current
+    Box(
+        Modifier
+            .clip(CircleShape)
+            .background(if (primary) accentTint(ui.palette, ui.accent) else dockTone(ui))
+            .bouncy(enabled = enabled) { onClick() }
+            .padding(horizontal = 11.dp, vertical = 6.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Txt(
+            label,
+            size = 11f,
+            color = if (primary) ui.accent else ui.palette.muted,
+            weight = FontWeight.Medium,
+            maxLines = 1,
+        )
+    }
+}
+
+/**
+ * 待同意抽屉里的一条（3.26.58，一条一行）。
+ *
+ * 收起态 = 类型图标 + 名称 + 字段摘要（旧 → 新，单行截断）+ 右侧「拒绝 / 同意」；
+ * 点左侧这一行展开字段级差异（[PendingChangeDetail]），再点收起。
+ *
+ * 动效：点同意/拒绝先让这一行淡出（`MutableTransitionState` 空闲后）再落库——与旧差异卡
+ * 「先退场再同意」同一条规则；行真的从列表里消失时，下面的行由 `animateItem` 的落位弹簧补上。
+ * `motion = none` 时全部 tween(0)。
+ */
+@Composable
+private fun PendingChangeRow(
     change: StoryPendingChange,
     resolve: (StoryPendingChange, Boolean) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val ui = LocalInk.current
     val motion = ui.settings.motion != "none"
     val vt = remember { MutableTransitionState(false).apply { targetState = true } }
     var decision by remember { mutableStateOf<Boolean?>(null) }
+    var expanded by remember { mutableStateOf(false) }
     AnimatedVisibility(
         visibleState = vt,
-        enter = if (motion) {
-            slideInVertically(spring(dampingRatio = .6f, stiffness = 380f)) { it } + fadeIn(tween(140))
-        } else {
-            slideInVertically(tween(0)) { it } + fadeIn(tween(0))
-        },
-        exit = if (motion) {
-            slideOutVertically(spring(dampingRatio = .6f, stiffness = 380f)) { it } + fadeOut(tween(120))
-        } else {
-            slideOutVertically(tween(0)) { it } + fadeOut(tween(0))
-        },
+        modifier = modifier,
+        enter = fadeIn(if (motion) tween(140) else tween(0)),
+        exit = fadeOut(if (motion) tween(120) else tween(0)),
     ) {
-        MoyuSurface(Modifier.fillMaxWidth(), radius = 18f, flat = true) {
-            Column(Modifier.fillMaxWidth().padding(14.dp)) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Txt(
-                        change.who,
-                        size = 14f,
-                        weight = FontWeight.Medium,
-                        modifier = Modifier.weight(1f),
-                    )
-                    LineIcon(Glyph.Sparkles, ui.accent, 13.dp)
-                    Spacer(Modifier.width(4.dp))
-                    Txt("AI 想改", size = 10.5f, color = ui.accent, weight = FontWeight.Medium)
+        Column(Modifier.fillMaxWidth()) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 7.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Row(
+                    Modifier
+                        .weight(1f)
+                        .clip(SmoothCorner(10.dp))
+                        .bouncy(enabled = decision == null) { expanded = !expanded },
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(
+                        Modifier.size(24.dp).clip(CircleShape).background(dockTone(ui)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        LineIcon(pendingKindGlyph(change), ui.palette.muted, 13.dp, 1.6f)
+                    }
+                    Spacer(Modifier.width(9.dp))
+                    Column(Modifier.weight(1f)) {
+                        Txt(
+                            change.title,
+                            size = 12.5f,
+                            weight = FontWeight.Medium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Spacer(Modifier.height(2.dp))
+                        Txt(
+                            pendingFieldSummary(change),
+                            size = 10.5f,
+                            color = ui.palette.muted,
+                            lineHeight = 15f,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
-                Spacer(Modifier.height(3.dp))
-                Txt("改「${change.field}」", size = 10.5f, color = ui.palette.muted)
-                Spacer(Modifier.height(10.dp))
-                Txt("原", size = 9.5f, color = ui.palette.muted)
-                Spacer(Modifier.height(2.dp))
-                Txt(
-                    change.before,
-                    size = 12f,
-                    color = ui.palette.muted,
-                    lineHeight = 18f,
-                    decoration = TextDecoration.LineThrough,
-                )
-                Spacer(Modifier.height(8.dp))
-                Txt("新", size = 9.5f, color = ui.palette.muted)
-                Spacer(Modifier.height(2.dp))
-                Txt(change.after, size = 12.5f, lineHeight = 19f)
-                Spacer(Modifier.height(12.dp))
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-                    GlassButton("拒绝", {
+                Spacer(Modifier.width(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    val locked = decision != null
+                    PendingRowAction("拒绝", primary = false, enabled = !locked) {
                         if (decision == null) {
                             decision = false
                             vt.targetState = false
                         }
-                    }, Modifier.weight(1f))
-                    PrimaryButton("同意", {
+                    }
+                    PendingRowAction("同意", primary = true, enabled = !locked) {
                         if (decision == null) {
                             decision = true
                             vt.targetState = false
                         }
-                    }, Modifier.weight(1f))
+                    }
                 }
+            }
+            MoyuExpand(expand = expanded) {
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(start = 39.dp, end = 10.dp, bottom = 12.dp),
+                ) { PendingChangeDetail(change) }
             }
         }
     }
@@ -3112,6 +3211,74 @@ private fun PendingChangeCard(
             decision?.let { resolve(change, it) }
         }
     }
+}
+
+/**
+ * 「待同意 AI 改动」抽屉（3.26.58）。
+ *
+ * 入口：故事页 footer 的「待同意 · N」行（只在有待同意时出现，见 [StoryPageFooter]）。
+ * 抽屉里：顶部「待同意 N 处改动」+「全部同意」+ 关闭；下面一条一行（[PendingChangeRow]）。
+ * 行右侧同意/拒绝后该行移除、计数减一；全部处理完（pending 空）抽屉自己收起。
+ *
+ * 进出场复用 [ModalSheet]（滑入 + 遮罩淡入，退场播完才回调 onDismiss）；
+ * 行移除后的落位用 `animateItem`（见 [storyPlacementSpec]）——`motion = none` 全 tween(0)。
+ */
+@Composable
+private fun StoryPendingDrawer(
+    pending: List<StoryPendingChange>,
+    resolve: (StoryPendingChange, Boolean) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val ui = LocalInk.current
+    val itemSpec = storyPlacementSpec()
+    ModalSheet(
+        onDismiss = onDismiss,
+        closeableContent = { close ->
+            // 处理完最后一条 = 没有待同意了：抽屉自己收起（走 ModalSheet 的退场，不硬卸）。
+            LaunchedEffect(pending.size) { if (pending.isEmpty()) close() }
+            // 收起过程中 pending 已经空了：标题留最后一个非零数，不在滑出的那一帧闪「0 处」。
+            var shownCount by remember { mutableIntStateOf(pending.size) }
+            LaunchedEffect(pending.size) { if (pending.isNotEmpty()) shownCount = pending.size }
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Txt(
+                    "待同意 $shownCount 处改动",
+                    size = 17f,
+                    weight = FontWeight.Medium,
+                    maxLines = 1,
+                    modifier = Modifier.weight(1f),
+                )
+                Box(
+                    Modifier
+                        .clip(CircleShape)
+                        .background(accentTint(ui.palette, ui.accent))
+                        .bouncy { pending.toList().forEach { resolve(it, true) } }
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    contentAlignment = Alignment.Center,
+                ) { Txt("全部同意", size = 11.5f, color = ui.accent, weight = FontWeight.Medium) }
+                Spacer(Modifier.width(2.dp))
+                Box(
+                    Modifier.size(30.dp).clip(CircleShape).bouncy { close() },
+                    contentAlignment = Alignment.Center,
+                ) { LineIcon(Glyph.Close, ui.palette.muted, 15.dp, 1.8f) }
+            }
+            Spacer(Modifier.height(8.dp))
+            // 抽屉面板本身可滚（ModalSheet 内容槽），这里给列表一个上限，长列表在抽屉内自己滚。
+            LazyColumn(Modifier.fillMaxWidth().heightIn(max = 380.dp)) {
+                items(pending, key = { it.id }) { change ->
+                    PendingChangeRow(
+                        change = change,
+                        resolve = resolve,
+                        modifier = Modifier.animateItem(
+                            fadeInSpec = null,
+                            placementSpec = itemSpec,
+                            fadeOutSpec = null,
+                        ),
+                    )
+                }
+            }
+            Spacer(Modifier.height(4.dp))
+        },
+    )
 }
 
 // ───────────────────────── 同步 AI 内容到我的 + 一步撤销 ─────────────────────────
@@ -3228,18 +3395,16 @@ private fun LazyListScope.emptyPage(glyph: Glyph, title: String, message: String
 }
 
 /**
- * 两页共用的页面骨架（3.26.48；3.26.57 待同意卡移出列表）。
+ * 两页共用的页面骨架（3.26.48；3.26.58 待同意卡改成底部抽屉）。
  *
  * 结构固定成三层，任何一页都不许自己再拼：
- * ① **待同意差异卡区**——在滚动列表**上方**独立成区（3.26.57）：高度上限 = 内容区高度 × .28，
- *    卡多时卡区内部自己滚，不再把下面的内容顶下去（旧版卡片和正文在同一个 [LazyColumn] 里、
- *    卡片排在前面，一两张 180–260dp 的卡就把关系图顶出首屏）；
- * ② 可滚动内容区（[BoxWithConstraints] 给关系图算高度，两页同一个「30% 夹 150–240dp」规则；
+ * ① 可滚动内容区（[BoxWithConstraints] 给关系图算高度，两页同一个「30% 夹 150–240dp」规则；
  *    关系图是该列表的**第一个 item**，所以永远在首屏）；
- * ③ 底部：已同步结果行（有同步时才长出来）+ 主按钮（见 [StoryPageFooter]）。
+ * ② 底部：待同意入口行（有待同意时才长出来）+ 已同步结果行 + 主按钮（见 [StoryPageFooter]）；
+ * ③ 待同意抽屉 [StoryPendingDrawer]——点②的入口才出现，页面本身不再铺任何卡。
  *
- * 卡区动效（3.26.57）：每张 [PendingChangeCard] 自带 spring(.6f, 380f) 滑入/滑出，卡区高度
- * 交给 `animateContentSize` 跟着同一根弹簧走；`motion = none` 时两者都是 `tween(0)`。
+ * 3.26.57 的「页面顶上 28% 卡区 + 卡区内部滚」整个撤掉：卡一多那一段竖拖是死区、一次操作后
+ * 下面的卡瞬时上移（用户原话「都堆一起，太乱」）。收进抽屉后页面只剩一行入口。
  */
 @Composable
 private fun StoryPageScaffold(
@@ -3251,99 +3416,85 @@ private fun StoryPageScaffold(
     onPrimary: () -> Unit,
     content: LazyListScope.(graphHeight: Dp) -> Unit,
 ) {
-    val ui = LocalInk.current
-    val motion = ui.settings.motion != "none"
+    // 抽屉开关住在骨架里——三个视图 / 两个宿主（故事面板 + 悬浮故事页）共用这一份。
+    var drawer by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize()) {
         BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
             val graphH = (maxHeight * .30f).coerceIn(150.dp, 240.dp)
-            // 3.26.57：卡区最多吃掉内容区的 28%，超出的卡在卡区内部滚——关系图因此永远在首屏。
-            val cardAreaMax = maxHeight * .28f
-            val cardAreaSpec: FiniteAnimationSpec<IntSize> =
-                if (motion) spring(dampingRatio = .6f, stiffness = 380f) else tween(0)
-            Column(Modifier.fillMaxSize()) {
-                // 待同意差异卡：列表上方独立卡区（自己的滚动 + 自己的高度上限）。
-                // 不在这里再做一层 AnimatedVisibility——显隐由每张卡自带的进场/退场负责；
-                // 卡区高度用 animateContentSize 跟着弹簧长/收，保留旧版「落位」的弹簧手感。
-                Column(
-                    Modifier
-                        .fillMaxWidth()
-                        .clipToBounds()
-                        .animateContentSize(animationSpec = cardAreaSpec),
-                ) {
-                    if (pending.isNotEmpty()) {
-                        Column(
-                            Modifier
-                                .fillMaxWidth()
-                                .heightIn(max = cardAreaMax)
-                                .verticalScroll(rememberScrollState()),
-                            verticalArrangement = Arrangement.spacedBy(10.dp),
-                        ) {
-                            pending.forEach { change ->
-                                // 与旧版 `items(key = …)` 同样的身份 key：前面一张同意后，
-                                // 后面的卡保住自己的 vt / decision 状态，不会串状态自动落库。
-                                key("p_" + change.id) { PendingChangeCard(change, resolve) }
-                            }
-                        }
-                        // 与列表的间距沿用旧 LazyColumn 的 verticalArrangement（10dp）。
-                        Spacer(Modifier.height(10.dp))
-                    }
-                }
-                LazyColumn(
-                    Modifier.weight(1f).fillMaxWidth(),
-                    contentPadding = PaddingValues(bottom = 10.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    content(graphH)
-                }
+            LazyColumn(
+                Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(bottom = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                content(graphH)
             }
         }
         Spacer(Modifier.height(8.dp))
-        StoryPageFooter(syncHost, primaryLabel, primaryGlyph, onPrimary)
+        StoryPageFooter(
+            syncHost = syncHost,
+            pendingCount = pending.size,
+            onOpenPending = { drawer = true },
+            primaryLabel = primaryLabel,
+            primaryGlyph = primaryGlyph,
+            onPrimary = onPrimary,
+        )
+    }
+    if (drawer) {
+        StoryPendingDrawer(
+            pending = pending,
+            resolve = resolve,
+            onDismiss = { drawer = false },
+        )
     }
 }
 
 /**
- * 两页共用的底部（3.26.48）。
+ * 两页共用的底部（3.26.48；3.26.58 加「待同意 · N」入口行）。
  *
  * 旧版两页的底部不是同一份：我的页 = Spacer(8) + 主按钮；AI 页 = Spacer(8) +「已同步 N 条」行
  * + **无条件** Spacer(8) + 主按钮——没同步时按钮就比我的页高 8dp。现在只有一份：
- * 已同步行（含它自己的 8dp 尾距）整块进出，主按钮位置在「有 / 没有已同步行」两种状态下
- * 都由同一段代码决定。
+ * 两行状态（待同意 / 已同步，有哪行算哪行，各行含自己的 8dp 尾距）整块进出，
+ * 主按钮位置在「有 / 没有状态行」的任意组合下都由同一段代码决定。
  */
 @Composable
 private fun StoryPageFooter(
     syncHost: StorySyncHost,
+    pendingCount: Int,
+    onOpenPending: () -> Unit,
     primaryLabel: String,
     primaryGlyph: Glyph,
     onPrimary: () -> Unit,
 ) {
     val ui = LocalInk.current
     val motion = ui.settings.motion != "none"
+    // 两行状态共用同一套进出场：同一根 spring + 淡入淡出；motion=none → tween(0)。
+    val enter: EnterTransition = if (motion) {
+        slideInVertically(spring(dampingRatio = .6f, stiffness = 380f)) { it } + fadeIn(tween(140))
+    } else {
+        slideInVertically(tween(0)) { it } + fadeIn(tween(0))
+    }
+    val exit: ExitTransition = if (motion) {
+        slideOutVertically(spring(dampingRatio = .6f, stiffness = 380f)) { it } + fadeOut(tween(120))
+    } else {
+        slideOutVertically(tween(0)) { it } + fadeOut(tween(0))
+    }
     Column(Modifier.fillMaxWidth()) {
-        AnimatedVisibility(
-            visible = syncHost.pager.synced > 0,
-            enter = if (motion) {
-                slideInVertically(spring(dampingRatio = .6f, stiffness = 380f)) { it } + fadeIn(tween(140))
-            } else {
-                slideInVertically(tween(0)) { it } + fadeIn(tween(0))
-            },
-            exit = if (motion) {
-                slideOutVertically(spring(dampingRatio = .6f, stiffness = 380f)) { it } + fadeOut(tween(120))
-            } else {
-                slideOutVertically(tween(0)) { it } + fadeOut(tween(0))
-            },
-        ) {
+        // 3.26.58：AI 想改的条目只在 footer 露一行入口，点开才是抽屉——页面不再堆卡。
+        AnimatedVisibility(visible = pendingCount > 0, enter = enter, exit = exit) {
             Column(Modifier.fillMaxWidth()) {
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .clip(SmoothCorner(14.dp))
-                        .background(dockTone(ui))
-                        .padding(horizontal = 14.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                StoryFooterRow(
+                    text = "待同意 · $pendingCount",
+                    leading = Glyph.Sparkles,
+                    onClick = onOpenPending,
                 ) {
-                    Txt("已同步 ${syncHost.pager.synced} 条到「我的」", size = 11f, color = ui.palette.muted)
-                    Spacer(Modifier.weight(1f))
+                    LineIcon(Glyph.Chevron, ui.palette.muted, 13.dp)
+                }
+                Spacer(Modifier.height(8.dp))
+            }
+        }
+        AnimatedVisibility(visible = syncHost.pager.synced > 0, enter = enter, exit = exit) {
+            Column(Modifier.fillMaxWidth()) {
+                StoryFooterRow(text = "已同步 ${syncHost.pager.synced} 条到「我的」") {
                     Box(
                         Modifier
                             .size(26.dp)
@@ -3356,6 +3507,43 @@ private fun StoryPageFooter(
             }
         }
         PrimaryButton(primaryLabel, onPrimary, Modifier.fillMaxWidth(), glyph = primaryGlyph)
+    }
+}
+
+/**
+ * 底部状态行（待同意 / 已同步共用）：同一圆角、底色、行高与左右内边距，只有右侧小操作不同。
+ * `onClick = null` 时整行不可点（只有 [trailing] 里的按钮可点）。
+ */
+@Composable
+private fun StoryFooterRow(
+    text: String,
+    leading: Glyph? = null,
+    onClick: (() -> Unit)? = null,
+    trailing: @Composable () -> Unit,
+) {
+    val ui = LocalInk.current
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(SmoothCorner(14.dp))
+            .background(dockTone(ui))
+            .then(if (onClick != null) Modifier.bouncy { onClick() } else Modifier)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (leading != null) {
+            LineIcon(leading, ui.accent, 12.dp)
+            Spacer(Modifier.width(6.dp))
+        }
+        Txt(
+            text,
+            size = 11f,
+            color = ui.palette.muted,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        trailing()
     }
 }
 
@@ -3544,7 +3732,7 @@ private fun storyPageTransform(motion: Boolean, forward: Boolean): ContentTransf
     return slideInHorizontally(spec) { it * dir } togetherWith slideOutHorizontally(spec) { -it * dir }
 }
 
-/** LazyColumn 里的落位弹簧（3.26.57：待同意卡搬出列表后，现用于同步预览 / 按大纲建章这类列表）。 */
+/** LazyColumn 里的落位弹簧（3.26.58：待同意抽屉行、同步预览、按大纲建章这类列表共用）。 */
 @Composable
 private fun storyPlacementSpec(): FiniteAnimationSpec<IntOffset> {
     val motion = LocalInk.current.settings.motion != "none"
