@@ -61,6 +61,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.platform.LocalConfiguration
@@ -515,7 +516,7 @@ private fun NotePickRow(note: Note, checked: Boolean, onToggle: (Boolean) -> Uni
                         scaleY = s
                     }
                 ) {
-                    LineIcon(Glyph.Check, if (p.isDark) p.bgTop else Color.White, 14.dp)
+                    LineIcon(Glyph.Check, lerp(Color.White, p.bgTop, p.darkAmount), 14.dp)
                 }
             }
         }
@@ -1233,7 +1234,7 @@ private fun RowScope.PanelAction(label: String, primary: Boolean, onClick: () ->
         Txt(
             label,
             size = 11f,
-            color = if (primary) (if (p.isDark) p.paper else Color.White) else p.ink,
+            color = if (primary) lerp(Color.White, p.paper, p.darkAmount) else p.ink,
             weight = FontWeight.Medium,
         )
     }

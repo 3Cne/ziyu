@@ -54,6 +54,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
@@ -562,11 +563,7 @@ private fun RowScope.ProofAction(label: String, primary: Boolean, onClick: () ->
         Txt(
             label,
             size = 12f,
-            color = if (primary) {
-                if (p.isDark) p.paper else Color.White
-            } else {
-                p.ink
-            },
+            color = if (primary) lerp(Color.White, p.paper, p.darkAmount) else p.ink,
             weight = FontWeight.Medium,
         )
     }
