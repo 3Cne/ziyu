@@ -625,6 +625,138 @@ fun AiScreen(
                         }
                     )
                 }
+                AiPendingKind.ChapterSplit -> {
+                    val b = store.books.firstOrNull { it.id == p.bookId.ifBlank { book.id } }
+                    val c = b?.chapters?.firstOrNull { it.id == p.chapterId }
+                    if (b == null || c == null) return@forEach
+                    val o = JSONObject(p.payload.ifBlank { "{}" })
+                    val before = o.optString("before")
+                    val at = o.optInt("at", 0)
+                    val cut = when {
+                        before.isNotBlank() -> c.content.indexOf(before)
+                        at > 0 -> AiTools.lineStartAt(c.content, at)
+                        else -> -1
+                    }
+                    if (cut <= 0 || cut >= c.content.length) {
+                        ToastBus.show("拆分点没找到，这一章没动")
+                        return@forEach
+                    }
+                    val head = c.content.substring(0, cut).trimEnd()
+                    val tail = c.content.substring(cut).trimStart()
+                    if (head.isBlank() || tail.isBlank()) {
+                        ToastBus.show("拆出来有一半是空的，没动")
+                        return@forEach
+                    }
+                    if (!ChapterHistory.record(ctx, c.id, c.content)) {
+                        ToastBus.show("没能留底，这次不拆")
+                        return@forEach
+                    }
+                    store.updateBook(b.id) { bb ->
+                        val list = bb.chapters.toMutableList()
+                        val i = list.indexOfFirst { it.id == c.id }
+                        if (i < 0) bb else {
+                            list[i] = list[i].copy(content = head, updatedAt = System.currentTimeMillis())
+                            list.add(
+                                i + 1,
+                                Chapter(title = p.text.ifBlank { c.title + "（下）" }, content = tail),
+                            )
+                            bb.copy(chapters = list)
+                        }
+                    }
+                }
+                AiPendingKind.ChapterMerge -> {
+                    val b = store.books.firstOrNull { it.id == p.bookId.ifBlank { book.id } }
+                    if (b == null) return@forEach
+                    val a = b.chapters.firstOrNull { it.id == p.chapterId } ?: return@forEach
+                    val z = b.chapters.firstOrNull { it.id == p.text } ?: return@forEach
+                    if (b.chapters.indexOf(z) != b.chapters.indexOf(a) + 1) return@forEach
+                    if (!ChapterHistory.record(ctx, a.id, a.content) ||
+                        !ChapterHistory.record(ctx, z.id, z.content)
+                    ) {
+                        ToastBus.show("没能留底，这次不合并")
+                        return@forEach
+                    }
+                    val merged =
+                        if (a.content.isBlank()) z.content
+                        else a.content.trimEnd() + "\n\n" + z.content.trimStart()
+                    // 笔记：后章 id → 前章 id（笔记上存的是 chapterIds 列表）。
+                    store.notes.filter { z.id in it.chapterIds }.forEach { n ->
+                        store.updateNote(n.id) { nn ->
+                            nn.copy(
+                                chapterIds = nn.chapterIds
+                                    .map { if (it == z.id) a.id else it }
+                                    .distinct(),
+                            )
+                        }
+                    }
+                    // 圣经：事件改挂前章；后章的大纲节点并进前章节点，然后删掉。
+                    val bible = b.bible
+                    val events = bible.events.map { e ->
+                        if (z.id in e.chapterIds) {
+                            e.copy(
+                                chapterIds = e.chapterIds
+                                    .map { if (it == z.id) a.id else it }
+                                    .distinct(),
+                            )
+                        } else e
+                    }
+                    val aNode = bible.outline.firstOrNull { it.chapterId == a.id }
+                    val zNode = bible.outline.firstOrNull { it.chapterId == z.id }
+                    val outline = when {
+                        zNode == null -> bible.outline
+                        aNode == null -> bible.outline.map {
+                            if (it.id == zNode.id) it.copy(chapterId = a.id) else it
+                        }
+                        else -> bible.outline
+                            .filterNot { it.id == zNode.id }
+                            .map { if (it.id == aNode.id) it.copy(beats = it.beats + zNode.beats) else it }
+                    }
+                    store.updateBible(b.id, bible.copy(events = events, outline = outline))
+                    store.updateBook(b.id) { bb ->
+                        val list = bb.chapters.toMutableList()
+                        val i = list.indexOfFirst { it.id == a.id }
+                        if (i < 0) bb else {
+                            list[i] = list[i].copy(
+                                content = merged,
+                                noteIds = (list[i].noteIds + z.noteIds).distinct(),
+                                folderIds = (list[i].folderIds + z.folderIds).distinct(),
+                                updatedAt = System.currentTimeMillis(),
+                            )
+                            list.removeAll { it.id == z.id }
+                            bb.copy(chapters = list)
+                        }
+                    }
+                }
+                AiPendingKind.ChapterMove -> {
+                    val to = p.text.toIntOrNull() ?: return@forEach
+                    store.updateBook(p.bookId.ifBlank { book.id }) { bb ->
+                        val list = bb.chapters.toMutableList()
+                        val i = list.indexOfFirst { it.id == p.chapterId }
+                        if (i < 0) bb else {
+                            val c = list.removeAt(i)
+                            list.add((to - 1).coerceIn(0, list.size), c)
+                            bb.copy(chapters = list)
+                        }
+                    }
+                }
+                AiPendingKind.ChapterFromOutline -> {
+                    val b = store.books.firstOrNull { it.id == p.bookId.ifBlank { book.id } }
+                        ?: return@forEach
+                    val loose = b.bible.outline.filter { n -> b.chapters.none { it.id == n.chapterId } }
+                    if (loose.isEmpty()) return@forEach
+                    var list = b.chapters
+                    var outline = b.bible.outline
+                    loose.forEach { n ->
+                        val ch = Chapter(
+                            title = n.title.ifBlank { chapterFallbackTitle(list.size) },
+                            content = "",
+                        )
+                        list = list + ch
+                        outline = outline.map { if (it.id == n.id) it.copy(chapterId = ch.id) else it }
+                    }
+                    store.updateBook(b.id) { it.copy(chapters = list) }
+                    store.updateBible(b.id, b.bible.copy(outline = outline))
+                }
                 AiPendingKind.ChapterRestore -> {
                     val body = ChapterHistory.read(ctx, p.chapterId, p.text.toLongOrNull() ?: 0L)
                     val target = store.books.firstOrNull { it.id == p.bookId.ifBlank { book.id } }
@@ -1462,7 +1594,7 @@ fun AiScreen(
                 streamText = cleanReply(
                     text.ifBlank {
                         if (queue.isNotEmpty()) {
-                            "这次有 " + queue.size + " 处删除或覆盖，等你在下面确认。"
+                            "这次有 " + queue.size + " 处改动需要你确认。"
                         } else {
                             "模型这次没给出内容（工具往返 " + rounds + " 轮）。再发一次，或换个说法。"
                         }
@@ -1771,12 +1903,28 @@ fun AiScreen(
 
     if (confirmDanger) {
         val restoring = pending.any { it.kind == AiPendingKind.Restore }
+        // 3.26.31：拆/合不是删除，别用「真的要删」这套话吓人。
+        val structural = pending.any {
+            it.kind == AiPendingKind.ChapterSplit || it.kind == AiPendingKind.ChapterMerge
+        }
         ConfirmDialog(
-            title = if (restoring) "真的要恢复？" else "真的要删？",
+            title = when {
+                restoring -> "真的要恢复？"
+                structural -> "要改结构吗？"
+                else -> "真的要删？"
+            },
             message = pending.filter { it.danger }.joinToString("\n") { "· " + it.label } +
-                if (restoring) "\n\n当前全部数据会被这份备份覆盖，无法撤销。" else "\n\n删除后无法恢复。",
-            confirmLabel = if (restoring) "恢复" else "删除",
-            destructive = true,
+                when {
+                    restoring -> "\n\n当前全部数据会被这份备份覆盖，无法撤销。"
+                    structural -> "\n\n目录与正文都会变；动手前会留一份快照。"
+                    else -> "\n\n删除后无法恢复。"
+                },
+            confirmLabel = when {
+                restoring -> "恢复"
+                structural -> "照做"
+                else -> "删除"
+            },
+            destructive = !structural,
             onConfirm = {
                 confirmDanger = false
                 val danger = pending

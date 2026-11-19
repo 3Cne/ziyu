@@ -15,6 +15,8 @@ enum class AiPendingKind {
     Export, Backup, Import, Reminder, Goal, Restore,
     /** 3.26.29：把一章恢复成某个历史版本。 */
     ChapterRestore,
+    /** 3.26.31：结构手术——拆章 / 合章 / 移章 / 按大纲建章。 */
+    ChapterSplit, ChapterMerge, ChapterMove, ChapterFromOutline,
 }
 
 /** A change the model proposed. Nothing is written until the writer accepts it. */
@@ -106,6 +108,7 @@ object AiTools {
         "export_item", "backup_now", "import_attachment",
         "set_reminder", "set_daily_goal", "restore_backup",
         "write_story_bible", "undo_bible_change",
+        "split_chapter", "merge_chapters", "move_chapter", "chapters_from_outline",
     )
 
     /** 询问档下只排补丁、当场不落地的三个工具。 */
@@ -163,7 +166,11 @@ object AiTools {
       {"type":"function","function":{"name":"undo_bible_change","description":"撤销最近一次 AI 对故事圣经的改动（含章节保存后的自动整理）","parameters":{"type":"object","properties":{"book":{"type":"string"}}}}},
       {"type":"function","function":{"name":"list_chapter_history","description":"列出一章的历史版本：时间与字数。改坏了可以用它找回来","parameters":{"type":"object","properties":{"title":{"type":"string","description":"章节标题"},"book":{"type":"string","description":"书名，不填=当前书"}},"required":["title"]}}},
       {"type":"function","function":{"name":"read_chapter_history","description":"读某一章的某个历史版本（最多 6000 字）","parameters":{"type":"object","properties":{"title":{"type":"string"},"at":{"type":"string","description":"list_chapter_history 返回的时间戳"},"book":{"type":"string"}},"required":["title","at"]}}},
-      {"type":"function","function":{"name":"restore_chapter_history","description":"把某一章恢复成某个历史版本；要等作者确认（询问档出确认卡，自动档直接恢复）","parameters":{"type":"object","properties":{"title":{"type":"string"},"at":{"type":"string","description":"时间戳"},"book":{"type":"string"}},"required":["title","at"]}}}
+      {"type":"function","function":{"name":"restore_chapter_history","description":"把某一章恢复成某个历史版本；要等作者确认（询问档出确认卡，自动档直接恢复）","parameters":{"type":"object","properties":{"title":{"type":"string"},"at":{"type":"string","description":"时间戳"},"book":{"type":"string"}},"required":["title","at"]}}},
+      {"type":"function","function":{"name":"split_chapter","description":"把一章从断点拆成两章：前半保留原章，后半新建一章。断点给 before（一段原文）或 at（第几段，1 起）","parameters":{"type":"object","properties":{"title":{"type":"string"},"before":{"type":"string","description":"在这一句原文前面断开"},"at":{"type":"integer","description":"在第几段前面断开，1 起"},"new_title":{"type":"string","description":"后半的新章名，不填=原名（下）"},"book":{"type":"string","description":"书名，不填=当前书"}},"required":["title"]}}},
+      {"type":"function","function":{"name":"merge_chapters","description":"把相邻的两章合成一章，保留前一章的章名与 id；笔记、事件、大纲会跟着指到前一章","parameters":{"type":"object","properties":{"first":{"type":"string"},"second":{"type":"string"},"book":{"type":"string"}},"required":["first","second"]}}},
+      {"type":"function","function":{"name":"move_chapter","description":"把一章挪到目录里的第 N 位（1 起）","parameters":{"type":"object","properties":{"title":{"type":"string"},"to":{"type":"integer","description":"目标位次，1 起"},"book":{"type":"string"}},"required":["title","to"]}}},
+      {"type":"function","function":{"name":"chapters_from_outline","description":"按故事圣经的大纲，把还没落地的节点各建一章（标题用节点标题，正文空）","parameters":{"type":"object","properties":{"book":{"type":"string"}}}}}
     ]
     """.trimIndent()
 
@@ -220,6 +227,10 @@ object AiTools {
         "list_chapter_history" -> "列历史"
         "read_chapter_history" -> "读历史"
         "restore_chapter_history" -> "恢复历史"
+        "split_chapter" -> "拆章"
+        "merge_chapters" -> "合章"
+        "move_chapter" -> "移章"
+        "chapters_from_outline" -> "建章"
         else -> name
     }
 
@@ -1215,6 +1226,93 @@ object AiTools {
             }
         }
 
+        "split_chapter" -> {
+            val b = findBook(store, args.optString("book")) ?: book
+            val c = findChapter(b, args.optString("title"))
+            val before = args.optString("before").trim()
+            val at = args.optInt("at", 0)
+            when {
+                c == null -> "没有叫「" + args.optString("title") + "」的章节"
+                before.isBlank() && at <= 0 -> "要给出断点：before=一段原文，或 at=第几段（1 起）"
+                else -> {
+                    pending += AiPending(
+                        label = "把「" + c.title + "」拆成两章",
+                        kind = AiPendingKind.ChapterSplit,
+                        chapterId = c.id,
+                        bookId = b.id,
+                        text = args.optString("new_title").trim(),
+                        payload = JSONObject().put("before", before).put("at", at).toString(),
+                        danger = true,
+                    )
+                    "已排好：把「" + c.title + "」拆成两章，等作者确认"
+                }
+            }
+        }
+
+        "merge_chapters" -> {
+            val b = findBook(store, args.optString("book")) ?: book
+            val a = findChapter(b, args.optString("first"))
+            val z = findChapter(b, args.optString("second"))
+            when {
+                a == null || z == null -> "有一章找不到：「" +
+                    (if (a == null) args.optString("first") else args.optString("second")) + "」"
+                a.id == z.id -> "不能把一章和自己合并"
+                else -> {
+                    val i = b.chapters.indexOfFirst { it.id == a.id }
+                    val j = b.chapters.indexOfFirst { it.id == z.id }
+                    if (j != i + 1) {
+                        "「" + a.title + "」和「" + z.title + "」不相邻（中间隔了别的章），先把它们挪到一起"
+                    } else {
+                        pending += AiPending(
+                            label = "把「" + a.title + "」和「" + z.title + "」合成一章",
+                            kind = AiPendingKind.ChapterMerge,
+                            chapterId = a.id,
+                            bookId = b.id,
+                            text = z.id,
+                            danger = true,
+                        )
+                        "已排好：把「" + a.title + "」和「" + z.title + "」合成一章，等作者确认"
+                    }
+                }
+            }
+        }
+
+        "move_chapter" -> {
+            val b = findBook(store, args.optString("book")) ?: book
+            val c = findChapter(b, args.optString("title"))
+            val to = args.optInt("to", 0)
+            when {
+                c == null -> "没有叫「" + args.optString("title") + "」的章节"
+                to <= 0 -> "to 是目标位次，1 起"
+                to > b.chapters.size -> "这本书只有 " + b.chapters.size + " 章，挪不到第 " + to + " 位"
+                else -> {
+                    pending += AiPending(
+                        label = "把「" + c.title + "」挪到第 " + to + " 位",
+                        kind = AiPendingKind.ChapterMove,
+                        chapterId = c.id,
+                        bookId = b.id,
+                        text = to.toString(),
+                    )
+                    "已排好：把「" + c.title + "」挪到第 " + to + " 位"
+                }
+            }
+        }
+
+        "chapters_from_outline" -> {
+            val b = findBook(store, args.optString("book")) ?: book
+            val loose = b.bible.outline.count { n -> b.chapters.none { it.id == n.chapterId } }
+            if (loose == 0) {
+                "大纲里的章节都已经落地了"
+            } else {
+                pending += AiPending(
+                    label = "按大纲建 " + loose + " 章",
+                    kind = AiPendingKind.ChapterFromOutline,
+                    bookId = b.id,
+                )
+                "已排好：按大纲建 " + loose + " 章，等作者确认"
+            }
+        }
+
         else -> "没有这个工具"
         }
         // 询问档：正文改动只是排成补丁，别让模型回「已写入」。
@@ -1223,6 +1321,23 @@ object AiTools {
         } else {
             out
         }
+    }
+
+    /** 第 n 个非空行的起始下标（拆章断点用）；越界返回 -1。 */
+    fun lineStartAt(content: String, n: Int): Int {
+        if (n <= 0) return -1
+        var seen = 0
+        var i = 0
+        while (i < content.length) {
+            val nl = content.indexOf('\n', i)
+            val end = if (nl < 0) content.length else nl
+            if (content.substring(i, end).isNotBlank()) {
+                seen++
+                if (seen == n) return i
+            }
+            i = end + 1
+        }
+        return -1
     }
 
     private fun stamp(ts: Long): String =
