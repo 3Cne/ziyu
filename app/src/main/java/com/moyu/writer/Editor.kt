@@ -2187,8 +2187,10 @@ fun WritingScreen(
                 ) {
                     androidx.compose.animation.AnimatedVisibility(
                         visible = aiMenuOpen,
-                        enter = fadeIn(tween(1)),
-                        exit = fadeOut(tween(1)),
+                        // 共享元素的 bounds 弹簧要靠这段过渡当载体：1ms 的话会把过渡一帧结束、
+                        // 直接落位（用户实测「动画直接没了」）。给它 240ms 的窗口。
+                        enter = fadeIn(tween(240)),
+                        exit = fadeOut(tween(240)),
                     ) {
                         AiDockMenu(
                             tone = dockTone(ui),
@@ -2198,7 +2200,7 @@ fun WritingScreen(
                                     .offset {
                                         IntOffset(
                                             0,
-                                            -dockHeightPx + with(densityNow) { 4.dp.roundToPx() },
+                                            -dockHeightPx + with(densityNow) { 14.dp.roundToPx() },
                                         )
                                     }
                                     .sharedBounds(
@@ -5181,6 +5183,8 @@ private fun EditorDock(
                                     } else {
                                         androidx.compose.animation.AnimatedVisibility(
                                             visible = !aiOpen,
+                                            enter = fadeIn(tween(240)),
+                                            exit = fadeOut(tween(240)),
                                         ) {
                                             AiDockCell(
                                                 open = aiOpen,
