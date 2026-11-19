@@ -18,8 +18,14 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas as ComposeCanvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -571,54 +577,72 @@ fun ExportSheet(
             modifier = Modifier.padding(horizontal = 3.dp),
         )
         Spacer(Modifier.height(19.dp))
-        if (result == null) {
-            PrimaryButton(
-                if (busy) "正在生成…" else "导出到下载",
-                {
-                    if (busy) return@PrimaryButton
-                    busy = true
-                    scope.launch {
-                        runCatching { exportBook(context, book, format, synopsis) }
-                            .onSuccess {
-                                result = it
-                                ToastBus.show("已导出到 ${it.location}")
-                            }
-                            .onFailure {
-                                ToastBus.show("导出失败：${it.message ?: "未知错误"}")
-                            }
-                        busy = false
-                    }
-                },
-                Modifier.fillMaxWidth(),
-                glyph = Glyph.Export,
-                enabled = !busy,
-            )
-        } else {
-            val r = result!!
-            MoyuSurface(Modifier.fillMaxWidth(), radius = 22f, flat = true) {
-                Column(Modifier.padding(16.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            Modifier.size(34.dp).clip(CircleShape).background(Color(0xFFDDF1E4)),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            LineIcon(Glyph.Check, Color(0xFF226B43), 18.dp, 2f)
+        // 3.26.48：导出完成态原来是 if/else 同帧换内容，卡片硬切。
+        // 改成 AnimatedContent：完成卡淡入 + 从 98% 放大落位，旧按钮 140ms 淡出；
+        // 换格式时 result 清空，反向退回按钮。数值沿用 3.26.47 书架排布切换那一组，
+        // motion=none 全降成 tween(0) 直接落终态。
+        val motion = ui.settings.motion != "none"
+        AnimatedContent(
+            targetState = result,
+            transitionSpec = {
+                if (motion) {
+                    (fadeIn(tween(200)) + scaleIn(initialScale = .98f)) togetherWith fadeOut(tween(140))
+                } else {
+                    (fadeIn(tween(0)) + scaleIn(initialScale = .98f, animationSpec = tween(0))) togetherWith
+                        fadeOut(tween(0))
+                }
+            },
+            label = "exportResult",
+        ) { done ->
+            if (done == null) {
+                PrimaryButton(
+                    if (busy) "正在生成…" else "导出到下载",
+                    {
+                        if (busy) return@PrimaryButton
+                        busy = true
+                        scope.launch {
+                            runCatching { exportBook(context, book, format, synopsis) }
+                                .onSuccess {
+                                    result = it
+                                    ToastBus.show("已导出到 ${it.location}")
+                                }
+                                .onFailure {
+                                    ToastBus.show("导出失败：${it.message ?: "未知错误"}")
+                                }
+                            busy = false
                         }
-                        Spacer(Modifier.width(10.dp))
-                        Column(Modifier.weight(1f)) {
-                            Txt("导出完成", size = 13.5f, weight = FontWeight.Medium)
-                            Txt(r.fileName, size = 9.5f, color = ui.palette.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    },
+                    Modifier.fillMaxWidth(),
+                    glyph = Glyph.Export,
+                    enabled = !busy,
+                )
+            } else {
+                val r = done
+                MoyuSurface(Modifier.fillMaxWidth(), radius = 22f, flat = true) {
+                    Column(Modifier.padding(16.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                Modifier.size(34.dp).clip(CircleShape).background(Color(0xFFDDF1E4)),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                LineIcon(Glyph.Check, Color(0xFF226B43), 18.dp, 2f)
+                            }
+                            Spacer(Modifier.width(10.dp))
+                            Column(Modifier.weight(1f)) {
+                                Txt("导出完成", size = 13.5f, weight = FontWeight.Medium)
+                                Txt(r.fileName, size = 9.5f, color = ui.palette.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
                         }
-                    }
-                    Spacer(Modifier.height(11.dp))
-                    Txt(r.location, size = 9f, color = ui.palette.muted, lineHeight = 14f)
-                    Spacer(Modifier.height(10.dp))
-                    SaveAsButton(r)
-                    Spacer(Modifier.height(8.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        GlassButton("打开", { openExport(context, r) }, Modifier.weight(1f), glyph = Glyph.Book)
-                        GlassButton("分享", { shareExport(context, r) }, Modifier.weight(1f), glyph = Glyph.Share)
-                        GlassButton("完成", close, Modifier.weight(1f))
+                        Spacer(Modifier.height(11.dp))
+                        Txt(r.location, size = 9f, color = ui.palette.muted, lineHeight = 14f)
+                        Spacer(Modifier.height(10.dp))
+                        SaveAsButton(r)
+                        Spacer(Modifier.height(8.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            GlassButton("打开", { openExport(context, r) }, Modifier.weight(1f), glyph = Glyph.Book)
+                            GlassButton("分享", { shareExport(context, r) }, Modifier.weight(1f), glyph = Glyph.Share)
+                            GlassButton("完成", close, Modifier.weight(1f))
+                        }
                     }
                 }
             }
@@ -675,7 +699,9 @@ fun NoteExportSheet(
     var format by remember { mutableStateOf("txt") }
     var busy by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<ExportResult?>(null) }
-    val body: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit = {
+    // 3.26.48：body 带上 close——非 embedded 时走 ModalSheet 的 close()（先播退场、空闲后才
+    // 回调 onDismiss），「完成」按钮不再直接调外层 onDismiss 把面板当帧卸掉。
+    val body: @Composable androidx.compose.foundation.layout.ColumnScope.(close: () -> Unit) -> Unit = { close ->
         Spacer(Modifier.height(16.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
             FormatCard("TXT", "纯文本 · 最通用", Glyph.Note, format == "txt", Modifier.weight(1f)) {
@@ -689,38 +715,54 @@ fun NoteExportSheet(
             }
         }
         Spacer(Modifier.height(16.dp))
-        if (result == null) {
-            PrimaryButton(
-                if (busy) "正在生成…" else "导出到下载",
-                {
-                    if (busy) return@PrimaryButton
-                    busy = true
-                    scope.launch {
-                        runCatching { exportNote(context, note, format) }
-                            .onSuccess { result = it; ToastBus.show("已导出到 ${it.location}") }
-                            .onFailure { ToastBus.show("导出失败：${it.message ?: "未知错误"}") }
-                        busy = false
-                    }
-                },
-                Modifier.fillMaxWidth(),
-                glyph = Glyph.Export,
-                enabled = !busy,
-            )
-        } else {
-            val r = result!!
-            MoyuSurface(Modifier.fillMaxWidth(), radius = 22f, flat = true) {
-                Column(Modifier.padding(16.dp)) {
-                    Txt("导出完成", size = 13.5f, weight = FontWeight.Medium)
-                    Txt(r.fileName, size = 9.5f, color = ui.palette.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Spacer(Modifier.height(9.dp))
-                    Txt(r.location, size = 9f, color = ui.palette.muted, lineHeight = 14f)
-                    Spacer(Modifier.height(10.dp))
-                    SaveAsButton(r)
-                    Spacer(Modifier.height(8.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        GlassButton("打开", { openExport(context, r) }, Modifier.weight(1f), glyph = Glyph.Note)
-                        GlassButton("分享", { shareExport(context, r) }, Modifier.weight(1f), glyph = Glyph.Share)
-                        GlassButton("完成", onDismiss, Modifier.weight(1f))
+        // 3.26.48：导出完成态与书的导出一致——完成卡淡入 + 98% 放大落位，旧按钮 140ms 淡出；
+        // motion=none 降成 tween(0) 直接落终态。
+        val motion = ui.settings.motion != "none"
+        AnimatedContent(
+            targetState = result,
+            transitionSpec = {
+                if (motion) {
+                    (fadeIn(tween(200)) + scaleIn(initialScale = .98f)) togetherWith fadeOut(tween(140))
+                } else {
+                    (fadeIn(tween(0)) + scaleIn(initialScale = .98f, animationSpec = tween(0))) togetherWith
+                        fadeOut(tween(0))
+                }
+            },
+            label = "noteExportResult",
+        ) { done ->
+            if (done == null) {
+                PrimaryButton(
+                    if (busy) "正在生成…" else "导出到下载",
+                    {
+                        if (busy) return@PrimaryButton
+                        busy = true
+                        scope.launch {
+                            runCatching { exportNote(context, note, format) }
+                                .onSuccess { result = it; ToastBus.show("已导出到 ${it.location}") }
+                                .onFailure { ToastBus.show("导出失败：${it.message ?: "未知错误"}") }
+                            busy = false
+                        }
+                    },
+                    Modifier.fillMaxWidth(),
+                    glyph = Glyph.Export,
+                    enabled = !busy,
+                )
+            } else {
+                val r = done
+                MoyuSurface(Modifier.fillMaxWidth(), radius = 22f, flat = true) {
+                    Column(Modifier.padding(16.dp)) {
+                        Txt("导出完成", size = 13.5f, weight = FontWeight.Medium)
+                        Txt(r.fileName, size = 9.5f, color = ui.palette.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Spacer(Modifier.height(9.dp))
+                        Txt(r.location, size = 9f, color = ui.palette.muted, lineHeight = 14f)
+                        Spacer(Modifier.height(10.dp))
+                        SaveAsButton(r)
+                        Spacer(Modifier.height(8.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            GlassButton("打开", { openExport(context, r) }, Modifier.weight(1f), glyph = Glyph.Note)
+                            GlassButton("分享", { shareExport(context, r) }, Modifier.weight(1f), glyph = Glyph.Share)
+                            GlassButton("完成", close, Modifier.weight(1f))
+                        }
                     }
                 }
             }
@@ -730,13 +772,15 @@ fun NoteExportSheet(
     if (embedded) {
         Column(Modifier.fillMaxWidth()) {
             SheetPageHeader("导出笔记", "正文和待办会一起写进文件。", onBack ?: onDismiss)
-            body()
+            // embedded 时外层 InlineModalSheet 已有退场，传它的 onDismiss 即可（与 ExportSheet 同一写法）。
+            body(onDismiss)
         }
     } else {
-        ModalSheet(onDismiss) {
-            DialogTitle("导出笔记", "正文和待办会一起写进文件。", onClose = onDismiss)
-            body()
-        }
+        // 3.26.48：X 与「完成」都走 ModalSheet 的 close，不再直接调外层 onDismiss。
+        ModalSheet(onDismiss, closeableContent = { close ->
+            DialogTitle("导出笔记", "正文和待办会一起写进文件。", onClose = close)
+            body(close)
+        })
     }
 }
 

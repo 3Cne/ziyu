@@ -278,8 +278,10 @@ fun GroupPickerSheet(
             body()
         }
     } else {
-        InlineModalSheet(onDismiss) { _ ->
-            DialogTitle("移动到分组", subtitle, onClose = onDismiss)
+        // 3.26.48：面板右上角 X 走框架的 close()（先播滑出、等退出动画空闲后才回调 onDismiss），
+        // 不再直接调外层 onDismiss 把面板当帧卸掉、退场被跳过（与 3.26.47 其它面板同一写法）。
+        InlineModalSheet(onDismiss) { close ->
+            DialogTitle("移动到分组", subtitle, onClose = close)
             Spacer(Modifier.height(12.dp))
             body()
         }

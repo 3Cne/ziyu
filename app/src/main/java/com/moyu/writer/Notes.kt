@@ -126,14 +126,18 @@ fun NotesScreen(
                     onClick = { onOpenFolder(null) },
                 )
             }
-            lazyItems(folders) { folder ->
-                FolderRow(
-                    name = folder.name,
-                    count = countOf(folder.id),
-                    colorDot = folder.color,
-                    onClick = { onOpenFolder(folder.id) },
-                    onMore = { menuFolder = folder },
-                )
+            // 3.26.48：笔记夹行加 key + animateItem——上移/下移、增删时整行弹簧落到新位置，
+            // 不再同帧重排（与夹内笔记卡同一套）。
+            lazyItems(folders, key = { it.id }) { folder ->
+                Box(Modifier.animateItem()) {
+                    FolderRow(
+                        name = folder.name,
+                        count = countOf(folder.id),
+                        colorDot = folder.color,
+                        onClick = { onOpenFolder(folder.id) },
+                        onMore = { menuFolder = folder },
+                    )
+                }
             }
             item {
                 Spacer(Modifier.height(4.dp))
@@ -172,12 +176,15 @@ fun NotesScreen(
         // 不再「关一个 ModalSheet、再开另一个」。
         var level by remember(folder.id) { mutableIntStateOf(0) }
         var pending by remember(folder.id) { mutableStateOf<(() -> Unit)?>(null) }
+        // 3.26.48：bleedContent = true —— 内容槽不再加两侧 20dp 的「内窗口」留白，
+        // 整幅横移能滑到面板本体边缘（治用户报了两次的「横滑时两道纸色边」）；
+        // 每页自己用 SHEET_CONTENT_INSET 补回静止边距，纸底仍铺满整宽。
         InlineModalSheet(onDismiss = {
             menuFolder = null
             val action = pending
             pending = null
             action?.invoke()
-        }) { close ->
+        }, bleedContent = true) { close ->
             AnimatedContent(
                 targetState = level,
                 transitionSpec = {
@@ -195,7 +202,7 @@ fun NotesScreen(
             ) { step ->
                 if (step == 0) {
                     SheetPane {
-                        Column(Modifier.fillMaxWidth()) {
+                        Column(Modifier.fillMaxWidth().padding(horizontal = SHEET_CONTENT_INSET)) {
                             DialogTitle(folder.name, "${countOf(folder.id)} 条笔记", onClose = { close() })
                             Spacer(Modifier.height(12.dp))
                             SettingRow("重命名", "改名和颜色", Glyph.Edit, onClick = { level = 1 })
@@ -213,18 +220,20 @@ fun NotesScreen(
                     }
                 } else {
                     SheetPane {
-                        FolderEditSheet(
-                            title = "编辑笔记夹",
-                            initialName = folder.name,
-                            initialColor = folder.color,
-                            onDismiss = { close() },
-                            onSave = { name, color ->
-                                store.updateGroup(GroupKind.NOTE, folder.id) { it.copy(name = name, color = color) }
-                                close()
-                            },
-                            embedded = true,
-                            onBack = { level = 0 },
-                        )
+                        Column(Modifier.fillMaxWidth().padding(horizontal = SHEET_CONTENT_INSET)) {
+                            FolderEditSheet(
+                                title = "编辑笔记夹",
+                                initialName = folder.name,
+                                initialColor = folder.color,
+                                onDismiss = { close() },
+                                onSave = { name, color ->
+                                    store.updateGroup(GroupKind.NOTE, folder.id) { it.copy(name = name, color = color) }
+                                    close()
+                                },
+                                embedded = true,
+                                onBack = { level = 0 },
+                            )
+                        }
                     }
                 }
             }
@@ -425,68 +434,88 @@ fun NoteFolderScreen(
 
     Box(Modifier.fillMaxSize()) {
         AmbientBackground()
-        LazyVerticalGrid(
-            columns = GridCells.Fixed(if (noteMode == "grid") 2 else 1),
+        // 3.26.48：列表↔两列、筛选空态↔列表都走同一段 AnimatedContent。
+        // 目标状态 = (排布, 是否空)：只在这两者变化时重放；两个「非空」筛选之间切换不重放
+        // （网格里每张卡的 animateItem 自己负责落位），两套容器共用同一份 filtered。
+        // 数值沿用 3.26.47 书架排布切换：新内容淡入 + 从 98% 放大落位，旧内容 140ms 淡出；
+        // motion=none 全降成 tween(0) 直接落终态。滚动位置不要求跨排布/空态保留。
+        val motion = ui.settings.motion != "none"
+        AnimatedContent(
+            targetState = noteMode to filtered.isEmpty(),
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(start = 20.dp, top = 0.dp, end = 20.dp, bottom = 130.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            item(span = { GridItemSpan(maxLineSpan) }) {
-                Column(Modifier.fillMaxWidth().statusBarsPadding().padding(top = 14.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            Modifier
-                                .size(38.dp)
-                                .clip(CircleShape)
-                                .bouncy { onBack() },
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            LineIcon(Glyph.Back, p.ink, 21.dp)
-                        }
-                        Spacer(Modifier.width(6.dp))
-                        Column(Modifier.weight(1f)) {
-                            Txt(
-                                folderName,
-                                size = 26f,
-                                weight = FontWeight.SemiBold,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            Txt("${inFolder.size} 条笔记", size = 10f, color = p.muted)
-                        }
-                        GlassIconButton(Glyph.List, { controlsOpen = true })
-                        Spacer(Modifier.width(6.dp))
-                        GlassIconButton(Glyph.Plus, { create() })
-                    }
-                    Spacer(Modifier.height(16.dp))
+            transitionSpec = {
+                if (motion) {
+                    (fadeIn(tween(200)) + scaleIn(initialScale = .98f)) togetherWith fadeOut(tween(140))
+                } else {
+                    (fadeIn(tween(0)) + scaleIn(initialScale = .98f, animationSpec = tween(0))) togetherWith
+                        fadeOut(tween(0))
                 }
-            }
-            if (filtered.isEmpty()) {
+            },
+            label = "noteLayout",
+        ) { (mode, empty) ->
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(if (mode == "grid") 2 else 1),
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(start = 20.dp, top = 0.dp, end = 20.dp, bottom = 130.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
                 item(span = { GridItemSpan(maxLineSpan) }) {
-                    EmptyState(
-                        if (filter == "待办" || filter == "提醒") Glyph.Check else Glyph.Note,
-                        when (filter) {
-                            "待办" -> "没有未完成的待办"
-                            "提醒" -> "还没有设定提醒"
-                            "置顶" -> "没有置顶笔记"
-                            else -> "这个笔记夹还是空的"
-                        },
-                        when (filter) {
-                            "待办", "提醒" -> "在笔记里加一条待办，选一个提醒时间。"
-                            else -> "点右上角 +，随手记下一句话。正文、符号栏和工具栏和写小说时一样。"
-                        },
-                    )
+                    Column(Modifier.fillMaxWidth().statusBarsPadding().padding(top = 14.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                Modifier
+                                    .size(38.dp)
+                                    .clip(CircleShape)
+                                    .bouncy { onBack() },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                LineIcon(Glyph.Back, p.ink, 21.dp)
+                            }
+                            Spacer(Modifier.width(6.dp))
+                            Column(Modifier.weight(1f)) {
+                                Txt(
+                                    folderName,
+                                    size = 26f,
+                                    weight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Txt("${inFolder.size} 条笔记", size = 10f, color = p.muted)
+                            }
+                            GlassIconButton(Glyph.List, { controlsOpen = true })
+                            Spacer(Modifier.width(6.dp))
+                            GlassIconButton(Glyph.Plus, { create() })
+                        }
+                        Spacer(Modifier.height(16.dp))
+                    }
                 }
-            } else {
-                gridItems(filtered, key = { it.id }) { note ->
-                    Box(Modifier.animateItem()) {
-                        NoteCard(
-                            note = note,
-                            chapterBadge = noteChapterBadge(store, note),
-                            onClick = { _ -> onOpenNote(note.id) },
-                            onMore = { menuNote = note },
+                if (empty) {
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        EmptyState(
+                            if (filter == "待办" || filter == "提醒") Glyph.Check else Glyph.Note,
+                            when (filter) {
+                                "待办" -> "没有未完成的待办"
+                                "提醒" -> "还没有设定提醒"
+                                "置顶" -> "没有置顶笔记"
+                                else -> "这个笔记夹还是空的"
+                            },
+                            when (filter) {
+                                "待办", "提醒" -> "在笔记里加一条待办，选一个提醒时间。"
+                                else -> "点右上角 +，随手记下一句话。正文、符号栏和工具栏和写小说时一样。"
+                            },
                         )
+                    }
+                } else {
+                    gridItems(filtered, key = { it.id }) { note ->
+                        Box(Modifier.animateItem()) {
+                            NoteCard(
+                                note = note,
+                                chapterBadge = noteChapterBadge(store, note),
+                                onClick = { _ -> onOpenNote(note.id) },
+                                onMore = { menuNote = note },
+                            )
+                        }
                     }
                 }
             }
@@ -499,12 +528,14 @@ fun NoteFolderScreen(
         // 横向弹簧切换；关闭时再执行删除（居中 Dialog）。
         var level by remember(note.id) { mutableIntStateOf(0) }
         var pending by remember(note.id) { mutableStateOf<(() -> Unit)?>(null) }
+        // 3.26.48：这层同样是整幅横移（3 页），传 bleedContent = true 让页面滑到面板本体边缘；
+        // 每页内容自己补 SHEET_CONTENT_INSET（见下面三个 SheetPane 内的 padding）。
         InlineModalSheet(onDismiss = {
             menuNote = null
             val action = pending
             pending = null
             action?.invoke()
-        }) { close ->
+        }, bleedContent = true) { close ->
             AnimatedContent(
                 targetState = level,
                 transitionSpec = {
@@ -521,48 +552,54 @@ fun NoteFolderScreen(
             ) { step ->
                 when (step) {
                     0 -> SheetPane {
-                        DialogTitle(note.title, "${formatWords(note.words)} 字 · ${relativeTime(note.updatedAt)}", onClose = { close() })
-                        Spacer(Modifier.height(13.dp))
-                        SettingRow("打开笔记", "继续写正文", Glyph.Edit, onClick = {
-                            pending = { onOpenNote(note.id) }
-                            close()
-                        })
-                        RowDivider()
-                        SettingRow("固定到顶部", if (note.pinned) "已固定" else "按更新时间排序", Glyph.Pin, trailing = {
-                            InkToggle(note.pinned) { on -> store.updateNote(note.id) { it.copy(pinned = on) } }
-                        })
-                        RowDivider()
-                        SettingRow(
-                            "移动到笔记夹",
-                            store.noteGroups.firstOrNull { it.id == note.groupId }?.name ?: "未归类",
-                            Glyph.Folder,
-                            onClick = { level = 1 },
-                        )
-                        RowDivider()
-                        SettingRow("导出笔记", "TXT / Markdown / JSON", Glyph.Export, onClick = { level = 2 })
-                        RowDivider()
-                        SettingRow("删除笔记", "正文和待办会一并删除", Glyph.Trash, onClick = {
-                            pending = { deleteNote = note }
-                            close()
-                        })
+                        Column(Modifier.fillMaxWidth().padding(horizontal = SHEET_CONTENT_INSET)) {
+                            DialogTitle(note.title, "${formatWords(note.words)} 字 · ${relativeTime(note.updatedAt)}", onClose = { close() })
+                            Spacer(Modifier.height(13.dp))
+                            SettingRow("打开笔记", "继续写正文", Glyph.Edit, onClick = {
+                                pending = { onOpenNote(note.id) }
+                                close()
+                            })
+                            RowDivider()
+                            SettingRow("固定到顶部", if (note.pinned) "已固定" else "按更新时间排序", Glyph.Pin, trailing = {
+                                InkToggle(note.pinned) { on -> store.updateNote(note.id) { it.copy(pinned = on) } }
+                            })
+                            RowDivider()
+                            SettingRow(
+                                "移动到笔记夹",
+                                store.noteGroups.firstOrNull { it.id == note.groupId }?.name ?: "未归类",
+                                Glyph.Folder,
+                                onClick = { level = 1 },
+                            )
+                            RowDivider()
+                            SettingRow("导出笔记", "TXT / Markdown / JSON", Glyph.Export, onClick = { level = 2 })
+                            RowDivider()
+                            SettingRow("删除笔记", "正文和待办会一并删除", Glyph.Trash, onClick = {
+                                pending = { deleteNote = note }
+                                close()
+                            })
+                        }
                     }
                     1 -> SheetPane {
-                        NoteFolderPickerSheet(
-                            current = note.groupId,
-                            store = store,
-                            onSelect = { group -> store.setNoteGroup(note.id, group) },
-                            onDismiss = { close() },
-                            embedded = true,
-                            onBack = { level = 0 },
-                        )
+                        Column(Modifier.fillMaxWidth().padding(horizontal = SHEET_CONTENT_INSET)) {
+                            NoteFolderPickerSheet(
+                                current = note.groupId,
+                                store = store,
+                                onSelect = { group -> store.setNoteGroup(note.id, group) },
+                                onDismiss = { close() },
+                                embedded = true,
+                                onBack = { level = 0 },
+                            )
+                        }
                     }
                     else -> SheetPane {
-                        NoteExportSheet(
-                            note = note,
-                            onDismiss = { close() },
-                            embedded = true,
-                            onBack = { level = 0 },
-                        )
+                        Column(Modifier.fillMaxWidth().padding(horizontal = SHEET_CONTENT_INSET)) {
+                            NoteExportSheet(
+                                note = note,
+                                onDismiss = { close() },
+                                embedded = true,
+                                onBack = { level = 0 },
+                            )
+                        }
                     }
                 }
             }

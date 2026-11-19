@@ -1707,7 +1707,11 @@ fun GlassDialog(
     modifier: Modifier = Modifier,
     dismissOnOutsideClick: Boolean = true,
     performanceMode: Boolean = false,
-    content: @Composable ColumnScope.() -> Unit,
+    /** 3.26.48：内容需要框架的 `close()` 时用这个（取消/保存/删除按钮先播退场、idle 后才回调 onDismiss）。
+     *  与 [ModalSheet] 同一套写法：不写成同名 `content` 重载——两个重载都吃尾随 lambda 时
+     *  `GlassDialog(onDismiss) { }` 会解析歧义，把现有调用点全部弄坏。 */
+    closeableContent: (@Composable ColumnScope.(close: () -> Unit) -> Unit)? = null,
+    content: (@Composable ColumnScope.() -> Unit)? = null,
 ) {
     val ui = LocalInk.current
     // 3.26.47：补退场。宿主一律是 `if (flag) GlassDialog(...)`，onDismiss 一调宿主当帧就把整窗卸掉，
@@ -1785,8 +1789,17 @@ fun GlassDialog(
                                     .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {}
                                     .verticalScroll(rememberScrollState())
                                     .padding(22.dp),
-                                content = content,
-                            )
+                            ) {
+                                // 3.26.48：带 close 的调用点走窗口自己的 close()（退场播完、idle 后才回调
+                                // onDismiss）；旧调用点仍然只走 content()，行为零变化。
+                                val withClose = closeableContent
+                                val plain = content
+                                if (withClose != null) {
+                                    withClose(this, { close() })
+                                } else {
+                                    plain?.invoke(this)
+                                }
+                            }
                         }
                     }
                 }
@@ -1913,30 +1926,44 @@ fun ConfirmDialog(
     destructive: Boolean = false,
 ) {
     val ui = LocalInk.current
-    GlassDialog(onDismiss) {
-        DialogTitle(title)
-        Spacer(Modifier.height(12.dp))
-        Txt(message, size = 12.5f, color = ui.palette.muted, lineHeight = 20f)
-        Spacer(Modifier.height(22.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-            GlassButton("取消", onDismiss, Modifier.weight(1f))
-            Box(Modifier.weight(1f)) {
-                if (destructive) {
-                    Box(
-                        Modifier
-                            .fillMaxWidth()
-                            .height(50.dp)
-                            .clip(SmoothCorner(999.dp))
-                            .background(Color(0xFFB3453D))
-                            .bouncy { onConfirm() },
-                        contentAlignment = Alignment.Center,
-                    ) { Txt(confirmLabel, size = 14f, color = Color.White, weight = FontWeight.Medium) }
-                } else {
-                    PrimaryButton(confirmLabel, { onConfirm() }, Modifier.fillMaxWidth())
+    // 3.26.48：取消/确认都先走 GlassDialog 的 close()——先播退场、窗口 idle 后才回调 onDismiss。
+    // 以前按钮直接调外层 onDismiss/onConfirm，宿主 if(flag) 当帧就把对话框卸掉，3.26.47 补的退场被跳过。
+    // 确认路径不能丢动作：记一个 pending 标记，退场结束后在 GlassDialog 的 onDismiss 里执行。
+    var confirmRequested by remember { mutableStateOf(false) }
+    GlassDialog(
+        onDismiss = {
+            if (confirmRequested) {
+                confirmRequested = false
+                onConfirm()
+            } else {
+                onDismiss()
+            }
+        },
+        closeableContent = { close ->
+            DialogTitle(title)
+            Spacer(Modifier.height(12.dp))
+            Txt(message, size = 12.5f, color = ui.palette.muted, lineHeight = 20f)
+            Spacer(Modifier.height(22.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                GlassButton("取消", close, Modifier.weight(1f))
+                Box(Modifier.weight(1f)) {
+                    if (destructive) {
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .height(50.dp)
+                                .clip(SmoothCorner(999.dp))
+                                .background(Color(0xFFB3453D))
+                                .bouncy { confirmRequested = true; close() },
+                            contentAlignment = Alignment.Center,
+                        ) { Txt(confirmLabel, size = 14f, color = Color.White, weight = FontWeight.Medium) }
+                    } else {
+                        PrimaryButton(confirmLabel, { confirmRequested = true; close() }, Modifier.fillMaxWidth())
+                    }
                 }
             }
-        }
-    }
+        },
+    )
 }
 
 /**
@@ -2269,6 +2296,10 @@ val MorphKeyboard = listOf(
 fun ModalSheet(
     onDismiss: () -> Unit,
     imeAware: Boolean = false,
+    /** true = 内容槽不加横向留白（默认见 `SHEET_CONTENT_INSET`），由内容自己补回。
+     *  语义同 [InlineModalSheet]：整幅横移的内容（如悬浮故事页的逐页横滑）滑到页边时，
+     *  不会被内容槽的 20dp 内窗口切出两道纸色竖边。默认 false = 老调用点零变化。 */
+    bleedContent: Boolean = false,
     /** 3.26.47：内容需要框架的 `close()`（先播退场、idle 后才回调 onDismiss）时用这个。
      *  面板右上角 X 以前直接调外层 `onDismiss`，宿主 `if(flag)` 当帧就把面板卸掉、退场被跳过；
      *  改成内容拿 close 后由面板自己关。
@@ -2375,7 +2406,10 @@ fun ModalSheet(
                             .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {}
                             .navigationBarsPadding()
                             .verticalScroll(rememberScrollState())
-                            .padding(horizontal = 20.dp)
+                            .then(
+                                if (bleedContent) Modifier
+                                else Modifier.padding(horizontal = SHEET_CONTENT_INSET),
+                            )
                             .padding(top = 10.dp, bottom = 24.dp),
                     ) {
                         Box(
