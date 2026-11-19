@@ -1530,6 +1530,7 @@ private fun AboutPage(store: AppStore, onBack: () -> Unit) {
                         store.updateSettings {
                             it.copy(tutorialDone = emptyList(), onboardingDone = false)
                         }
+                        TutorialSignal.bump()
                     },
                 )
                 RowDivider()
