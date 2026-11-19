@@ -105,10 +105,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
-import androidx.compose.animation.ExperimentalSharedTransitionApi
-import androidx.compose.animation.SharedTransitionLayout
-import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -172,9 +168,6 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.window.Popup
-import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.input.pointer.pointerInput
@@ -390,7 +383,6 @@ private fun SelectionOverlay(
 }
 
 @Composable
-@OptIn(ExperimentalSharedTransitionApi::class)
 fun WritingScreen(
     seedKey: String,
     heading: String,
@@ -663,16 +655,6 @@ fun WritingScreen(
     var askRange by remember { mutableStateOf(0 to 0) }
     var askExpanded by remember { mutableStateOf(false) }
     var askSeq by remember { mutableIntStateOf(0) }
-
-    // 3.26.34 AI 竖排菜单：状态在页面层，菜单画在能力栏上方的页面层。
-    // 不用 Popup 的独立窗口——那一层会把「第二次点 AI」的点击吃掉（用户实测关不掉）。
-    var aiMenuOpen by remember { mutableStateOf(false) }
-    // 选区一消失菜单就没意义了；能力栏收起时也一样，不能留一块悬在栏上方。
-    LaunchedEffect(body.selection, abilityT.value < .5f) {
-        if (body.selection.start == body.selection.end || abilityT.value < .5f) {
-            aiMenuOpen = false
-        }
-    }
 
     fun startProof() {
         val a = min(body.selection.start, body.selection.end).coerceIn(0, body.text.length)
@@ -1040,18 +1022,16 @@ fun WritingScreen(
             return
         }
         val ed = bodyEditor
-        // 写进正文的是纯文字：回答里的 **粗体** / 列表标记不能留在稿子里。
-        val paste = mdPlain(turn.text).ifBlank { turn.text }
         if (ed != null) {
-            ed.replaceKeepingViewport(a, b, paste)
+            ed.replaceKeepingViewport(a, b, turn.text)
         } else {
             pushUndo()
-            body = body.copy(text = src.replaceRange(a, b, paste))
+            body = body.copy(text = src.replaceRange(a, b, turn.text))
         }
-        askPreview = paste
-        askRange = a to (a + paste.length)
+        askPreview = turn.text
+        askRange = a to (a + turn.text.length)
         askTurns = askTurns.map { if (it.id == turn.id) it.copy(applied = true) else it }
-        ToastBus.show("已替换选中 ${paste.length} 字，可以撤销")
+        ToastBus.show("已替换选中 ${turn.text.length} 字，可以撤销")
     }
 
     /** 3.26.23：修饰模式下一键采纳本章所有卡片（逐条走 acceptProof，位置判定与撤销都沿用）。 */
@@ -1994,12 +1974,6 @@ fun WritingScreen(
                     // bitmap instead of freezing the dock on its first frame.
                     .onGloballyPositioned { dockHeightPx = it.size.height }
             ) {
-                // 3.26.35：AI 菜单改成官方共享元素。共享元素的两端（AI 图标格 ↔ 菜单）
-                // 必须同处一个 SharedTransitionLayout，所以把能力栏与菜单一起包进来；
-                // 内层再套一个 Box，让球与菜单继续用 BoxScope 的 align / matchParentSize。
-                SharedTransitionLayout(Modifier.fillMaxWidth()) {
-                val stScope: SharedTransitionScope = this
-                Box(Modifier.fillMaxWidth()) {
                 Box(
                     Modifier.fillMaxWidth()
                         // 收起后整块缩成左下角的球；原区域不保留吞触摸的层，
@@ -2133,9 +2107,6 @@ fun WritingScreen(
                     onProof = { startProof() },
                     onPolish = { startPolish() },
                     onAsk = { startAsk() },
-                    aiOpen = aiMenuOpen,
-                    onAiToggle = { aiMenuOpen = !aiMenuOpen },
-                    dockCollapsed = abilityT.value < .5f,
                     backdrop = editorBodyBackdrop,
                     epoch = bodyScrollTick.intValue,
                     scrollTick = bodyScrollTick,
@@ -2178,52 +2149,6 @@ fun WritingScreen(
                         modifier = Modifier.size(18.dp),
                         color = p.ink,
                     )
-                }
-                // 3.26.35：菜单是共享元素的「进入端」。始终挂载（matchParentSize 不参与测量，
-                // 不会抬高能力栏），显隐交给 AnimatedVisibility —— 退出动画能跑完再消失。
-                Box(
-                    Modifier.matchParentSize(),
-                    contentAlignment = Alignment.BottomStart,
-                ) {
-                    androidx.compose.animation.AnimatedVisibility(
-                        visible = aiMenuOpen,
-                        // 共享元素的 bounds 弹簧要靠这段过渡当载体：1ms 的话会把过渡一帧结束、
-                        // 直接落位（用户实测「动画直接没了」）。给它 240ms 的窗口。
-                        enter = fadeIn(tween(240)),
-                        exit = fadeOut(tween(240)),
-                    ) {
-                        // 用布局内 padding 抬高，不用 offset：offset 不影响 lookahead 的 bounds，
-                        // 共享元素会以为菜单还在原处，插值起点错误 → 看起来一帧跳过去。
-                        Box(Modifier.padding(bottom = with(densityNow) { dockHeightPx.toDp() } - 14.dp)) {
-                        AiDockMenu(
-                            tone = dockTone(ui),
-                            ink = p.ink,
-                            modifier = with(this@SharedTransitionLayout) {
-                                Modifier.sharedBounds(
-                                        rememberSharedContentState("aiDockMenu"),
-                                        this@AnimatedVisibility,
-                                        boundsTransform = { _, _ -> spring(dampingRatio = .6f, stiffness = 380f) },
-                                        resizeMode = SharedTransitionScope.ResizeMode.RemeasureToBounds,
-                                        clipInOverlayDuringTransition = OverlayClip(aiMenuShape()),
-                                    )
-                            },
-                            onProof = {
-                                aiMenuOpen = false
-                                startProof()
-                            },
-                            onPolish = {
-                                aiMenuOpen = false
-                                startPolish()
-                            },
-                            onAsk = {
-                                aiMenuOpen = false
-                                startAsk()
-                            },
-                        )
-                        }
-                    }
-                }
-                }
                 }
             }
             }
@@ -5043,7 +4968,6 @@ private val DockRowHeight = 52.dp
 private val DockToolWidth = 36.dp
 
 @Composable
-@OptIn(ExperimentalSharedTransitionApi::class)
 private fun EditorDock(
     canUndo: Boolean,
     canRedo: Boolean,
@@ -5078,13 +5002,6 @@ private fun EditorDock(
     onPolish: (() -> Unit)? = null,
     /** 3.26.32：AI 入口里的「问」：就选中的这一段对话，回答可一键替换回选区。 */
     onAsk: (() -> Unit)? = null,
-    /** 3.26.34：AI 竖排菜单的开关状态（状态提到这里，菜单画在能力栏上方的页面层）。 */
-    aiOpen: Boolean = false,
-    onAiToggle: () -> Unit = {},
-    /** 3.26.35：共享元素作用域（AI 格 ↔ 菜单）。null 时退回普通图标格。 */
-    shared: SharedTransitionScope? = null,
-    /** 3.26.34：能力栏已收起（整块缩回左下角的球）——竖排 AI 菜单要跟着收。 */
-    dockCollapsed: Boolean = false,
     /** 1型玻璃 sampling source. Pass the body's software backdrop so the real
      *  EditText text shows through the dock; null falls back to a paper bar. */
     backdrop: Backdrop? = null,
@@ -5164,40 +5081,44 @@ private fun EditorDock(
                     label = "dockSelection",
                 ) { selecting ->
                     if (selecting) {
+                        // AI 入口：点开横向展开成「校核 | 修饰」两格。这份 state
+                        // 随选框行一起销毁——选择结束时自然收起，不用手动复位。
+                        var aiOpen by remember { mutableStateOf(false) }
                         Row(
                             Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             if (onProof != null || onPolish != null || onAsk != null) {
-                                // 3.26.35：AI 格与菜单是同一对共享元素的两端（key = aiDockMenu）。
-                                // 图标格是「退出端」：打开时把 bounds 交给菜单，图标在 ✦ ↔ ✕
-                                // 之间换形——同一个元素换形，不是换一张图。
-                                Box(Modifier.width(DockToolWidth)) {
-                                    val sh = shared
-                                    if (sh == null) {
-                                        AiDockCell(aiOpen, onBar, onBarDim, onAiToggle)
+                                AnimatedContent(
+                                    targetState = aiOpen,
+                                    transitionSpec = {
+                                        (fadeIn(tween(150)) + slideInHorizontally(tween(180)) { -it / 5 }) togetherWith
+                                            (fadeOut(tween(110))) using
+                                            SizeTransform(clip = true) { _, _ ->
+                                                spring(dampingRatio = .84f, stiffness = 380f)
+                                            }
+                                    },
+                                    label = "aiTool",
+                                ) { open ->
+                                    if (!open) {
+                                        DockTool(Glyph.Sparkles, "AI", true, onClick = { aiOpen = true })
                                     } else {
-                                        androidx.compose.animation.AnimatedVisibility(
-                                            visible = !aiOpen,
-                                            enter = fadeIn(tween(240)),
-                                            exit = fadeOut(tween(240)),
-                                        ) {
-                                            AiDockCell(
-                                                open = aiOpen,
-                                                onBar = onBar,
-                                                onBarDim = onBarDim,
-                                                onToggle = onAiToggle,
-                                                modifier = with(sh) {
-                                                    Modifier.sharedBounds(
-                                                        rememberSharedContentState("aiDockMenu"),
-                                                        this@AnimatedVisibility,
-                                                        boundsTransform = { _, _ -> spring(dampingRatio = .6f, stiffness = 380f) },
-                                                        resizeMode = SharedTransitionScope.ResizeMode.RemeasureToBounds,
-                                                        clipInOverlayDuringTransition = OverlayClip(aiMenuShape()),
-                                                    )
-                                                },
-                                            )
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            DockTool(Glyph.Check, "校核", true, onClick = {
+                                                aiOpen = false
+                                                onProof?.invoke()
+                                            })
+                                            DockTool(Glyph.Edit, "修饰", true, onClick = {
+                                                aiOpen = false
+                                                onPolish?.invoke()
+                                            })
+                                            if (onAsk != null) {
+                                                DockTool(Glyph.Sparkles, "问", true, onClick = {
+                                                    aiOpen = false
+                                                    onAsk?.invoke()
+                                                })
+                                            }
                                         }
                                     }
                                 }
@@ -5213,40 +5134,8 @@ private fun EditorDock(
                         // 工具行：8 格固定 36dp，整行 SpaceEvenly 均分。
                         // 8×36=288dp，360dp 屏去掉两边 12dp 还剩 336dp，一屏
                         // 放得下就不再横滑翻页；窄屏只收紧格间空隙，格宽不变。
-                        // 3.26.34：在这一行上横向拖动 = 移动正文光标（每 8dp 一个字）。
-                        // 位移不到 slop 时手势器根本不启动，工具的点按不受影响。
-                        val charStepPx = with(LocalDensity.current) { 8.dp.toPx() }
-                        var scrub by remember { mutableStateOf(0f) }
                         Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 4.dp)
-                                .pointerInput(charStepPx) {
-                                    detectHorizontalDragGestures(
-                                        onDragStart = { scrub = 0f },
-                                        onDragEnd = { scrub = 0f },
-                                        onDragCancel = { scrub = 0f },
-                                    ) { change, dx ->
-                                        val ed = bodyEditor
-                                        if (ed != null) {
-                                            scrub += dx
-                                            val n = (scrub / charStepPx).toInt()
-                                            if (n != 0) {
-                                                scrub -= n * charStepPx
-                                                val txt = ed.text
-                                                if (txt != null) {
-                                                    val from = ed.selectionEnd.coerceIn(0, txt.length)
-                                                    val to = (from + n).coerceIn(0, txt.length)
-                                                    if (to != from) {
-                                                        ed.setSelection(to)
-                                                        runCatching { ed.bringPointIntoView(to) }
-                                                    }
-                                                    change.consume()
-                                                }
-                                            }
-                                        }
-                                    }
-                                },
+                            Modifier.fillMaxWidth().padding(horizontal = 4.dp),
                             horizontalArrangement = Arrangement.SpaceEvenly,
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
@@ -6299,7 +6188,6 @@ private fun reminderSlots(): List<Pair<Long?, String>> {
 
 @Preview(name = "写作 Dock", widthDp = 412, heightDp = 210, showBackground = true)
 @Composable
-@OptIn(ExperimentalSharedTransitionApi::class)
 private fun EditorDockPreview() {
     MoyuTheme(AppSettings(theme = "night", motion = "none")) {
         CompositionLocalProvider(LocalHazeHandle provides null) {
