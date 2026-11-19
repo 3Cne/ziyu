@@ -1,7 +1,6 @@
 package com.moyu.writer
 
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.slideInHorizontally
@@ -11,8 +10,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -43,6 +42,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -50,11 +50,13 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
@@ -66,6 +68,8 @@ import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.sin
+import kotlin.math.sqrt
+import kotlin.random.Random
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
@@ -160,14 +164,11 @@ private fun CharacterPane(book: Book, onBible: (BookBible) -> Unit) {
     var deletingRelation by remember { mutableStateOf<StoryRelation?>(null) }
     var linking by remember { mutableStateOf<StoryCharacter?>(null) }
     var centerId by remember { mutableStateOf(bible.characters.firstOrNull()?.id.orEmpty()) }
-    var fromId by remember { mutableStateOf(centerId) }
-    var tick by remember { mutableIntStateOf(0) }
-    // 三个状态在同一次事件回调里一起写，关系图下一次组合就能拿到新的 tick。
+    // 3.26.44：换中心不再有「旧布局 → 新布局」的插值状态——力导向从当前坐标继续跑，
+    // 节点自己走过去；点球就是直接改 centerId。
     fun pick(id: String) {
         if (id.isEmpty() || id == centerId) return
-        fromId = centerId
         centerId = id
-        tick++
     }
 
     // 角色被删掉后，中心要落回第一个，不能指向一个不存在的 id。
@@ -198,10 +199,9 @@ private fun CharacterPane(book: Book, onBible: (BookBible) -> Unit) {
                         .verticalScroll(rememberScrollState()),
                 ) {
                     RelationGraph(
+                        bookId = book.id,
                         bible = bible,
                         centerId = centerId,
-                        fromId = fromId,
-                        tick = tick,
                         onPick = { pick(it) },
                         modifier = Modifier.fillMaxWidth().height(graphH),
                     )
@@ -430,115 +430,205 @@ private fun RelationLegend() {
 }
 
 /**
- * 环形关系图。
+ * 力导向关系图（3.26.44，用户要「Obsidian 关系图谱那套逻辑」）。
  *
- * 位置在**绘制阶段**按 centerId 算，不在布局阶段：换中心时节点沿弹簧从旧位置走到新位置，
- * 而不是整块淡出淡入（淡出淡入会被读成「换了一张图」）。整张图一个 Canvas、一个 Animatable，
- * 不进 Compose 的逐帧重组。
+ * 为什么换掉环形：环是固定槽位——角色一多，多出来的只能藏起来（旧版「还有 N 位在下面」），
+ * 而且球挨着球、关系线被两头的球盖掉。力导向没有槽位：关系亲近的两球弹簧更短、所有球互相
+ * 排斥、整组再被一个很轻的向心力收住，角色多了是自己铺开。
  *
- * 3.26.43（用户报「球挨着球，关系线全长被两头的球盖掉」）：
- * ① 球径按角色数分档 48 / 42 / 36dp；② 环半径按「相邻球之间至少露出 14dp 线」反推
- * （见 [graphGeometry]），再夹进画布可用半径；③ 关系线两端各退到 r + 2dp 处断开，用圆周交点
- * 算而不是简单减法，线不会在球边露出黑头；④ 球先画一圈大 3dp 的纸色 halo 再画球，线和球
- * 之间留一层纸；⑤ 双指缩放 0.6–2.5×（以双指中心为锚）+ 单指拖动平移（四边允许露出 25%）+
- * 双击空白复位。缩放平移只存内存，面板离开组合即复位。
+ * 布局（[ForceGraph]）：
+ * ① 节点斥力 ∝ 1/d²，距离夹在「两球半径和 + 2dp」上做软约束，靠得再近力也有限不会炸；
+ * ② 每条关系一根弹簧，目标长度按关系类型分档（亲人/恋人最短，仇敌最长）；
+ * ③ 整组一个很轻的向心力，中心角色单独用更强的一档留在画布中心；
+ * ④ 迭代在帧回调里推进、每帧 2 步，**收敛即停**——没有常驻帧循环；只有拖球、换中心、
+ *    增删数据才把布局重新唤醒（拖动结束后再收一次）；
+ * ⑤ 初始位置由 `bookId + 角色 id` 派生固定种子，同一份数据每次打开的落点一致；
+ *    每一步只取决于上一步（与帧率无关），所以收敛结果也确定。
  *
- * 点球换中心不能被手势吃掉：点击用 onTap 立即回调（不用 onDoubleTap——它会让单击先等一个
- * 双击超时）；变换手势在 Main pass 里更靠内层、先消费移动，所以拖动/捏合时点击器会自己取消。
+ * 手势：
+ * ① 单指按在球上拖动 = 钉住这颗球（Obsidian 的拖球），其余球在模拟里让位；松手解除并重新收敛；
+ * ② 单指按空白拖动 = 平移画布；双指 = 以双指中心为锚缩放（0.35–3×）；
+ * ③ 单击球**立刻**换中心（不等双击超时）；双击空白复位视图；
+ * ④ 换中心不清空当前坐标：模拟从当前坐标继续跑，节点是「走过去」不是闪跳。
+ *
+ * 每帧只画一个 Canvas（不建 per-球 composable）：坐标只在绘制阶段读，模拟推进只让绘制失效、
+ * 不触发重组；50 个角色也只是几十帧 O(n²) 的小循环，收敛后完全静止。
  */
 @Composable
 private fun RelationGraph(
+    bookId: String,
     bible: BookBible,
     centerId: String,
-    fromId: String,
-    tick: Int,
     onPick: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val ui = LocalInk.current
     val density = LocalDensity.current
-    // 过渡进度：tick 由点击处（事件回调里）自增，不是组合期写状态。
-    // 点击处同时写 centerId + fromId + tick，下一次组合就一定拿到 tick 的新值，
-    // `remember(tick)` 建出初值 0 的 Animatable——第一帧画的是旧布局，不会先跳新布局。
-    // （把归零放进 LaunchedEffect 会晚一帧：那一帧已按 t=1 画完，于是「闪一下再弹回」。）
-    val t = remember(tick) { Animatable(if (tick == 0) 1f else 0f) }
-    LaunchedEffect(tick) {
-        if (tick > 0) t.animateTo(1f, spring(MOYU_DAMPING, 420f))
-    }
+    val onPickState = rememberUpdatedState(onPick)
 
-    // 3.26.43：视口（缩放 / 平移）。直接读 remember 里的同一个 State 就是当前值；写它只让
-    // Canvas 重绘、不触发重组，所以整个捏合/拖动过程不会重组这张图。
+    // 视图（缩放 / 平移）：绘制阶段直接读，捏合拖动只重画、不重组。
     var viewScale by remember { mutableFloatStateOf(GRAPH_SCALE_DEFAULT) }
     var viewPan by remember { mutableStateOf(Offset.Zero) }
     val viewScope = rememberCoroutineScope()
-    var resetJob by remember { mutableStateOf<Job?>(null) }
+    var viewJob by remember { mutableStateOf<Job?>(null) }
 
-    /** 双击空白：弹簧回到 1× 居中；任意手势按下时由 onPress 取消。 */
-    fun resetView() {
-        resetJob?.cancel()
-        val s0 = viewScale
-        val p0 = viewPan
-        if (s0 == GRAPH_SCALE_DEFAULT && p0 == Offset.Zero) return
-        resetJob = viewScope.launch {
-            coroutineScope {
-                launch {
-                    animate(s0, GRAPH_SCALE_DEFAULT, animationSpec = spring(MOYU_DAMPING, 420f)) { value, _ ->
-                        viewScale = value
-                    }
-                }
-                launch {
-                    animate(p0.x, 0f, animationSpec = spring(MOYU_DAMPING, 420f)) { value, _ ->
-                        viewPan = Offset(value, viewPan.y)
-                    }
-                }
-                launch {
-                    animate(p0.y, 0f, animationSpec = spring(MOYU_DAMPING, 420f)) { value, _ ->
-                        viewPan = Offset(viewPan.x, value)
-                    }
-                }
-            }
-        }
-    }
+    // 布局：坐标与力都放在普通内存里（不进快照），模拟推进只靠 frameTick 让 Canvas 重画。
+    val graph = remember(bookId) { ForceGraph(bookId) }
+    var frameTick by remember { mutableIntStateOf(0) }
+    // 唤醒布局：拖球开始 / 松手 / 点球换中心都自增，重启下面「跑到收敛就退出」的 effect。
+    var wakeTick by remember { mutableIntStateOf(0) }
+
+    // 双击复位的判定（点球不参与：点球立刻换中心）。
+    var lastTapAt by remember { mutableLongStateOf(0L) }
+    var lastTapPos by remember { mutableStateOf(Offset.Zero) }
+    // 手势进行中不自动适配视图（不然用户在拖/捏的时候会被 autoFit 的对齐动画抢走）。
+    var gestureActive by remember { mutableStateOf(false) }
 
     // 缩放后图形会超出这块画布，必须裁在画布内：否则放大的球会画到下面的图例/角色卡上。
     BoxWithConstraints(modifier.clipToBounds()) {
         val w = constraints.maxWidth.toFloat()
         val h = constraints.maxHeight.toFloat()
         val cx = w / 2f
-        val cy = h / 2f - with(density) { 6.dp.toPx() }
-        val geom = remember(bible.characters.size, w, h) {
-            graphGeometry(bible.characters.size, w, h, density)
+        val cy = h / 2f
+        val geom = remember(bible.characters.size, density) {
+            graphGeometry(bible.characters.size, density)
         }
 
-        fun ringOf(center: String): List<StoryCharacter> =
-            bible.characters.filter { it.id != center }.take(geom.nodes)
+        // 数据 → 布局：改名字/颜色只更新节点内容；增删角色/关系、换中心才记一次 layoutChanged。
+        // 这里写的是普通内存不是 Compose 状态，所以不违反「组合期不写状态」。
+        graph.sync(
+            characters = bible.characters,
+            relations = bible.relations,
+            centerId = centerId,
+            nodeR = geom.nodeR,
+            centerR = geom.centerR,
+            gapPx = with(density) { 2.dp.toPx() },
+        )
 
-        fun positions(center: String): Map<String, Offset> {
-            val list = ringOf(center)
-            if (list.isEmpty()) return emptyMap()
-            // 1–2 个节点时从右侧起排（横过去），3 个以上从正上方起排（像个环）。
-            val start = if (list.size <= 2) 0.0 else -PI / 2
-            val step = 2 * PI / list.size
-            return list.mapIndexed { i, c ->
-                val angle = start + i * step
-                c.id to Offset(
-                    cx + (geom.ringR * cos(angle)).toFloat(),
-                    cy + (geom.ringR * sin(angle)).toFloat(),
-                )
-            }.toMap()
+        fun screenToWorld(screen: Offset): Offset = Offset(
+            (screen.x - cx - viewPan.x) / viewScale,
+            (screen.y - cy - viewPan.y) / viewScale,
+        )
+
+        /** 屏幕坐标命中球：容差 = 球在屏幕上的半径 + 8dp，缩放后依然准。 */
+        fun hitTest(screen: Offset): ForceGraph.Node? {
+            val scale = viewScale
+            val pan = viewPan
+            val tol = with(density) { 8.dp.toPx() }
+            var best: ForceGraph.Node? = null
+            var bestD = Float.MAX_VALUE
+            graph.nodes.forEach { n ->
+                val dx = cx + n.x * scale + pan.x - screen.x
+                val dy = cy + n.y * scale + pan.y - screen.y
+                val d = sqrt(dx * dx + dy * dy)
+                if (d < bestD) {
+                    bestD = d
+                    best = n
+                }
+            }
+            val hit = best ?: return null
+            return if (bestD <= hit.r * scale + tol) hit else null
         }
 
-        val from = remember(bible, fromId, w, h) { positions(fromId) }
-        val to = remember(bible, centerId, w, h) { positions(centerId) }
-        val hintPaint = remember {
-            android.graphics.Paint().apply {
-                isAntiAlias = true
-                textSize = with(density) { 11.dp.toPx() } * .82f
-                textAlign = android.graphics.Paint.Align.CENTER
+        /** 当前布局的世界包围盒（含球半径），[minX, minY, maxX, maxY]。 */
+        fun contentBounds(): FloatArray {
+            if (graph.nodes.isEmpty()) return floatArrayOf(-1f, -1f, 1f, 1f)
+            var minX = Float.MAX_VALUE
+            var minY = Float.MAX_VALUE
+            var maxX = -Float.MAX_VALUE
+            var maxY = -Float.MAX_VALUE
+            graph.nodes.forEach { n ->
+                if (n.x - n.r < minX) minX = n.x - n.r
+                if (n.y - n.r < minY) minY = n.y - n.r
+                if (n.x + n.r > maxX) maxX = n.x + n.r
+                if (n.y + n.r > maxY) maxY = n.y + n.r
+            }
+            return floatArrayOf(minX, minY, maxX, maxY)
+        }
+
+        /** 平移约束：整张图的包围盒至少留 25% 在视口里，拖不飞也拖不没。 */
+        fun clampPan(candidate: Offset, scale: Float): Offset {
+            val b = contentBounds()
+            var x = candidate.x
+            var y = candidate.y
+            val left = cx + b[0] * scale + x
+            val right = cx + b[2] * scale + x
+            if (left > w * .75f) x += w * .75f - left
+            if (right < w * .25f) x += w * .25f - right
+            val top = cy + b[1] * scale + y
+            val bottom = cy + b[3] * scale + y
+            if (top > h * .75f) y += h * .75f - top
+            if (bottom < h * .25f) y += h * .25f - bottom
+            return Offset(x, y)
+        }
+
+        fun animateView(targetScale: Float, targetPan: Offset) {
+            viewJob?.cancel()
+            val s0 = viewScale
+            val p0 = viewPan
+            if (s0 == targetScale && p0 == targetPan) return
+            viewJob = viewScope.launch {
+                coroutineScope {
+                    launch {
+                        animate(s0, targetScale, animationSpec = spring(MOYU_DAMPING, 420f)) { v, _ ->
+                            viewScale = v
+                        }
+                    }
+                    launch {
+                        animate(p0.x, targetPan.x, animationSpec = spring(MOYU_DAMPING, 420f)) { v, _ ->
+                            viewPan = Offset(v, viewPan.y)
+                        }
+                    }
+                    launch {
+                        animate(p0.y, targetPan.y, animationSpec = spring(MOYU_DAMPING, 420f)) { v, _ ->
+                            viewPan = Offset(viewPan.x, v)
+                        }
+                    }
+                }
             }
         }
-        // 3.26.43：球内字的基准字号跟着球径分档走；绘制时再被视图缩放矩阵放大。Skia 按最终
-        // 矩阵栅格化文字，所以放大后字不会糊。
+
+        /** 双击空白：弹簧回到 1× 居中。 */
+        fun resetView() = animateView(GRAPH_SCALE_DEFAULT, Offset.Zero)
+
+        /** 收敛后：新布局装不进当前视口时缩一点把整张图框进来（装得下就不抢用户的缩放）。 */
+        fun autoFit() {
+            val b = contentBounds()
+            val pad = with(density) { 10.dp.toPx() }
+            val bw = (b[2] - b[0]).coerceAtLeast(1f)
+            val bh = (b[3] - b[1]).coerceAtLeast(1f)
+            val fit = min((w - pad * 2f) / bw, (h - pad * 2f) / bh)
+                .coerceIn(GRAPH_SCALE_MIN, GRAPH_SCALE_MAX)
+            if (fit >= viewScale - .02f) return
+            val bcx = (b[0] + b[2]) / 2f
+            val bcy = (b[1] + b[3]) / 2f
+            animateView(fit, Offset(-bcx * fit, -bcy * fit))
+        }
+
+        /**
+         * 推到收敛为止：每帧 2 步。钉住期间不认「收敛」（拖多久都得让其余球让位）；
+         * 收敛后直接退出循环——这也保证静止后不再有帧回调，不烧电。
+         */
+        suspend fun runLayout() {
+            var frames = 0
+            while (true) {
+                var settled = false
+                withFrameNanos {
+                    settled = graph.step(2)
+                    frameTick++
+                }
+                frames++
+                if (settled) break
+                if (frames >= GRAPH_MAX_FRAMES && graph.pinnedId == null) break
+            }
+        }
+
+        LaunchedEffect(bookId, bible.characters, bible.relations, centerId, wakeTick) {
+            val freshLayout = graph.takeLayoutChanged()
+            runLayout()
+            if (freshLayout && !gestureActive) autoFit()
+        }
+
         val ballPaint = remember(geom.ballTextSize) {
             android.graphics.Paint().apply {
                 isAntiAlias = true
@@ -556,294 +646,513 @@ private fun RelationGraph(
             }
         }
 
-        // pointerInput 的 key 必须恒定：以 to 为 key 时，点中节点 → centerId 变 → to 变 →
-        // 手势器在抬手前被重启，抬手事件漏到遮罩上，面板会自己 close()（3.26.16 实测）。
-        // 3.26.43 同理不能拿 viewScale/viewPan 当 key，否则捏合中途会重启手势器。
-        val hitTargets = rememberUpdatedState(to)
-        val geomState = rememberUpdatedState(geom)
-        var lastTapAt by remember { mutableLongStateOf(0L) }
-        var lastTapPos by remember { mutableStateOf(Offset.Zero) }
-
-        /**
-         * 3.26.43：平移约束——内容放大后是 [0,w]×[0,h] 映射出来的矩形，四边各允许最多
-         * 露出 25% 视口，拖不飞、也拖不没。
-         */
-        fun clampPan(candidate: Offset, scale: Float): Offset {
-            val left = cx + (0f - cx) * scale + candidate.x
-            val right = cx + (w - cx) * scale + candidate.x
-            val top = cy + (0f - cy) * scale + candidate.y
-            val bottom = cy + (h - cy) * scale + candidate.y
-            var x = candidate.x
-            var y = candidate.y
-            if (left > w * .25f) x -= left - w * .25f
-            if (right < w * .75f) x += w * .75f - right
-            if (top > h * .25f) y -= top - h * .25f
-            if (bottom < h * .75f) y += h * .75f - bottom
-            return Offset(x, y)
-        }
-
+        // 自己写手势而不用 detectTransformGestures / detectTapGestures：那两个都没有「抬手」
+        // 回调，拖球钉住没法在松手那一刻解除；而且点球要和拖球、平移、缩放放在同一条判定里。
         Canvas(
             Modifier
                 .fillMaxSize()
-                // 先声明点击、后声明变换：Main pass 从最内层往外派发，变换器先看到移动并消费，
-                // 点击器看到「已消费」就取消自己——拖动/捏合不会被误判成点球。
                 .pointerInput(w, h) {
-                    detectTapGestures(
-                        onPress = { resetJob?.cancel() },
-                        onTap = { screenTap ->
-                            // 视图变换 = 以画布中心为锚的缩放 + 平移；命中改在屏幕坐标里比，
-                            // 容差 = 球在屏幕上的半径 + 8dp。不把容差按缩放倍数放大，否则
-                            // 放大后空白处的点击也会被判成点球，把双击复位吃掉。
-                            val scale = viewScale
-                            val pan = viewPan
-                            fun screenOf(base: Offset) = Offset(
-                                cx + (base.x - cx) * scale + pan.x,
-                                cy + (base.y - cy) * scale + pan.y,
-                            )
-                            val cur = hitTargets.value
-                            val hit = cur.entries.minByOrNull { (screenOf(it.value) - screenTap).getDistance() }
-                            val touchR = geomState.value.nodeR * scale + with(density) { 8.dp.toPx() }
-                            if (hit != null && (screenOf(hit.value) - screenTap).getDistance() < touchR) {
-                                // 点球换中心：立即响应，不参与双击判定。
+                    val slop = viewConfiguration.touchSlop
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        viewJob?.cancel()
+                        gestureActive = true
+                        val start = down.position
+                        val startNode = hitTest(start)
+                        var pastSlop = false
+                        var pin: ForceGraph.Node? = null
+                        var grab = Offset.Zero
+                        var multi = false
+                        var maxMove = 0f
+                        var centroid = start
+                        var zoom = 1f
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val pressed = event.changes.filter { it.pressed }
+                            if (pressed.isEmpty()) break
+                            if (pressed.size > 1) multi = true
+                            var sum = Offset.Zero
+                            pressed.forEach { sum += it.position - it.previousPosition }
+                            val pan = sum / pressed.size.toFloat()
+                            var cen = Offset.Zero
+                            pressed.forEach { cen += it.position }
+                            centroid = cen / pressed.size.toFloat()
+                            zoom = if (pressed.size < 2) 1f else zoomOf(pressed)
+                            if (!pastSlop) {
+                                maxMove = maxOf(maxMove, (centroid - start).getDistance())
+                                if (multi || zoom != 1f || maxMove > slop) {
+                                    pastSlop = true
+                                    if (!multi && zoom == 1f && startNode != null) {
+                                        // 拖球：记下「球心 - 手指世界坐标」的抓取偏移，拖动不跳位。
+                                        val wp = screenToWorld(centroid)
+                                        pin = startNode
+                                        grab = Offset(startNode.x - wp.x, startNode.y - wp.y)
+                                        graph.setPinned(startNode.id)
+                                        wakeTick++
+                                    }
+                                }
+                            }
+                            if (pastSlop) {
+                                if (multi && pin != null) {
+                                    // 拖球中途多了第二根手指：让位给缩放，球解除钉住。
+                                    graph.setPinned(null)
+                                    pin = null
+                                    wakeTick++
+                                }
+                                if (pin != null) {
+                                    // 钉住：球心钉在手指处，其余球在模拟里让位。
+                                    val wp = screenToWorld(centroid)
+                                    pin.x = wp.x + grab.x
+                                    pin.y = wp.y + grab.y
+                                    frameTick++
+                                } else {
+                                    // 视图：双指以双指中心为锚缩放 + 平移。
+                                    val old = viewScale
+                                    val next = (old * zoom).coerceIn(GRAPH_SCALE_MIN, GRAPH_SCALE_MAX)
+                                    val factor = next / old
+                                    val rel = centroid - Offset(cx, cy)
+                                    viewPan = clampPan(rel - (rel - viewPan) * factor + pan, next)
+                                    viewScale = next
+                                }
+                                event.changes.forEach { if (it.position != it.previousPosition) it.consume() }
+                            }
+                        }
+                        if (pin != null) {
+                            // 松手：解除钉住，再收一次（wakeTick 让 effect 重新跑到收敛）。
+                            graph.setPinned(null)
+                            wakeTick++
+                        }
+                        if (!pastSlop) {
+                            if (startNode != null) {
+                                // 单击球立刻换中心：不设双击等待。
                                 lastTapAt = 0L
-                                onPick(hit.key)
+                                onPickState.value(startNode.id)
                             } else {
                                 val now = android.os.SystemClock.uptimeMillis()
-                                val near = (screenTap - lastTapPos).getDistance() < with(density) { 40.dp.toPx() }
+                                val near = (start - lastTapPos).getDistance() < with(density) { 40.dp.toPx() }
                                 if (now - lastTapAt in 1L..GRAPH_DOUBLE_TAP_MS && near) {
                                     lastTapAt = 0L
                                     resetView()
                                 } else {
                                     lastTapAt = now
-                                    lastTapPos = screenTap
+                                    lastTapPos = start
                                 }
                             }
-                        },
-                    )
-                }
-                .pointerInput(w, h) {
-                    detectTransformGestures { centroid, panChange, zoomChange, _ ->
-                        resetJob?.cancel()
-                        val old = viewScale
-                        val next = (old * zoomChange).coerceIn(GRAPH_SCALE_MIN, GRAPH_SCALE_MAX)
-                        // 以双指中心为锚：缩放前后，双指中心下面的那个图形点仍在同一屏幕位置。
-                        val factor = next / old
-                        val rel = centroid - Offset(cx, cy)
-                        viewPan = clampPan(rel - (rel - viewPan) * factor + panChange, next)
-                        viewScale = next
+                        }
+                        gestureActive = false
                     }
-                }
+                },
         ) {
-            val v = t.value.coerceIn(0f, 1f)
-            val center = bible.character(centerId)
-            val shownName = bible.character(fromId)?.name ?: ""
-            val centerPos = Offset(cx, cy)
+            // 订阅模拟帧：坐标是普通内存，靠这个计数让 Canvas 重画（只失效绘制层，不重组）。
+            if (frameTick < 0) return@Canvas
+            val scale = viewScale
+            val pan = viewPan
             val lineInset = 2.dp.toPx()
             val halo = 1.5.dp.toPx()
-
             withTransform({
-                translate(viewPan.x, viewPan.y)
-                scale(viewScale, viewScale, Offset(cx, cy))
+                translate(pan.x, pan.y)
+                scale(scale, scale, Offset(cx, cy))
             }) {
-                // 旧中心（渐隐）
-                if (v < 1f) {
-                    from.forEach { (id, p0) ->
-                        val kind = relationKindBetween(bible, fromId, id) ?: return@forEach
-                        val dir = unitDirection(centerPos, p0) ?: return@forEach
-                        val start = centerPos + dir * (geom.centerR + lineInset)
-                        // 旧节点从 72% 半径长到 100%，断开位置跟着当时的球径走。
-                        val end = p0 - dir * (geom.nodeR * .72f + lineInset)
-                        if ((end - start).getDistance() > 0f) {
-                            drawLine(
-                                relationTone(kind, ui).copy(alpha = .5f * (1f - v)),
-                                start,
-                                end,
-                                strokeWidth = 1.4.dp.toPx(),
-                                cap = StrokeCap.Round,
-                            )
-                        }
-                    }
-                    val oldBall = bible.character(fromId)?.let { ballColor(it) } ?: ui.palette.faint
-                    drawCircle(oldBall.copy(alpha = .6f * (1f - v)), radius = geom.centerR, center = centerPos)
-                    if (shownName.isNotBlank()) {
-                        centerBallPaint.color = inkOnBall(oldBall, ui.palette).toArgb()
-                        centerBallPaint.alpha = (255 * (1f - v)).toInt().coerceIn(0, 255)
-                        drawContext.canvas.nativeCanvas.drawText(
-                            ballLabel(shownName),
-                            cx,
-                            cy + centerBallPaint.textSize * .35f,
-                            centerBallPaint,
-                        )
-                    }
+                fun DrawScope.edge(s: ForceGraph.Spring, strong: Boolean) {
+                    val a = graph.nodes[s.a]
+                    val b = graph.nodes[s.b]
+                    val pa = Offset(cx + a.x, cy + a.y)
+                    val pb = Offset(cx + b.x, cy + b.y)
+                    val dir = unitDirection(pa, pb) ?: return
+                    // 两端都用圆周交点断开（球心沿方向退 r + 2dp），线不会在球边露头。
+                    val start = pa + dir * (a.r + lineInset)
+                    val end = pb - dir * (b.r + lineInset)
+                    if ((end - start).getDistance() <= 0f) return
+                    drawLine(
+                        relationTone(s.kind, ui).copy(alpha = if (strong) .9f else .28f),
+                        start,
+                        end,
+                        strokeWidth = if (strong) 1.6.dp.toPx() else 1.2.dp.toPx(),
+                        cap = StrokeCap.Round,
+                    )
                 }
 
-                // 新中心：同一角色在旧布局里的位置就是起点，换中心时它是「走过去」，
-                // 不是先塌到中心再长出来（3.26.16 实测第一版的观感像「收起来再打开」）。
-                to.forEach { (id, p1) ->
-                    val c = bible.character(id) ?: return@forEach
-                    val p0 = from[id] ?: centerPos
-                    val p = Offset(
-                        p0.x + (p1.x - p0.x) * v,
-                        p0.y + (p1.y - p0.y) * v,
-                    )
-                    val ballR = geom.nodeR * (.72f + .28f * v)
-                    val kind = relationKindBetween(bible, centerId, id)
-                    val dir = unitDirection(centerPos, p)
-                    if (kind != null && dir != null) {
-                        // 两端都用圆周交点断开：从球心沿方向退 r + 2dp，线不会在球边露头。
-                        val start = centerPos + dir * (geom.centerR + lineInset)
-                        val end = p - dir * (ballR + lineInset)
-                        if ((end - start).getDistance() > 0f) {
-                            drawLine(
-                                relationTone(kind, ui).copy(alpha = v),
-                                start,
-                                end,
-                                strokeWidth = 1.6.dp.toPx(),
-                                cap = StrokeCap.Round,
-                            )
-                        }
+                fun DrawScope.ball(node: ForceGraph.Node) {
+                    val p = Offset(cx + node.x, cy + node.y)
+                    val color = ballColor(node.char)
+                    // 先铺一圈大 3dp 的纸色 halo 再画球：线与球之间留一层纸。
+                    drawCircle(ui.palette.paper, radius = node.r + halo, center = p)
+                    drawCircle(color, radius = node.r, center = p)
+                    if (node.isCenter) {
+                        drawCircle(
+                            ui.accent.copy(alpha = .9f),
+                            radius = node.r + 1.dp.toPx(),
+                            center = p,
+                            style = Stroke(width = 2.dp.toPx()),
+                        )
                     }
-                    val ball = ballColor(c)
-                    // 3.26.43：先铺一圈大 3dp 的纸色 halo 再画球——线与球之间留一层纸。
-                    drawCircle(ui.palette.paper.copy(alpha = v), radius = ballR + halo, center = p)
-                    drawCircle(ball.copy(alpha = v), radius = ballR, center = p)
                     drawCircle(
-                        ui.palette.ink.copy(alpha = .20f * v),
-                        radius = ballR,
+                        ui.palette.ink.copy(alpha = if (node.isCenter) .16f else .20f),
+                        radius = node.r,
                         center = p,
                         style = Stroke(width = .8.dp.toPx()),
                     )
-                    ballPaint.color = inkOnBall(ball, ui.palette).toArgb()
-                    ballPaint.alpha = (255 * v).toInt().coerceIn(0, 255)
+                    val paint = if (node.isCenter) centerBallPaint else ballPaint
+                    paint.color = inkOnBall(color, ui.palette).toArgb()
+                    paint.alpha = 255
                     drawContext.canvas.nativeCanvas.drawText(
-                        ballLabel(c.name),
+                        ballLabel(node.char.name),
                         p.x,
-                        p.y + ballPaint.textSize * .36f,
-                        ballPaint,
+                        p.y + paint.textSize * (if (node.isCenter) .35f else .36f),
+                        paint,
                     )
                 }
 
-                // 3.26.24：中心球也用角色自己的颜色，外圈 2dp 强调环区分「当前中心」。
-                val centerBall = center?.let { ballColor(it) } ?: ui.palette.faint
-                drawCircle(ui.palette.paper, radius = geom.centerR + halo, center = centerPos)
-                drawCircle(centerBall, radius = geom.centerR, center = centerPos)
-                drawCircle(
-                    ui.accent.copy(alpha = .9f),
-                    radius = geom.centerR + 1.dp.toPx(),
-                    center = centerPos,
-                    style = Stroke(width = 2.dp.toPx()),
-                )
-                drawCircle(
-                    ui.palette.ink.copy(alpha = .16f),
-                    radius = geom.centerR,
-                    center = centerPos,
-                    style = Stroke(width = .8.dp.toPx()),
-                )
-                centerBallPaint.color = inkOnBall(centerBall, ui.palette).toArgb()
-                centerBallPaint.alpha = 255
-                drawContext.canvas.nativeCanvas.drawText(
-                    ballLabel(center?.name ?: ""),
-                    cx,
-                    cy + centerBallPaint.textSize * .35f,
-                    centerBallPaint,
-                )
-            }
-
-            // 显示节点总数上限的提示（>10 时）。不跟缩放走，固定在画布底，始终可读。
-            val hidden = (bible.characters.size - 1 - to.size).coerceAtLeast(0)
-            if (hidden > 0) {
-                hintPaint.color = ui.palette.muted.toArgb()
-                hintPaint.alpha = 255
-                drawContext.canvas.nativeCanvas.drawText(
-                    "还有 $hidden 位在下面",
-                    cx,
-                    h - 4.dp.toPx(),
-                    hintPaint,
-                )
+                // 边分两遍：与本中心无关的弱、中心的强；球画在最后（线从球下过，球口断开）。
+                graph.springs.forEach { s ->
+                    if (!graph.nodes[s.a].isCenter && !graph.nodes[s.b].isCenter) edge(s, false)
+                }
+                graph.springs.forEach { s ->
+                    if (graph.nodes[s.a].isCenter || graph.nodes[s.b].isCenter) edge(s, true)
+                }
+                graph.nodes.forEach { node -> if (!node.isCenter) ball(node) }
+                graph.nodes.firstOrNull { it.isCenter }?.let { ball(it) }
             }
         }
     }
 }
 
-// ───────────────────────── 角色图几何（3.26.43） ─────────────────────────
-// 用户报：球挨着球（相邻球心距≈2r），关系线全长被两头的球盖掉，画面上根本看不到线。
+// ───────────────────────── 角色图几何 / 力导向（3.26.44） ─────────────────────────
 
-private const val GRAPH_SCALE_MIN = .6f
-private const val GRAPH_SCALE_MAX = 2.5f
+private const val GRAPH_SCALE_MIN = .35f
+private const val GRAPH_SCALE_MAX = 3f
 private const val GRAPH_SCALE_DEFAULT = 1f
 private const val GRAPH_DOUBLE_TAP_MS = 320L
 
+/** 节点斥力系数（每一步乘平均球半径，再按 1/d² 衰减）。 */
+private const val GRAPH_REPULSION = .16f
+/** 关系边弹簧系数：每步受力 = 系数 × 长度差（px）。 */
+private const val GRAPH_SPRING = .06f
+/** 整组向心力：很轻，只负责别让图飘走。 */
+private const val GRAPH_CENTER_PULL = .04f
+/** 中心角色单独一档：要它留在画布中心。 */
+private const val GRAPH_CENTER_PULL_CENTER = .14f
+/** 速度阻尼：把弹簧在平衡点附近的来回弹吃掉（不阻尼时 50 球会一直晃）。 */
+private const val GRAPH_DAMPING = .8f
+/** 单步位移上限（× 球半径），防止第一帧从随机位置一步飞出去。 */
+private const val GRAPH_STEP_LIMIT = .22f
+/** 斥力的最小间距软约束：距离小于「两球半径和 × 30%」后不再放大。 */
+private const val GRAPH_MIN_CLAMP = .3f
+/** 连续几步最大位移都小于这个值就算收敛（px）。 */
+private const val GRAPH_SETTLE_PX = .8f
+/** 收敛硬上限；拖球期间不计（拖多久都得让其余球让位）。 */
+private const val GRAPH_MAX_FRAMES = 240
+
+/**
+ * 力导向布局的运行时状态（3.26.44）。
+ *
+ * 坐标系是世界坐标：(0, 0) = 画布中心，绘制时再叠视图的缩放/平移。
+ * 所有字段都是**普通内存**而不是 Compose 快照状态——模拟每帧改坐标只靠外层 Canvas 的
+ * frameTick 重画，不触发重组（50 颗球也不会引起布局/绘制节点重建）。
+ */
+private class ForceGraph(private val bookId: String) {
+    class Node(
+        var char: StoryCharacter,
+        var isCenter: Boolean,
+        var x: Float,
+        var y: Float,
+        var r: Float,
+    ) {
+        val id: String get() = char.id
+    }
+
+    class Spring(val a: Int, val b: Int, val rest: Float, val kind: RelationKind)
+
+    val nodes = mutableListOf<Node>()
+    val springs = mutableListOf<Spring>()
+    var pinnedId: String? = null
+        private set
+
+    private val index = HashMap<String, Int>()
+    private var fx = FloatArray(0)
+    private var fy = FloatArray(0)
+    private var vx = FloatArray(0)
+    private var vy = FloatArray(0)
+    private var gapPx = 0f
+    private var stepLimitPx = 0f
+    private var settleFrames = 0
+    private var layoutChanged = true
+    private var lastIds = emptyList<String>()
+    private var lastRelations = emptyList<String>()
+    private var lastCenter = ""
+
+    fun setPinned(id: String?) {
+        pinnedId = id
+    }
+
+    /** 取走「布局输入变了」的标记；一次布局只取一次。 */
+    fun takeLayoutChanged(): Boolean {
+        val changed = layoutChanged
+        layoutChanged = false
+        return changed
+    }
+
+    /**
+     * 把圣经数据同步进布局：改名字/颜色只更新节点内容，不重排；增删角色/关系或换中心
+     * 才记一次 layoutChanged，交给 LaunchedEffect 重新跑到收敛为止。
+     */
+    fun sync(
+        characters: List<StoryCharacter>,
+        relations: List<StoryRelation>,
+        centerId: String,
+        nodeR: Float,
+        centerR: Float,
+        gapPx: Float,
+    ) {
+        this.gapPx = gapPx
+        stepLimitPx = nodeR * GRAPH_STEP_LIMIT
+
+        // 复用已有节点对象：位置跟着 id 走，增删角色时其它球不会跳。
+        val previous = HashMap<String, Node>(nodes.size)
+        nodes.forEach { previous[it.id] = it }
+        val rebuilt = ArrayList<Node>(characters.size)
+        val count = characters.size.coerceAtLeast(1)
+        // 新角色的初始位置按当前规模铺开；种子只由 bookId + 角色 id 决定，落点稳定。
+        val spread = (nodeR + centerR) * (1.2f + .55f * sqrt(count.toFloat()))
+        characters.forEach { c ->
+            val radius = if (c.id == centerId) centerR else nodeR
+            val old = previous[c.id]
+            if (old != null) {
+                old.char = c
+                old.isCenter = c.id == centerId
+                old.r = radius
+                rebuilt += old
+            } else if (c.id == centerId) {
+                rebuilt += Node(c, true, 0f, 0f, radius)
+            } else {
+                val rnd = Random(seedOf(bookId, c.id))
+                val angle = rnd.nextFloat() * 2f * PI.toFloat()
+                val dist = spread * (.45f + .55f * rnd.nextFloat())
+                rebuilt += Node(c, false, cos(angle) * dist, sin(angle) * dist, radius)
+            }
+        }
+        nodes.clear()
+        nodes.addAll(rebuilt)
+        index.clear()
+        nodes.forEachIndexed { i, node -> index[node.id] = i }
+
+        val ids = nodes.map { it.id }
+        val relationKey = relations.map { "${it.from}\u0000${it.to}\u0000${it.kind.ordinal}" }
+        if (ids != lastIds || relationKey != lastRelations || centerId != lastCenter) {
+            layoutChanged = true
+            settleFrames = 0
+        }
+        lastIds = ids
+        lastRelations = relationKey
+        lastCenter = centerId
+
+        springs.clear()
+        relations.forEach { r ->
+            val a = index[r.from] ?: return@forEach
+            val b = index[r.to] ?: return@forEach
+            if (a == b) return@forEach
+            springs += Spring(a, b, (nodes[a].r + nodes[b].r) * springRestFactor(r.kind), r.kind)
+        }
+        val pinned = pinnedId
+        if (pinned != null && index[pinned] == null) pinnedId = null
+    }
+
+    /**
+     * 推进 [iterations] 步；返回「已收敛」。钉住期间永远不收敛——拖球时模拟必须活着，
+     * 其余球才会一直给这颗球让位。
+     */
+    fun step(iterations: Int): Boolean {
+        if (nodes.isEmpty()) return true
+        var moved = 0f
+        repeat(iterations) { moved = maxOf(moved, relax()) }
+        if (pinnedId != null) {
+            settleFrames = 0
+            return false
+        }
+        settleFrames = if (moved < GRAPH_SETTLE_PX) settleFrames + 1 else 0
+        return settleFrames >= 3
+    }
+
+    /**
+     * 一步力导向松弛：斥力（1/d²，带最小间距软约束）+ 关系弹簧 + 向心力，合力积到速度上，
+     * 速度带阻尼、单步封顶后再位移。加阻尼而不是直接按合力位移：50 个角色、几十条边时
+     * 直接位移会在平衡点附近来回弹（实测收敛不了），阻尼把振荡吃掉。返回这一步最大的位移。
+     */
+    private fun relax(): Float {
+        val n = nodes.size
+        if (fx.size < n) {
+            fx = FloatArray(n)
+            fy = FloatArray(n)
+            vx = FloatArray(n)
+            vy = FloatArray(n)
+        }
+        for (i in 0 until n) {
+            fx[i] = 0f
+            fy[i] = 0f
+        }
+        // ① 节点斥力：1/d²，距离夹在「两球半径和 + 2dp」上（软约束），靠得再近力也有限。
+        for (i in 0 until n) {
+            val a = nodes[i]
+            for (j in i + 1 until n) {
+                val b = nodes[j]
+                var dx = a.x - b.x
+                var dy = a.y - b.y
+                var d = sqrt(dx * dx + dy * dy)
+                if (d < .01f) {
+                    // 完全重合：按序号给一个固定方向分开，同一份数据每次都一样。
+                    val angle = (i * 37 + j * 11) * .7f
+                    dx = cos(angle)
+                    dy = sin(angle)
+                    d = 1f
+                }
+                val minD = (a.r + b.r) * 1.06f + gapPx
+                // 软约束：距离再近也不再按 1/d² 无限放大（夹到最小间距的 30%），
+                // 否则两个完全重合的球第一帧会把整张图炸飞。
+                val dd = maxOf(d, minD * GRAPH_MIN_CLAMP)
+                val mag = GRAPH_REPULSION * (a.r + b.r) * .5f * (minD / dd) * (minD / dd)
+                val ux = dx / d
+                val uy = dy / d
+                fx[i] += ux * mag
+                fy[i] += uy * mag
+                fx[j] -= ux * mag
+                fy[j] -= uy * mag
+            }
+        }
+        // ② 关系边弹簧：越亲近的目标长度越短（rest 在 sync 里按类型算好）。
+        for (s in springs) {
+            val a = nodes[s.a]
+            val b = nodes[s.b]
+            var dx = b.x - a.x
+            var dy = b.y - a.y
+            var d = sqrt(dx * dx + dy * dy)
+            if (d < .01f) {
+                dx = 1f
+                dy = 0f
+                d = 1f
+            }
+            val ux = dx / d
+            val uy = dy / d
+            val mag = GRAPH_SPRING * (d - s.rest)
+            fx[s.a] += ux * mag
+            fy[s.a] += uy * mag
+            fx[s.b] -= ux * mag
+            fy[s.b] -= uy * mag
+        }
+        // ③ 向心收拢：整组很轻；中心角色单独一档（它要留在画布中心）。
+        for (i in 0 until n) {
+            val node = nodes[i]
+            val k = if (node.isCenter) GRAPH_CENTER_PULL_CENTER else GRAPH_CENTER_PULL
+            fx[i] -= node.x * k
+            fy[i] -= node.y * k
+        }
+        // ④ 位移：合力带阻尼积到速度里，速度单步封顶；钉住的球完全不动（手指说了算）。
+        var moved = 0f
+        val limit = stepLimitPx
+        for (i in 0 until n) {
+            val node = nodes[i]
+            if (node.id == pinnedId) {
+                // 钉住期间清掉速度：松手后不会带着拖动时的惯性弹出去。
+                vx[i] = 0f
+                vy[i] = 0f
+                continue
+            }
+            var dx = (vx[i] + fx[i]) * GRAPH_DAMPING
+            var dy = (vy[i] + fy[i]) * GRAPH_DAMPING
+            val len = sqrt(dx * dx + dy * dy)
+            if (len > limit) {
+                dx = dx / len * limit
+                dy = dy / len * limit
+            }
+            vx[i] = dx
+            vy[i] = dy
+            node.x += dx
+            node.y += dy
+            val step = sqrt(dx * dx + dy * dy)
+            if (step > moved) moved = step
+        }
+        return moved
+    }
+}
+
+/** 关系类型 → 弹簧目标长度系数（× 两球半径和）：越亲近越短。 */
+private fun springRestFactor(kind: RelationKind): Float = when (kind) {
+    RelationKind.LOVER, RelationKind.FAMILY -> 1.24f
+    RelationKind.FRIEND, RelationKind.ALLY -> 1.45f
+    RelationKind.MENTOR -> 1.60f
+    RelationKind.OTHER -> 1.78f
+    RelationKind.RIVAL -> 1.95f
+    RelationKind.ENEMY -> 2.12f
+}
+
+/** 固定种子的来源：bookId + 角色 id，同一本书同一批角色每次落点一致。 */
+private fun seedOf(bookId: String, id: String): Int {
+    var h = 1125899906842597L
+    bookId.forEach { h = 31L * h + it.code }
+    h = 31L * h + '|'.code
+    id.forEach { h = 31L * h + it.code }
+    return h.toInt()
+}
+
+/** 双指缩放比例（自己算，和 Compose 内部用的公式一致）。 */
+private fun zoomOf(changes: List<PointerInputChange>): Float {
+    if (changes.size < 2) return 1f
+    var curX = 0f
+    var curY = 0f
+    var prevX = 0f
+    var prevY = 0f
+    changes.forEach {
+        curX += it.position.x
+        curY += it.position.y
+        prevX += it.previousPosition.x
+        prevY += it.previousPosition.y
+    }
+    val n = changes.size.toFloat()
+    curX /= n
+    curY /= n
+    prevX /= n
+    prevY /= n
+    var curSize = 0f
+    var prevSize = 0f
+    changes.forEach {
+        curSize += (it.position - Offset(curX, curY)).getDistance()
+        prevSize += (it.previousPosition - Offset(prevX, prevY)).getDistance()
+    }
+    curSize /= n
+    prevSize /= n
+    return if (prevSize < 1f) 1f else curSize / prevSize
+}
+
 /** 角色图一帧的几何量（px）。 */
 private class GraphGeometry(
-    /** 环上球的半径。 */
+    /** 旁球的半径。 */
     val nodeR: Float,
-    /** 中心球半径（直径比旁球大 12dp，保留 3.26.16 的中心强调）。 */
+    /** 中心球半径（直径比旁球大 6dp，保留 3.26.16 的中心强调）。 */
     val centerR: Float,
-    /** 环半径；0 表示现场只有中心一个角色。 */
-    val ringR: Float,
-    /** 环上最多画几个球（超出部分写「还有 N 位在下面」）。 */
-    val nodes: Int,
     val ballTextSize: Float,
     val centerTextSize: Float,
 )
 
 /**
- * 3.26.43：角色图尺寸。
- *
- * 球径按角色数分三档：N≤6 → 48dp，7–10 → 42dp，>10 → 36dp；名字字号跟着降一档。
- * 环半径要让相邻两个环上球之间至少露出 14dp 的关系线：
- *
- *     R ≥ (2r + 14dp) / (2 · sin(π / n))      n = 环上的球数
- *
- * 但每条线都从中心球出发，所以中心球与环上球之间也要留 14dp：
- *
- *     R ≥ centerR + r + 14dp
- *
- * 两个下界取大。放不下时先按档缩球（用户点名的顺序）；缩到最小档还放不下，就把环半径
- * 夹进画布可用半径——宁可露出的线短一点，也不把球画到画布外或让球叠在一起。
+ * 角色图尺寸（沿用 3.26.43 的分档）：N≤6 → 48dp，7–10 → 42dp，>10 → 36dp；名字字号跟着降一档。
+ * 力导向不需要环半径这类「反推」几何：位置由力决定，视野由收敛后的 autoFit 适配。
  */
-private fun graphGeometry(
-    characterCount: Int,
-    width: Float,
-    height: Float,
-    density: Density,
-): GraphGeometry {
+private fun graphGeometry(characterCount: Int, density: Density): GraphGeometry {
     fun dp(value: Float): Float = with(density) { value.dp.toPx() }
-    val lineGap = dp(14f)
-    val halo = dp(1.5f)
-    val pad = dp(2f)
-    val diameters = floatArrayOf(48f, 42f, 36f)
-    val nodeText = floatArrayOf(10f, 9f, 8f)
-    val centerText = floatArrayOf(11f, 10f, 9f)
-    // >10 位时环上最多画 10 个，其余在「还有 N 位在下面」里提示（3.26.16 的老规矩）。
-    val nodes = min(characterCount - 1, 10).coerceAtLeast(0)
-    // 中心球上移 6dp，给底部提示留位置（沿用 3.26.16 的画布中心）。
-    val centerY = height / 2f - dp(6f)
-    var tier = when {
+    val tier = when {
         characterCount <= 6 -> 0
         characterCount <= 10 -> 1
         else -> 2
     }
-    while (true) {
-        val nodeR = dp(diameters[tier] / 2f)
-        val centerR = nodeR + dp(6f)
-        // 画布能给的环半径：上下左右都要留出球半径 + halo，再加 2dp 呼吸位。
-        val room = minOf(centerY, height - centerY, width / 2f) - pad - nodeR - halo
-        val byCenter = centerR + nodeR + lineGap
-        val byRing = if (nodes <= 1) 0f else (2f * nodeR + lineGap) / (2f * sin(PI / nodes).toFloat())
-        val need = maxOf(byCenter, byRing)
-        if (need <= room + .5f || tier >= diameters.lastIndex) {
-            return GraphGeometry(
-                nodeR = nodeR,
-                centerR = centerR,
-                ringR = if (nodes <= 0) 0f else minOf(need, room.coerceAtLeast(0f)),
-                nodes = nodes,
-                ballTextSize = dp(nodeText[tier]),
-                centerTextSize = dp(centerText[tier]),
-            )
-        }
-        tier++
-    }
+    val diameters = floatArrayOf(48f, 42f, 36f)
+    val nodeText = floatArrayOf(10f, 9f, 8f)
+    val centerText = floatArrayOf(11f, 10f, 9f)
+    val nodeR = dp(diameters[tier] / 2f)
+    return GraphGeometry(
+        nodeR = nodeR,
+        centerR = nodeR + dp(6f),
+        ballTextSize = dp(nodeText[tier]),
+        centerTextSize = dp(centerText[tier]),
+    )
 }
 
 /** 两点之间的单位向量；两点重合时没有方向可断，返回 null。 */
@@ -852,11 +1161,6 @@ private fun unitDirection(from: Offset, to: Offset): Offset? {
     val length = delta.getDistance()
     return if (length < .01f) null else delta / length
 }
-
-private fun relationKindBetween(bible: BookBible, a: String, b: String): RelationKind? =
-    bible.relations.firstOrNull {
-        (it.from == a && it.to == b) || (it.from == b && it.to == a)
-    }?.kind
 
 // ───────────────────────── 时间线 ─────────────────────────
 
