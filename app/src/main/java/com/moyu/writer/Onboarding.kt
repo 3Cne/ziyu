@@ -57,6 +57,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -94,6 +95,15 @@ import kotlin.math.roundToInt
 //    再 bump 一下 [TutorialSignal]，App.kt 盯版本号，一变就立刻起同一组 PPT。
 // ② 引导进出是一刀切。进场整层淡入 160ms；跳过 / 末页先淡出 200ms 再交回上层；
 //    `motion = none` 仍然直接切。
+
+// ===== 3.26.57：手动翻页判定收紧（用户报「要滑很长距离才翻页，短滑完全不动」） =====
+//
+// 3.26.53–3.26.56 的判定只有一条：`pos.roundToInt()` —— 必须拖过**半页（50% 页宽）**才翻，
+// 且完全没看速度，所以快速轻扫也会被弹回去。现在两条任意一条成立就翻：
+// ① 位移 > 页宽 [PPT_FLIP_FRACTION]（18%，≈ 屏宽 1/5.5）；
+// ② 松手速度 > [PPT_FLING_DP_PER_SEC]（400 dp/s）——快速轻扫必须能给过去。
+// 拖动期间页本来就逐帧跟手（`pos` 只在绘制阶段读），这块不动；自动播放 3.8s、
+// 手动后暂停 6s、跳过、首末页不越界、`motion = none` 全部照旧。
 
 /**
  * 「立即重播上手引导」信号（3.26.54）。
@@ -139,6 +149,12 @@ private const val PPT_RISE_DP = 12
 /** 3.26.54 进出场：整层淡入 160ms、淡出 200ms（`motion = none` 不走这两段，直接切）。 */
 private const val PPT_ENTER_MS = 160
 private const val PPT_EXIT_MS = 200
+
+/** 3.26.57 翻页判定①：位移超过页宽的这个比例就翻（18% ≈ 屏宽 1/5.5）。 */
+private const val PPT_FLIP_FRACTION = .18f
+
+/** 3.26.57 翻页判定②：松手速度超过这个值（dp/s）就翻，快速轻扫必须能给过去。 */
+private const val PPT_FLING_DP_PER_SEC = 400f
 
 /** 标题 / 说明固定占位高度：分层入场时不改变页面布局（否则整页会跳）。 */
 private val PptTitleHeight = 40.dp
@@ -341,20 +357,39 @@ fun PptOnboarding(onFinished: () -> Unit) {
                     .fillMaxWidth()
                     .clipToBounds()
                     .pointerInput(lastIndex) {
+                        // 3.26.57 翻页判定（原来只有「拖过半页」→ 短滑完全不动）：
+                        //   ① 位移 > 页宽 18%；② 松手速度 > 400 dp/s。两条任意一条成立就翻。
+                        // 速度优先，与 ViewPager / AnchoredDraggable 同序（反向轻扫读作「收回」）；
+                        // 首 / 末页越界由 settleTo 的 coerceIn 挡住，拖不出范围。
+                        val flingPx = PPT_FLING_DP_PER_SEC.dp.toPx()
+                        val velocity = VelocityTracker()
                         detectHorizontalDragGestures(
                             onDragStart = {
+                                velocity.resetTracking()
                                 settleJob?.cancel()
                                 resumeJob?.cancel()
                                 autoPaused = true
                             },
                             onHorizontalDrag = { change, delta ->
                                 change.consume()
+                                // 速度只取松手前 ~100ms 的样本；页位置照旧逐帧跟手（pos 在绘制阶段读）。
+                                velocity.addPosition(change.uptimeMillis, change.position)
                                 val width = size.width.toFloat().coerceAtLeast(1f)
                                 pos.floatValue = (pos.floatValue - delta / width)
                                     .coerceIn(-.14f, lastIndex + .14f)
                             },
                             onDragEnd = {
-                                val target = pos.floatValue.roundToInt().coerceIn(0, lastIndex)
+                                val vx = velocity.calculateVelocity().x // px/s，向右为正
+                                val moved = pos.floatValue - pageIndex // 单位是「页」
+                                val target = when {
+                                    vx > flingPx -> pageIndex - 1 // 向右快扫 → 上一页
+                                    vx < -flingPx -> pageIndex + 1 // 向左快扫 → 下一页
+                                    // 慢速松手：过 18% 页宽才翻；整页以上的连续拖动按最近页落（保持老手感）。
+                                    abs(moved) >= 1f -> pos.floatValue.roundToInt()
+                                    moved > PPT_FLIP_FRACTION -> pageIndex + 1
+                                    moved < -PPT_FLIP_FRACTION -> pageIndex - 1
+                                    else -> pageIndex
+                                }
                                 settleTo(target)
                                 scheduleResume()
                             },
