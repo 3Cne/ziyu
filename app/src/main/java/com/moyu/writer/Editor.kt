@@ -1471,6 +1471,7 @@ fun WritingScreen(
                     },
                     modifier = Modifier
                         .fillMaxWidth()
+                        .tutorialAnchor("editor.title")
                         .padding(horizontal = settings.pageMargin.dp)
                         // 2026-11-15：整体往上贴——上留白 14→10dp，顶部呼吸靠顶栏本身。
                         .padding(top = 10.dp, bottom = 2.dp)
@@ -1551,6 +1552,7 @@ fun WritingScreen(
                     Modifier
                         .weight(1f)
                         .fillMaxWidth()
+                        .tutorialAnchor("editor.body")
                         // 2026-11-16 用户定的终版（A）：章名保留缩小动画，正文**一步都不动**。
                         // 于是章名和正文之间会留出一条空白（标题占位不变、视觉缩小让出的那块），
                         // 用户明确接受这个留白，换底部绝对稳定。
@@ -2003,6 +2005,7 @@ fun WritingScreen(
                 Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
+                    .tutorialAnchor("editor.dock")
                     // 1型玻璃 only redraws when this node's draw is invalidated.
                     // Reading the scroll tick inside the draw scope subscribes the
                     // draw itself, so every body scroll re-samples the EditText
@@ -2163,6 +2166,7 @@ fun WritingScreen(
                         // 一个圆脑袋挂在左边；收起时同一形状留在原处。
                         .padding(bottom = 10.dp)
                         .size(38.dp)
+                        .tutorialAnchor("editor.ball")
                         .clip(SmoothCorner(11.dp))
                         .background(dockTone(ui))
                         .bouncy {
@@ -4987,7 +4991,13 @@ private fun EditorTopBar(
                 strength = .45f,
             )
             Spacer(Modifier.width(5.dp))
-            GlassIconButton(Glyph.More, onMore, size = 40.dp, strength = .45f)
+            GlassIconButton(
+                Glyph.More,
+                onMore,
+                modifier = Modifier.tutorialAnchor("editor.more"),
+                size = 40.dp,
+                strength = .45f,
+            )
         }
         // 3.26.48：章节 chip 行随「关联章节」出现/消失整行展开、收起。
         // 退出动画期间上层已经把 chips 传成 null；这里留住最后一次非空内容，
@@ -5287,8 +5297,12 @@ private fun EditorDock(
                                 horizontalArrangement = Arrangement.SpaceEvenly,
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                DockTool(Glyph.Undo, "撤销", canUndo, onUndo, width = DockToolWidth)
-                                DockTool(Glyph.Redo, "重做", canRedo, onRedo, width = DockToolWidth)
+                                Box(Modifier.tutorialAnchor("editor.tool.undo")) {
+                                    DockTool(Glyph.Undo, "撤销", canUndo, onUndo, width = DockToolWidth)
+                                }
+                                Box(Modifier.tutorialAnchor("editor.tool.redo")) {
+                                    DockTool(Glyph.Redo, "重做", canRedo, onRedo, width = DockToolWidth)
+                                }
                                 DockTool(Glyph.Indent, "缩进", true, onIndent, width = DockToolWidth)
                                 DockTool(Glyph.Quote, "引号", true, onQuote, width = DockToolWidth)
                                 DockTool(Glyph.Divider, "分节", true, onDivider, width = DockToolWidth)
@@ -5349,7 +5363,7 @@ private fun EditorDock(
                 }
                 Spacer(Modifier.height(7.dp))
                 LazyRow(
-                    Modifier.fillMaxWidth(),
+                    Modifier.fillMaxWidth().tutorialAnchor("editor.symbolRow"),
                     horizontalArrangement = Arrangement.spacedBy(1.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     // 左下角那一格（展开/收起球）占的宽度：38dp + 1dp 间隔，
