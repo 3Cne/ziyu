@@ -1139,9 +1139,55 @@ fun SettingRow(
     subtitle: String? = null,
     glyph: Glyph? = null,
     onClick: (() -> Unit)? = null,
+    /**
+     * 3.26.30：宽控件（三档分段、多枚筹码）另起一行铺满。
+     *
+     * 默认的同一行排法里，右侧控件在一个未加权的 Row 里量宽度；Segmented 内部是
+     * `BoxWithConstraints + fillMaxSize`，会吃满剩余宽度 → 左侧 `weight(1f)` 分到 0，
+     * 中文标题被挤成一字一行（2026-11-19 用户截图：设置 → 问书 → 改稿方式）。
+     * 这类控件用 stacked = true，标题在上、控件在下，两者都拿满宽。
+     */
+    stacked: Boolean = false,
     trailing: @Composable RowScope.() -> Unit = {},
 ) {
     val ui = LocalInk.current
+    if (stacked) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .then(if (onClick != null) Modifier.bouncy(scale = .99f) { onClick() } else Modifier)
+                .padding(horizontal = 16.dp, vertical = 13.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (glyph != null) {
+                    Box(
+                        Modifier
+                            .size(34.dp)
+                            .clip(SmoothCorner(11.dp))
+                            .background(ui.palette.faint),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        LineIcon(glyph, ui.palette.ink, 18.dp)
+                    }
+                    Spacer(Modifier.width(12.dp))
+                }
+                Column(Modifier.weight(1f)) {
+                    Txt(title, size = 14.5f, color = ui.palette.ink, weight = FontWeight.Medium)
+                    if (subtitle != null) {
+                        Spacer(Modifier.height(2.dp))
+                        Txt(subtitle, size = 10.5f, color = ui.palette.muted, lineHeight = 14f)
+                    }
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                content = trailing,
+            )
+        }
+        return
+    }
     Row(
         Modifier
             .fillMaxWidth()

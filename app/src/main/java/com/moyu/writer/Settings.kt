@@ -1652,6 +1652,7 @@ private fun AiSettingsPage(store: AppStore, onBack: () -> Unit, onOpen: (String)
                         else -> "自动：回答结束直接写，可一步撤销"
                     },
                     Glyph.Edit,
+                    stacked = true,
                 ) {
                     Segmented(
                         listOf("只读", "询问", "自动"),
