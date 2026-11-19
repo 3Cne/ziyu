@@ -60,6 +60,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.derivedStateOf
@@ -85,6 +86,23 @@ import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlin.math.roundToInt
+
+/**
+ * 清空问书聊天记录的一次性信号（3.26.51）。
+ *
+ * 聊天记录存在 `filesDir/ai/<bookId>.json` 的 `turns`（见 `MemoStore`）。设置页把盘上的
+ * `turns` 清空后 bump 一次；问书页（AiTab.kt）用 `version` 当 LaunchedEffect key 重新读盘，
+ * 这样用户从设置回到问书就是空态——否则 `AiScreen` 常驻组合、`memo` 只在首次组合时读盘，
+ * 旧的对话会一直留在内存里，还会在下一次发问时被 `persist` 写回盘。
+ *
+ * 只做版本通知，不保存任何对话内容；`version` 从 0 起，首次组合时 AiTab 读到 0 不动作。
+ */
+internal object ChatClearSignal {
+    var version by mutableIntStateOf(0)
+    fun bump() {
+        version++
+    }
+}
 
 internal val accentChoices = listOf(
     "墨黑" to 0xFF22221E,
@@ -184,13 +202,21 @@ fun SettingsScreen(store: AppStore, listState: LazyListState, onOpenPage: (Strin
         }
         item {
             Spacer(androidx.compose.ui.Modifier.height(4.dp))
-            SettingGroup("外观") {
-                // One door only: theme, accent and type all live on this page.
+            // 3.26.51 整理：「外观」组改叫「界面」，并把「标签栏」从「书架与写作」挪进来——
+            // 两行改的都是界面的样子；也顺带解决组名与行名都叫「外观」的撞车。
+            SettingGroup("界面") {
                 SettingRow(
                     "外观",
                     "${themeLabel(s.theme)} · ${accentChoices.firstOrNull { it.second == s.accent }?.first ?: "自定义"} · ${fontLabel(s.font)}",
                     Glyph.Sparkles,
                     onClick = { onOpenPage("appearance") },
+                )
+                RowDivider()
+                SettingRow(
+                    "标签栏",
+                    "${if (s.showTabLabels) "图标与文字" else "仅图标"} · ${s.tabNames.joinToString(" / ")}",
+                    Glyph.Layers,
+                    onClick = { onOpenPage("navigation") },
                 )
             }
         }
@@ -208,13 +234,6 @@ fun SettingsScreen(store: AppStore, listState: LazyListState, onOpenPage: (Strin
                     "每日 ${s.dailyGoal} 字 · 自动保存 ${s.autoSave} ms · ${if (s.indent) "自动缩进" else "手动缩进"}",
                     Glyph.Edit,
                     onClick = { onOpenPage("writing") },
-                )
-                RowDivider()
-                SettingRow(
-                    "标签栏",
-                    "${if (s.showTabLabels) "图标与文字" else "仅图标"} · ${s.tabNames.joinToString(" / ")}",
-                    Glyph.Layers,
-                    onClick = { onOpenPage("navigation") },
                 )
             }
         }
@@ -240,7 +259,9 @@ fun SettingsScreen(store: AppStore, listState: LazyListState, onOpenPage: (Strin
                 RowDivider()
                 SettingRow(
                     "提醒与通知",
-                    "待办提醒 · 通知权限与系统设置",
+                    // 3.26.51：原「写作习惯」页底部的「提醒」分区与这里重复（同一个系统通知设置入口），
+                    // 合并成这一个入口；只在这里保留时区摘要。提醒本来就是待办的事，不属于写作页。
+                    "待办提醒 · 通知权限 · 时区 ${java.util.TimeZone.getDefault().id}",
                     Glyph.Bell,
                     onClick = { openNotificationSettings(context) },
                 )
@@ -254,7 +275,11 @@ fun SettingsScreen(store: AppStore, listState: LazyListState, onOpenPage: (Strin
                     Glyph.Download,
                     onClick = { onOpenPage("data") },
                 )
-                RowDivider()
+            }
+        }
+        item {
+            // 3.26.51：「关于」不是数据，从「数据」组里拆出来单列。
+            SettingGroup("关于") {
                 SettingRow(
                     "关于素纸",
                     BuildConfig.VERSION_NAME,
@@ -459,12 +484,6 @@ private fun AppearancePage(store: AppStore, onBack: () -> Unit, onOpen: (String)
                 }
             }
         }
-        item { SectionCaption("玻璃") }
-        item {
-            SettingGroup {
-                SettingRow("玻璃", glyph = Glyph.Layers, onClick = { onOpen("glass") })
-            }
-        }
         item { SectionCaption("字体") }
         item {
             Segmented(
@@ -534,6 +553,13 @@ private fun AppearancePage(store: AppStore, onBack: () -> Unit, onOpen: (String)
                 },
                 androidx.compose.ui.Modifier.fillMaxWidth(),
             )
+        }
+        // 3.26.51：玻璃是材质入口，挪到字体/排版/纸面之后，免得把「文字相关」的分区从中间切开。
+        item { SectionCaption("玻璃") }
+        item {
+            SettingGroup {
+                SettingRow("玻璃", glyph = Glyph.Layers, onClick = { onOpen("glass") })
+            }
         }
         item {
             GlassButton(
@@ -881,7 +907,12 @@ private fun LibrarySettingsPage(store: AppStore, onBack: () -> Unit) {
                         modifier = androidx.compose.ui.Modifier.padding(horizontal = 16.dp),
                     )
                 }
-                RowDivider()
+            }
+        }
+        // 3.26.51：这是显示开关，不属于「尺寸」；从尺寸组移出来单列「显示」。
+        item { SectionCaption("显示") }
+        item {
+            SettingGroup {
                 SettingRow("显示今日字数", "书架顶部显示写作进度", Glyph.Chart) {
                     InkToggle(s.showStats) { on -> store.updateSettings { it.copy(showStats = on) } }
                 }
@@ -894,8 +925,7 @@ private fun LibrarySettingsPage(store: AppStore, onBack: () -> Unit) {
 private fun WritingSettingsPage(store: AppStore, onBack: () -> Unit) {
     val ui = LocalInk.current
     val s = ui.settings
-    val context = LocalContext.current
-    SettingsPage("写作习惯", "目标、保存和缩进，写的时候会按这里的设置来。", onBack) {
+    SettingsPage("写作习惯", "每日目标、自动保存和分节，写的时候按这里来。", onBack) {
         item {
             MoyuSurface(androidx.compose.ui.Modifier.fillMaxWidth(), radius = 24f, flat = true) {
                 Column(androidx.compose.ui.Modifier.padding(17.dp)) {
@@ -945,7 +975,12 @@ private fun WritingSettingsPage(store: AppStore, onBack: () -> Unit) {
                         modifier = androidx.compose.ui.Modifier.padding(horizontal = 16.dp),
                     )
                 }
-                RowDivider()
+            }
+        }
+        // 3.26.51：显示开关原来挤在「保存」组里名不副实，单列「显示」。
+        item { SectionCaption("显示") }
+        item {
+            SettingGroup {
                 SettingRow("显示字数", "编辑器和书籍详情里统计非空白字符", Glyph.Chart) {
                     InkToggle(s.showWordCount) { on -> store.updateSettings { it.copy(showWordCount = on) } }
                 }
@@ -1000,16 +1035,6 @@ private fun WritingSettingsPage(store: AppStore, onBack: () -> Unit) {
                     Spacer(androidx.compose.ui.Modifier.height(5.dp))
                     Txt("分节时会把这段符号单独放在空行里。", size = 8.5f, color = ui.palette.muted)
                 }
-            }
-        }
-        item { SectionCaption("提醒") }
-        item {
-            SettingGroup {
-                SettingRow("通知权限", "待办到点时在系统通知里提醒", Glyph.Bell, onClick = {
-                    openNotificationSettings(context)
-                })
-                RowDivider()
-                SettingRow("时区", "按本机时间提醒 · ${java.util.TimeZone.getDefault().id}", Glyph.Clock)
             }
         }
     }
@@ -1623,6 +1648,8 @@ private fun AiSettingsPage(store: AppStore, onBack: () -> Unit, onOpen: (String)
     var testing by remember { mutableStateOf(false) }
     var testResult by remember { mutableStateOf<String?>(null) }
     var keyTick by remember { mutableStateOf(0) }
+    // 3.26.51：清空问书聊天记录的确认框（ConfirmDialog 自己带走场，别自己写 Dialog）。
+    var confirmClearChat by remember { mutableStateOf(false) }
     val hasKey = remember(keyTick) { AiKey.has(context) }
     val keyTail = remember(keyTick) { AiKey.load(context)?.let { AiKey.tail(it) }.orEmpty() }
 
@@ -1663,34 +1690,9 @@ private fun AiSettingsPage(store: AppStore, onBack: () -> Unit, onOpen: (String)
             }
         }
         item {
-            SettingGroup("联网与文件") {
-                SettingRow(
-                    "联网搜索",
-                    "按次计费 · \$0.75/1000 次",
-                    Glyph.Search,
-                ) {
-                    InkToggle(settings.aiWeb) { v -> store.updateSettings { it.copy(aiWeb = v) } }
-                }
-                RowDivider()
-                SettingRow("搜索上限", "一次最多几次", Glyph.Layers) {
-                    androidx.compose.foundation.layout.Row(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        (1..5).forEach { n ->
-                            GlassChip(n.toString(), settings.aiWebMax == n) {
-                                store.updateSettings { it.copy(aiWebMax = n) }
-                            }
-                        }
-                    }
-                }
-                RowDivider()
-                SettingRow("工具过程", "回答下方显示每一步", Glyph.List) {
-                    InkToggle(settings.aiToolTrace) { v -> store.updateSettings { it.copy(aiToolTrace = v) } }
-                }
-            }
-        }
-        item {
-            SettingGroup("服务") {
+            // 3.26.51：原来「服务」与「Key」两组都是同一条连接的信息（地址 / 模型 / 密钥），
+            // 拆成两个分区找起来累；合并成「连接」一组，下面用分隔线分成两段。
+            SettingGroup("连接") {
                 Column(androidx.compose.ui.Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
                     Txt("服务地址", size = 12.5f)
                     Spacer(androidx.compose.ui.Modifier.height(6.dp))
@@ -1716,10 +1718,7 @@ private fun AiSettingsPage(store: AppStore, onBack: () -> Unit, onOpen: (String)
                         store.updateSettings { it.copy(aiBaseUrl = AiDefaults.BASE_URL, aiModel = AiDefaults.MODEL) }
                     })
                 }
-            }
-        }
-        item {
-            SettingGroup("Key") {
+                RowDivider()
                 Column(androidx.compose.ui.Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
                     Txt(if (hasKey) "已保存 $keyTail" else "还没有 Key", size = 12.5f)
                     Spacer(androidx.compose.ui.Modifier.height(6.dp))
@@ -1768,6 +1767,35 @@ private fun AiSettingsPage(store: AppStore, onBack: () -> Unit, onOpen: (String)
             }
         }
         item {
+            // 3.26.51：原组名「联网与文件」里已经没有文件项，按内容改「联网与工具」。
+            SettingGroup("联网与工具") {
+                SettingRow(
+                    "联网搜索",
+                    "按次计费 · \$0.75/1000 次",
+                    Glyph.Search,
+                ) {
+                    InkToggle(settings.aiWeb) { v -> store.updateSettings { it.copy(aiWeb = v) } }
+                }
+                RowDivider()
+                SettingRow("搜索上限", "一次最多几次", Glyph.Layers, stacked = true) {
+                    // 3.26.51：5 枚筹码原来塞在标题右侧会被挤扁，改 stacked 独占一行。
+                    androidx.compose.foundation.layout.Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        (1..5).forEach { n ->
+                            GlassChip(n.toString(), settings.aiWebMax == n) {
+                                store.updateSettings { it.copy(aiWebMax = n) }
+                            }
+                        }
+                    }
+                }
+                RowDivider()
+                SettingRow("工具过程", "回答下方显示每一步", Glyph.List) {
+                    InkToggle(settings.aiToolTrace) { v -> store.updateSettings { it.copy(aiToolTrace = v) } }
+                }
+            }
+        }
+        item {
             SettingGroup("发送上限") {
                 SettingRow("自动检索", "没引用时每次带多少原文", Glyph.Search) {
                     Txt("${settings.aiContextChars} 字 · ${settings.aiTopK} 段", size = 12f, color = ui.palette.muted)
@@ -1780,7 +1808,8 @@ private fun AiSettingsPage(store: AppStore, onBack: () -> Unit, onOpen: (String)
         }
         item {
             SettingGroup("整理笔记") {
-                SettingRow("带上几条对话", glyph = Glyph.Note) {
+                SettingRow("带上几条对话", glyph = Glyph.Note, stacked = true) {
+                    // 3.26.51：四档分段原来被 176dp 宽挤在标题右侧，改成整行铺满。
                     val idx = when (settings.noteContextCount) {
                         0 -> 3
                         2 -> 0
@@ -1802,11 +1831,10 @@ private fun AiSettingsPage(store: AppStore, onBack: () -> Unit, onOpen: (String)
                                 )
                             }
                         },
-                        androidx.compose.ui.Modifier.width(176.dp),
                     )
                 }
                 RowDivider()
-                SettingRow("输出长度", glyph = Glyph.Font) {
+                SettingRow("输出长度", glyph = Glyph.Font, stacked = true) {
                     androidx.compose.foundation.layout.Row(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
@@ -1820,6 +1848,47 @@ private fun AiSettingsPage(store: AppStore, onBack: () -> Unit, onOpen: (String)
                 }
             }
         }
+        item { SectionCaption("对话") }
+        item {
+            // 3.26.51：用户点名要的「清空问书聊天记录」。
+            // 只清 MemoStore 里每本书的 turns（以及可能存在的全局 turns）；
+            // chapters（章节摘要）、facts、问书引用（内存态）和故事圣经都不动。
+            SettingGroup {
+                SettingRow(
+                    "清空问书聊天记录",
+                    "只清所有书的对话消息，章节摘要、引用和故事圣经保留",
+                    Glyph.Trash,
+                    onClick = { confirmClearChat = true },
+                )
+            }
+        }
+    }
+    if (confirmClearChat) {
+        ConfirmDialog(
+            "清空问书聊天记录？",
+            "所有书的问书对话都会清空。章节摘要、引用和故事圣经不受影响；此操作无法撤销。",
+            "清空",
+            {
+                confirmClearChat = false
+                scope.launch {
+                    val books = store.books
+                    withContext(Dispatchers.IO) {
+                        // 每本书一份 filesDir/ai/<bookId>.json；只清 turns，别的不碰。
+                        books.forEach { b ->
+                            val m = MemoStore.load(context, b.id)
+                            if (m.turns.isNotEmpty()) MemoStore.save(context, m.copy(turns = emptyList()))
+                        }
+                        val g = MemoStore.loadGlobal(context)
+                        if (g.turns.isNotEmpty()) MemoStore.saveGlobal(context, g.copy(turns = emptyList()))
+                    }
+                    // 通知常驻组合的 AiScreen 重新读盘（AiTab.kt 按这个版本号重载 memo/chat）。
+                    ChatClearSignal.bump()
+                    ToastBus.show("已清空")
+                }
+            },
+            { confirmClearChat = false },
+            destructive = true,
+        )
     }
 }
 /** A named slider with its live value and a one-line explanation. Used by the
