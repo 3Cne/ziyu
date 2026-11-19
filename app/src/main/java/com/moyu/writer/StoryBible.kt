@@ -3,6 +3,7 @@ package com.moyu.writer
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ContentTransform
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FiniteAnimationSpec
 import androidx.compose.animation.core.MutableTransitionState
@@ -54,6 +55,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -89,6 +91,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import kotlin.math.PI
 import kotlin.math.cos
@@ -3225,12 +3228,18 @@ private fun LazyListScope.emptyPage(glyph: Glyph, title: String, message: String
 }
 
 /**
- * 两页共用的页面骨架（3.26.48）。
+ * 两页共用的页面骨架（3.26.48；3.26.57 待同意卡移出列表）。
  *
  * 结构固定成三层，任何一页都不许自己再拼：
- * ① 可滚动内容区（[BoxWithConstraints] 给关系图算高度，两页同一个「30% 夹 150–240dp」规则）；
- * ② 待同意差异卡（同意 / 拒绝）——**两页都铺**：它是「AI 想改你条目」的通知，不是 AI 页专属；
+ * ① **待同意差异卡区**——在滚动列表**上方**独立成区（3.26.57）：高度上限 = 内容区高度 × .28，
+ *    卡多时卡区内部自己滚，不再把下面的内容顶下去（旧版卡片和正文在同一个 [LazyColumn] 里、
+ *    卡片排在前面，一两张 180–260dp 的卡就把关系图顶出首屏）；
+ * ② 可滚动内容区（[BoxWithConstraints] 给关系图算高度，两页同一个「30% 夹 150–240dp」规则；
+ *    关系图是该列表的**第一个 item**，所以永远在首屏）；
  * ③ 底部：已同步结果行（有同步时才长出来）+ 主按钮（见 [StoryPageFooter]）。
+ *
+ * 卡区动效（3.26.57）：每张 [PendingChangeCard] 自带 spring(.6f, 380f) 滑入/滑出，卡区高度
+ * 交给 `animateContentSize` 跟着同一根弹簧走；`motion = none` 时两者都是 `tween(0)`。
  */
 @Composable
 private fun StoryPageScaffold(
@@ -3242,25 +3251,50 @@ private fun StoryPageScaffold(
     onPrimary: () -> Unit,
     content: LazyListScope.(graphHeight: Dp) -> Unit,
 ) {
+    val ui = LocalInk.current
+    val motion = ui.settings.motion != "none"
     Column(Modifier.fillMaxSize()) {
         BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
             val graphH = (maxHeight * .30f).coerceIn(150.dp, 240.dp)
-            LazyColumn(
-                Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(bottom = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                items(pending, key = { "p_" + it.id }) { change ->
-                    // 同意 / 拒绝后，剩下的卡片带弹簧上移到新位置（差异卡自己负责滑出）。
-                    Box(
-                        Modifier.animateItem(
-                            fadeInSpec = null,
-                            placementSpec = storyPlacementSpec(),
-                            fadeOutSpec = null,
-                        ),
-                    ) { PendingChangeCard(change, resolve) }
+            // 3.26.57：卡区最多吃掉内容区的 28%，超出的卡在卡区内部滚——关系图因此永远在首屏。
+            val cardAreaMax = maxHeight * .28f
+            val cardAreaSpec: FiniteAnimationSpec<IntSize> =
+                if (motion) spring(dampingRatio = .6f, stiffness = 380f) else tween(0)
+            Column(Modifier.fillMaxSize()) {
+                // 待同意差异卡：列表上方独立卡区（自己的滚动 + 自己的高度上限）。
+                // 不在这里再做一层 AnimatedVisibility——显隐由每张卡自带的进场/退场负责；
+                // 卡区高度用 animateContentSize 跟着弹簧长/收，保留旧版「落位」的弹簧手感。
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .clipToBounds()
+                        .animateContentSize(animationSpec = cardAreaSpec),
+                ) {
+                    if (pending.isNotEmpty()) {
+                        Column(
+                            Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = cardAreaMax)
+                                .verticalScroll(rememberScrollState()),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            pending.forEach { change ->
+                                // 与旧版 `items(key = …)` 同样的身份 key：前面一张同意后，
+                                // 后面的卡保住自己的 vt / decision 状态，不会串状态自动落库。
+                                key("p_" + change.id) { PendingChangeCard(change, resolve) }
+                            }
+                        }
+                        // 与列表的间距沿用旧 LazyColumn 的 verticalArrangement（10dp）。
+                        Spacer(Modifier.height(10.dp))
+                    }
                 }
-                content(graphH)
+                LazyColumn(
+                    Modifier.weight(1f).fillMaxWidth(),
+                    contentPadding = PaddingValues(bottom = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    content(graphH)
+                }
             }
         }
         Spacer(Modifier.height(8.dp))
@@ -3510,7 +3544,7 @@ private fun storyPageTransform(motion: Boolean, forward: Boolean): ContentTransf
     return slideInHorizontally(spec) { it * dir } togetherWith slideOutHorizontally(spec) { -it * dir }
 }
 
-/** LazyColumn 里卡片落位的弹簧（同意 / 拒绝后剩下的卡片被推上来）。 */
+/** LazyColumn 里的落位弹簧（3.26.57：待同意卡搬出列表后，现用于同步预览 / 按大纲建章这类列表）。 */
 @Composable
 private fun storyPlacementSpec(): FiniteAnimationSpec<IntOffset> {
     val motion = LocalInk.current.settings.motion != "none"
