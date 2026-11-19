@@ -60,6 +60,7 @@ import androidx.compose.runtime.produceState
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -247,6 +248,23 @@ private fun MoyuRoot(store: AppStore, initialNote: String?, consumeInitialNote: 
         // 页内首次教学由后续接线按各自的组 id 触发。
         if (!s.onboardingDone && TutorialGroups.LANDING !in s.tutorialDone) {
             tutorial.start(LANDING_TUTORIAL)
+        }
+    }
+
+    // 3.26.54：设置 → 关于 →「重看功能引导」点了当场播放，不用清后台重进。
+    // 那一行只清 tutorialDone / onboardingDone（写设置），而上面那段「要不要起引导」的检查
+    // 只在根组合期跑一次，所以这里再挂一个信号：Settings 侧 TutorialSignal.bump()，
+    // 版本号一变就立刻起同一组 PPT（结束 / 跳过的写回路径与首启完全一样）。
+    LaunchedEffect(tutorial) {
+        if (tutorial == null) return@LaunchedEffect
+        // 以开始收集时的版本号为基线：Activity 重建（例如改系统字号）后重新组合时，
+        // 上次已经处理过的 bump 不会被当成新请求把引导再播一遍。
+        var seen = TutorialSignal.version
+        snapshotFlow { TutorialSignal.version }.collect { v ->
+            if (v != seen) {
+                seen = v
+                tutorial.start(LANDING_TUTORIAL)
+            }
         }
     }
 

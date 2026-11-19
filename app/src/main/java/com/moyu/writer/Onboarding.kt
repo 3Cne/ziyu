@@ -86,6 +86,40 @@ import kotlin.math.roundToInt
 // - 示意图元素逐件出现：每 [PPT_ART_STEP_MS]（220ms）一件，scaleIn(.94→1) + fade；
 // - `motion = none`：全部 tween(0)、不自动播放，只留手动滑。
 
+// ===== 3.26.54：设置里「重看功能引导」当场播放 + PPT 进出场淡入淡出 =====
+//
+// 3.26.53 留了两个缺口，这一版在 Onboarding.kt / App.kt 内部补掉：
+// ① 设置 → 关于 →「重看功能引导」只清 tutorialDone / onboardingDone，而「要不要起引导」的
+//    判断在 App.kt 的根组合期只跑一次 → 点了当场没反应，要清后台重进。现在 Settings 侧
+//    再 bump 一下 [TutorialSignal]，App.kt 盯版本号，一变就立刻起同一组 PPT。
+// ② 引导进出是一刀切。进场整层淡入 160ms；跳过 / 末页先淡出 200ms 再交回上层；
+//    `motion = none` 仍然直接切。
+
+/**
+ * 「立即重播上手引导」信号（3.26.54）。
+ *
+ * 形态照 [ChatClearSignal]：只有一个自增版本号，不携带任何内容。生产者是设置页，
+ * 消费者是根组合（App.kt 的 `snapshotFlow { TutorialSignal.version }`）。
+ *
+ * **Settings.kt 要加的一行**（「重看功能引导」的 onClick 里，清完两个标记之后）：
+ * ```
+ * store.updateSettings { it.copy(tutorialDone = emptyList(), onboardingDone = false) }
+ * TutorialSignal.bump()
+ * ```
+ * 清标记仍然要留着：它保证「重看之后又中途杀掉 App」的下一次冷启动还会重播；
+ * 冷启动那条路径（App.kt 的根组合期检查）不经过这个信号，两者互不替代。
+ *
+ * 版本号从 0 起。消费者以自己的收集起点为基线，所以已处理过的 bump 不会在
+ * Activity 重建（例如改系统字号）后把引导再播一遍。
+ */
+internal object TutorialSignal {
+    var version by mutableIntStateOf(0)
+
+    fun bump() {
+        version++
+    }
+}
+
 /** 一页自动展示时长（含示意图逐件入场后的阅读停顿）。改这里即可整体调快慢。 */
 private const val PPT_DISPLAY_MS = 3800L
 
@@ -101,6 +135,10 @@ private const val PPT_ART_DELAY_MS = 120L
 
 /** 标题从下往上进的距离。 */
 private const val PPT_RISE_DP = 12
+
+/** 3.26.54 进出场：整层淡入 160ms、淡出 200ms（`motion = none` 不走这两段，直接切）。 */
+private const val PPT_ENTER_MS = 160
+private const val PPT_EXIT_MS = 200
 
 /** 标题 / 说明固定占位高度：分层入场时不改变页面布局（否则整页会跳）。 */
 private val PptTitleHeight = 40.dp
@@ -170,6 +208,30 @@ fun PptOnboarding(onFinished: () -> Unit) {
     val lastIndex = pages.lastIndex
     val scope = rememberCoroutineScope()
 
+    // 3.26.54 进出场：整层只有这一个不透明度在动。纸底和所有内容在同一个 graphicsLayer 里
+    // 一起淡，不会出现「两份内容叠着淡」——3.26.25 的亮度闪烁就是两层内容叠出来的。
+    // 进场 0 → 1（160ms）；跳过 / 末页 / 首页返回先把 1 → 0（200ms）播完，才把 onFinished
+    // 交回上层（写 tutorialDone + 摘掉引导层），所以退场看得见。motion = none：恒为 1，直接切。
+    val layerAlpha = remember { Animatable(if (motion) 0f else 1f) }
+    var closing by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        if (motion && layerAlpha.value < 1f) layerAlpha.animateTo(1f, tween(PPT_ENTER_MS))
+    }
+
+    /** 跳过 / 末页「开始写」/ 首页返回：先淡出再交回上层；重复触发只算一次。 */
+    fun dismiss() {
+        if (closing) return
+        closing = true
+        if (!motion) {
+            onFinished()
+            return
+        }
+        scope.launch {
+            layerAlpha.animateTo(0f, tween(PPT_EXIT_MS))
+            onFinished()
+        }
+    }
+
     // 视觉页位置（0..lastIndex，拖动时允许一点橡皮筋）。只在绘制阶段读，换页不重组页面内容。
     val pos = remember { mutableFloatStateOf(0f) }
     // 顶栏页码：松手即更新（读起来跟手）。
@@ -182,8 +244,9 @@ fun PptOnboarding(onFinished: () -> Unit) {
     var settleJob by remember { mutableStateOf<Job?>(null) }
     val progress = remember { Animatable(0f) }
 
-    /** 翻到某一页：整幅横移，不淡（两页并排）。 */
+    /** 翻到某一页：整幅横移，不淡（两页并排）。退场淡出开始后不再接受翻页。 */
     fun settleTo(target: Int) {
+        if (closing) return
         val t = target.coerceIn(0, lastIndex)
         if (pageIndex != t) pageIndex = t
         settleJob?.cancel()
@@ -213,7 +276,9 @@ fun PptOnboarding(onFinished: () -> Unit) {
     }
 
     // 自动播放：与页底进度条同源——同一个 tween(3800, LinearEasing) 跑完就翻下一页。
-    LaunchedEffect(settledPage, autoPaused, motion) {
+    // 退场淡出开始后不再翻页（否则 200ms 的淡出里页面还在横移）。
+    LaunchedEffect(settledPage, autoPaused, motion, closing) {
+        if (closing) return@LaunchedEffect
         if (!motion) {
             // motion=none：不自动播放，进度条只显示「看到第几页」。
             progress.snapTo((settledPage + 1f) / pages.size)
@@ -233,14 +298,17 @@ fun PptOnboarding(onFinished: () -> Unit) {
         settleTo(settledPage + 1)
     }
 
-    // 首页按返回退出（可退出）；其余页先回上一页。
+    // 首页按返回退出（可退出）；其余页先回上一页。退场淡出期间不再响应。
     BackHandler {
-        if (pageIndex > 0) settleTo(pageIndex - 1) else onFinished()
+        if (closing) return@BackHandler
+        if (pageIndex > 0) settleTo(pageIndex - 1) else dismiss()
     }
 
     BoxWithConstraints(
         Modifier
             .fillMaxSize()
+            // 3.26.54 进出场：纸底 + 内容都在这一层里，只动这一个 alpha（单层合成，不叠第二份内容）。
+            .graphicsLayer { alpha = layerAlpha.value }
             .background(p.paper)
             .statusBarsPadding()
             .navigationBarsPadding(),
@@ -259,7 +327,7 @@ fun PptOnboarding(onFinished: () -> Unit) {
         )
         PptBackdrop()
         Column(Modifier.fillMaxSize()) {
-            PptTopBar(pageIndex = pageIndex, total = pages.size, onSkip = onFinished)
+            PptTopBar(pageIndex = pageIndex, total = pages.size, onSkip = { dismiss() })
             BoxWithConstraints(
                 Modifier
                     .weight(1f)
@@ -305,7 +373,7 @@ fun PptOnboarding(onFinished: () -> Unit) {
                 autoPaused = autoPaused,
                 settledPage = settledPage,
                 progressValue = { progress.value },
-                onStart = onFinished,
+                onStart = { dismiss() },
             )
         }
     }
