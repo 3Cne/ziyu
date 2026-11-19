@@ -5084,12 +5084,17 @@ private fun EditorDock(
                         // AI 入口：点开横向展开成「校核 | 修饰」两格。这份 state
                         // 随选框行一起销毁——选择结束时自然收起，不用手动复位。
                         var aiOpen by remember { mutableStateOf(false) }
+                        // 3.26.38：这一行最多 9 格（AI 展开成 3 个 + 6 个动作）。以前每格固定宽、
+                        // 整行 SpaceBetween，9 格加起来超过屏宽，最右边的「取消」被裁成「取」。
+                        // 改成按格数分配权重：AI 展开时占 3 格宽、其余各 1 格，都按屏宽均分，
+                        // 格子自己收窄，文字不会再被切掉。
                         Row(
                             Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
+                            horizontalArrangement = Arrangement.spacedBy(0.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             if (onProof != null || onPolish != null || onAsk != null) {
+                                DockCell(if (aiOpen) 3f else 1f) {
                                 AnimatedContent(
                                     targetState = aiOpen,
                                     transitionSpec = {
@@ -5122,13 +5127,14 @@ private fun EditorDock(
                                         }
                                     }
                                 }
+                                }
                             }
-                            DockTool(Glyph.Share, "复制", true, onCopy)
-                            DockTool(Glyph.Check, "全选", true, onSelectAll)
-                            DockTool(Glyph.Edit, "剪切", true, onCut)
-                            DockTool(Glyph.Download, "粘贴", true, onPaste)
-                            DockTool(Glyph.Trash, "删除", true, onDelete)
-                            DockTool(Glyph.Close, "取消", true, onCancelSelection)
+                            DockCell { DockTool(Glyph.Share, "复制", true, onCopy) }
+                            DockCell { DockTool(Glyph.Check, "全选", true, onSelectAll) }
+                            DockCell { DockTool(Glyph.Edit, "剪切", true, onCut) }
+                            DockCell { DockTool(Glyph.Download, "粘贴", true, onPaste) }
+                            DockCell { DockTool(Glyph.Trash, "删除", true, onDelete) }
+                            DockCell { DockTool(Glyph.Close, "取消", true, onCancelSelection) }
                         }
                     } else {
                         // 工具行：8 格固定 36dp，整行 SpaceEvenly 均分。
@@ -5227,6 +5233,18 @@ private fun EditorDock(
 
 private val LocalDockFg = androidx.compose.runtime.staticCompositionLocalOf { Color.Unspecified }
 private val LocalDockDim = androidx.compose.runtime.staticCompositionLocalOf { Color.Unspecified }
+
+@Composable
+private fun androidx.compose.foundation.layout.RowScope.DockCell(
+    weight: Float = 1f,
+    content: @Composable () -> Unit,
+) {
+    androidx.compose.foundation.layout.Box(
+        Modifier.weight(weight),
+        contentAlignment = Alignment.Center,
+        content = { content() },
+    )
+}
 
 @Composable
 private fun DockTool(
