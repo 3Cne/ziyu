@@ -65,7 +65,8 @@ import java.time.LocalDateTime
  *
  * 2026-11-15 用户定：笔记先按夹分，进夹以后才看得到笔记本身，点笔记才进正文。
  * 「笔记夹」就是原来的笔记分组（`noteGroups`，一条数据都没换），只是从一条筛选
- * 条件升级成进入笔记的必经一层。`folderId == null` 是常驻的「未归类」。
+ * 条件升级成进入笔记的必经一层。`folderId == null` 是「未归类」入口；没有笔记夹时它照常
+ * 可用，但一条笔记都没有的空状态只提示「点右上角 +」，不再叠一张「先建夹」大空态（3.26.52）。
  */
 @Composable
 fun NotesScreen(
@@ -83,6 +84,11 @@ fun NotesScreen(
     var renameFolder by remember { mutableStateOf<Group?>(null) }
 
     fun countOf(folderId: String?): Int = notes.count { it.groupId == folderId }
+
+    // 3.26.52：没有笔记夹时不再把「还没有笔记夹」大空态 + 「未归类」行 + 「新建笔记夹」大按钮
+    // 叠在一起——三块说的是同一个「开始记笔记」，而且「未归类」本来就能直接写，空态文案自相矛盾。
+    // 现在按数据分三种：有夹 = 原样；有笔记没夹 = 只留「未归类」；都没有 = 一句行动提示 + 次要建夹入口。
+    val showEmpty = folders.isEmpty() && notes.isEmpty()
 
     Box(Modifier.fillMaxSize()) {
         AmbientBackground()
@@ -109,22 +115,26 @@ fun NotesScreen(
                     Spacer(Modifier.height(18.dp))
                 }
             }
-            if (folders.isEmpty() && notes.isEmpty()) {
-                item {
-                    EmptyState(
-                        Glyph.Folder,
-                        "还没有笔记夹",
-                        "先建一个笔记夹，再往里写。笔记夹就是以前的分组，现在要先点夹才看得到笔记。",
-                    )
-                }
-            }
             item {
-                FolderRow(
-                    name = "未归类",
-                    count = countOf(null),
-                    accent = false,
-                    onClick = { onOpenFolder(null) },
-                )
+                Column(Modifier.fillMaxWidth()) {
+                    // 3.26.52：空态与「未归类」是互斥的两个入口，只出现一个。
+                    // 切换走 MoyuExpand —— 旧块缩回去、新块长出来，motion=none 在组件内部已降级为 tween(0)。
+                    MoyuExpand(expand = showEmpty) {
+                        EmptyState(
+                            Glyph.Note,
+                            "还没有笔记",
+                            "点右上角 +，先记下第一句话。",
+                        )
+                    }
+                    MoyuExpand(expand = !showEmpty) {
+                        FolderRow(
+                            name = "未归类",
+                            count = countOf(null),
+                            accent = false,
+                            onClick = { onOpenFolder(null) },
+                        )
+                    }
+                }
             }
             // 3.26.48：笔记夹行加 key + animateItem——上移/下移、增删时整行弹簧落到新位置，
             // 不再同帧重排（与夹内笔记卡同一套）。
@@ -140,8 +150,33 @@ fun NotesScreen(
                 }
             }
             item {
-                Spacer(Modifier.height(4.dp))
-                GlassButton("新建笔记夹", { createFolderOpen = true }, Modifier.fillMaxWidth(), glyph = Glyph.Plus)
+                Column(Modifier.fillMaxWidth()) {
+                    Spacer(Modifier.height(4.dp))
+                    if (showEmpty) {
+                        // 3.26.52：一条笔记都没有时，主行动是右上角的 +（项目空态规则：不再来第二个
+                        // 创建按钮）；「新建笔记夹」保留但降成文本按钮，只作为次要入口。
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(CircleShape)
+                                .bouncy(scale = .985f) { createFolderOpen = true }
+                                .padding(vertical = 12.dp),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            LineIcon(Glyph.Plus, p.muted, 14.dp)
+                            Spacer(Modifier.width(6.dp))
+                            Txt("新建笔记夹", size = 12.5f, color = p.muted, weight = FontWeight.Medium)
+                        }
+                    } else {
+                        GlassButton(
+                            "新建笔记夹",
+                            { createFolderOpen = true },
+                            Modifier.fillMaxWidth(),
+                            glyph = Glyph.Plus,
+                        )
+                    }
+                }
             }
         }
     }
