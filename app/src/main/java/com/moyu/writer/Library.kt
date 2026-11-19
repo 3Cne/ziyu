@@ -552,19 +552,23 @@ fun LibraryScreen(
                     store.updateSettings { it.copy(libraryMode = "list") }
                 }
             }
-            if (settings.libraryMode == "grid") {
-                Spacer(Modifier.height(9.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Txt("分栏", size = 10f, color = LocalInk.current.palette.muted)
-                    Spacer(Modifier.width(9.dp))
-                    GlassChip("−", false) {
-                        store.updateSettings { it.copy(columns = (it.columns - 1).coerceAtLeast(2)) }
-                    }
-                    Spacer(Modifier.width(6.dp))
-                    Txt("${settings.columns} 栏", size = 11.5f)
-                    Spacer(Modifier.width(6.dp))
-                    GlassChip("+", false) {
-                        store.updateSettings { it.copy(columns = (it.columns + 1).coerceAtMost(4)) }
+            // 3.26.48：分栏行只在「网格」排布出现，以前 if 同帧增减、面板高度硬跳；
+            // 改走统一展开包装 MoyuExpand（高度 + 淡入一起长出来 / 收回去，motion=none 降 tween(0)）。
+            MoyuExpand(expand = settings.libraryMode == "grid") {
+                Column(Modifier.fillMaxWidth()) {
+                    Spacer(Modifier.height(9.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Txt("分栏", size = 10f, color = LocalInk.current.palette.muted)
+                        Spacer(Modifier.width(9.dp))
+                        GlassChip("−", false) {
+                            store.updateSettings { it.copy(columns = (it.columns - 1).coerceAtLeast(2)) }
+                        }
+                        Spacer(Modifier.width(6.dp))
+                        Txt("${settings.columns} 栏", size = 11.5f)
+                        Spacer(Modifier.width(6.dp))
+                        GlassChip("+", false) {
+                            store.updateSettings { it.copy(columns = (it.columns + 1).coerceAtMost(4)) }
+                        }
                     }
                 }
             }
@@ -881,10 +885,10 @@ fun BookEditorDialog(
         }
     }
     val keyboard = LocalSoftwareKeyboardController.current
-    val dismiss = {
-        keyboard?.hide()
-        onDismiss()
-    }
+    // 3.26.48：取消 / 标题 X / 创建·保存统一走 GlassDialog 的 close（先播退场、退场 idle 后才回调 onDismiss），
+    // 不再直接调外层 onDismiss 把宿主的 if(flag) 当帧卸掉、退场被跳过。
+    // 「创建·保存」还要落库 / 导航，所以先把待提交的书暂存，等退场结束的 onDismiss 里再交出去。
+    var pendingSubmit by remember { mutableStateOf<Book?>(null) }
     var editing by remember { mutableStateOf<String?>(null) }
     val editFocus = remember { androidx.compose.ui.focus.FocusRequester() }
     LaunchedEffect(editing) {
@@ -897,14 +901,25 @@ fun BookEditorDialog(
         editing = null
     }
     GlassDialog(
-        dismiss,
+        onDismiss = {
+            // 退场播完才走到这里：这时的落库 / 导航不会再和退场抢同一帧。
+            val book = pendingSubmit
+            pendingSubmit = null
+            keyboard?.hide()
+            if (book != null) onSubmit(book) else onDismiss()
+        },
         dismissOnOutsideClick = false,
-    ) {
+        closeableContent = { close ->
+        // 按钮统一走 close()：先播面板退场，等 idle 后 GlassDialog 才回调上面的 onDismiss。
+        val closeAndHide = {
+            keyboard?.hide()
+            close()
+        }
         AnimatedPane(targetState = editing, label = "bookField") { field ->
             if (field == null) {
             DialogTitle(
                 if (existing == null) "新建一本书" else "编辑书籍",
-                onClose = dismiss,
+                onClose = closeAndHide,
             )
             Spacer(Modifier.height(8.dp))
             val groupName = groups.firstOrNull { it.id == groupId }?.name ?: "未分组"
@@ -1031,7 +1046,7 @@ fun BookEditorDialog(
         }
         if (editing == null) {
         Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-            GlassButton("取消", dismiss, Modifier.weight(1f))
+            GlassButton("取消", closeAndHide, Modifier.weight(1f))
             PrimaryButton(
                 if (existing == null) "创建" else "保存",
                 {
@@ -1039,34 +1054,31 @@ fun BookEditorDialog(
                         editing = "title"
                         ToastBus.show("先给故事一个名字")
                     } else {
-                        keyboard?.hide()
-                        if (existing == null) {
+                        // 先暂存、再 close：真正的 onSubmit 在退场结束后的 onDismiss 里执行。
+                        pendingSubmit = if (existing == null) {
                             val first = Chapter(title = chapterFallbackTitle(0))
-                            onSubmit(
-                                Book(
-                                    title = titleState.value.trim(),
-                                    author = author.trim(),
-                                    genre = genre.trim(),
-                                    synopsis = synopsis.trim(),
-                                    coverStyle = style,
-                                    coverUri = coverUri,
-                                    chapters = listOf(first),
-                                    groupId = groupId,
-                                )
+                            Book(
+                                title = titleState.value.trim(),
+                                author = author.trim(),
+                                genre = genre.trim(),
+                                synopsis = synopsis.trim(),
+                                coverStyle = style,
+                                coverUri = coverUri,
+                                chapters = listOf(first),
+                                groupId = groupId,
                             )
                         } else {
-                            onSubmit(
-                                existing.copy(
-                                    title = titleState.value.trim(),
-                                    author = author.trim(),
-                                    genre = genre.trim(),
-                                    synopsis = synopsis.trim(),
-                                    coverStyle = style,
-                                    coverUri = coverUri,
-                                    groupId = groupId,
-                                )
+                            existing.copy(
+                                title = titleState.value.trim(),
+                                author = author.trim(),
+                                genre = genre.trim(),
+                                synopsis = synopsis.trim(),
+                                coverStyle = style,
+                                coverUri = coverUri,
+                                groupId = groupId,
                             )
                         }
+                        closeAndHide()
                     }
                 },
                 Modifier.weight(1f),
@@ -1074,7 +1086,8 @@ fun BookEditorDialog(
             )
         }
         }
-    }
+        },
+    )
 }
 
 @Composable
@@ -1192,7 +1205,9 @@ fun BookDetailScreen(
             }
             if (book.synopsis.isNotBlank()) {
                 item {
-                    MoyuSurface(Modifier.fillMaxWidth(), radius = 22f, flat = true) {
+                    // 3.26.48：简介卡补 animateItem——简介增删时淡入淡出、上下列弹簧让位，
+                    // 以前它和目录其它项不一样，是当帧硬出现 / 硬消失。
+                    MoyuSurface(Modifier.fillMaxWidth().animateItem(), radius = 22f, flat = true) {
                         Txt(
                             book.synopsis,
                             size = 11.5f,
@@ -1257,13 +1272,23 @@ fun BookDetailScreen(
                     }
                 )
             }
+            // 3.26.48：目录项补 animateItem——新建 / 删除 / 重命名时淡入淡出 + 弹簧落位。
+            // key 本来就是章节 id（改名不会让整列重排），这里只补动画。
             items(book.chapters, key = { it.id }) { chapter ->
-                ChapterRow(
-                    index = book.chapters.indexOf(chapter) + 1,
-                    chapter = chapter,
-                    onClick = { onOpenChapter(book.id, chapter.id) },
-                    onMore = { chapterMenu = chapter },
-                )
+                Box(
+                    Modifier.animateItem(
+                        fadeInSpec = tween(160),
+                        fadeOutSpec = tween(120),
+                        placementSpec = spring(dampingRatio = .78f, stiffness = 380f),
+                    )
+                ) {
+                    ChapterRow(
+                        index = book.chapters.indexOf(chapter) + 1,
+                        chapter = chapter,
+                        onClick = { onOpenChapter(book.id, chapter.id) },
+                        onMore = { chapterMenu = chapter },
+                    )
+                }
             }
             item {
                 AddChapterRow { addChapter = true }
@@ -1273,13 +1298,20 @@ fun BookDetailScreen(
     }
 
     if (menuOpen) {
-        InlineModalSheet(onDismiss = {
-            menuOpen = false
-            sheetLevel = 1
-            val action = pendingSheetAction
-            pendingSheetAction = null
-            action?.invoke()
-        }) { close ->
+        // 3.26.48：bleedContent = true——这是本文件里唯一真做整幅横移的面板（1→2→3 同框滑）。
+        // 以前内容槽自带 20dp「内窗口」留白，整页滑动到页边时会被裁出两道纸色竖边；
+        // 现在槽是面板全宽，每页自己在内容列上补回 SHEET_CONTENT_INSET（纸底仍铺满整宽），
+        // 静止态像素与改前一致，只有滑动途中不再被内窗口切掉。
+        InlineModalSheet(
+            onDismiss = {
+                menuOpen = false
+                sheetLevel = 1
+                val action = pendingSheetAction
+                pendingSheetAction = null
+                action?.invoke()
+            },
+            bleedContent = true,
+        ) { close ->
             AnimatedContent(
                 targetState = sheetLevel,
                 transitionSpec = {
@@ -1296,54 +1328,62 @@ fun BookDetailScreen(
             ) { step ->
                 when (step) {
                     1 -> SheetPane {
-                        DialogTitle("书籍设置", book.title, onClose = { close() })
-                        Spacer(Modifier.height(14.dp))
-                        SettingRow("编辑书籍", "书名、作者、封面和简介", Glyph.Edit, onClick = {
-                            pendingSheetAction = { editOpen = true }
-                            close()
-                        })
-                        RowDivider()
-                        SettingRow(
-                            "移动到分组",
-                            store.bookGroups.firstOrNull { it.id == book.groupId }?.name ?: "未分组",
-                            Glyph.Layers,
-                            onClick = { sheetLevel = 2 },
-                        )
-                        RowDivider()
-                        SettingRow("导出书籍", "TXT / EPUB，自动生成目录", Glyph.Export, onClick = {
-                            sheetLevel = 3
-                        })
-                        RowDivider()
-                        SettingRow("置顶到书架", if (book.pinned) "已置顶" else "按更新时间排序", Glyph.Pin, trailing = {
-                            InkToggle(book.pinned) { on ->
-                                store.updateBook(book.id) { it.copy(pinned = on) }
-                                ToastBus.show(if (on) "已置顶" else "已取消置顶")
-                            }
-                        })
-                        RowDivider()
-                        SettingRow("删除书籍", "章节和正文会一并删除", Glyph.Trash, onClick = {
-                            pendingSheetAction = { deleteOpen = true }
-                            close()
-                        })
+                        Column(Modifier.fillMaxWidth().padding(horizontal = SHEET_CONTENT_INSET)) {
+                            DialogTitle("书籍设置", book.title, onClose = { close() })
+                            Spacer(Modifier.height(14.dp))
+                            SettingRow("编辑书籍", "书名、作者、封面和简介", Glyph.Edit, onClick = {
+                                pendingSheetAction = { editOpen = true }
+                                close()
+                            })
+                            RowDivider()
+                            SettingRow(
+                                "移动到分组",
+                                store.bookGroups.firstOrNull { it.id == book.groupId }?.name ?: "未分组",
+                                Glyph.Layers,
+                                onClick = { sheetLevel = 2 },
+                            )
+                            RowDivider()
+                            SettingRow("导出书籍", "TXT / EPUB，自动生成目录", Glyph.Export, onClick = {
+                                sheetLevel = 3
+                            })
+                            RowDivider()
+                            SettingRow("置顶到书架", if (book.pinned) "已置顶" else "按更新时间排序", Glyph.Pin, trailing = {
+                                InkToggle(book.pinned) { on ->
+                                    store.updateBook(book.id) { it.copy(pinned = on) }
+                                    ToastBus.show(if (on) "已置顶" else "已取消置顶")
+                                }
+                            })
+                            RowDivider()
+                            SettingRow("删除书籍", "章节和正文会一并删除", Glyph.Trash, onClick = {
+                                pendingSheetAction = { deleteOpen = true }
+                                close()
+                            })
+                        }
                     }
                     2 -> SheetPane {
-                        GroupPickerSheet(
-                            kind = GroupKind.BOOK,
-                            current = book.groupId,
-                            store = store,
-                            onSelect = { group -> store.setBookGroup(book.id, group) },
-                            onDismiss = { close() },
-                            embedded = true,
-                            onBack = { sheetLevel = 1 },
-                        )
+                        // level 2 是 embedded 的 GroupPickerSheet：整块也包进同一个补距 Column。
+                        Column(Modifier.fillMaxWidth().padding(horizontal = SHEET_CONTENT_INSET)) {
+                            GroupPickerSheet(
+                                kind = GroupKind.BOOK,
+                                current = book.groupId,
+                                store = store,
+                                onSelect = { group -> store.setBookGroup(book.id, group) },
+                                onDismiss = { close() },
+                                embedded = true,
+                                onBack = { sheetLevel = 1 },
+                            )
+                        }
                     }
                     else -> SheetPane {
-                        ExportSheet(
-                            book = book,
-                            onDismiss = { close() },
-                            embedded = true,
-                            onBack = { sheetLevel = 1 },
-                        )
+                        // level 3 是 embedded 的 ExportSheet：同样整块补回静止边距。
+                        Column(Modifier.fillMaxWidth().padding(horizontal = SHEET_CONTENT_INSET)) {
+                            ExportSheet(
+                                book = book,
+                                onDismiss = { close() },
+                                embedded = true,
+                                onBack = { sheetLevel = 1 },
+                            )
+                        }
                     }
                 }
             }
@@ -1572,20 +1612,35 @@ fun ChapterDialog(
 ) {
     val ui = LocalInk.current
     var text by remember { mutableStateOf(initial) }
-    GlassDialog(onDismiss) {
-        DialogTitle(title, "像「第七章 雨停之后」这样的名字，阅读器会自动识别。", onClose = onDismiss)
-        Spacer(Modifier.height(16.dp))
-        InkField(text, { text = it.take(40) }, "章节名称", textSize = 16f, onDone = {
-            if (text.isNotBlank()) onSubmit(text.trim())
-        })
-        Spacer(Modifier.height(18.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-            GlassButton("取消", onDismiss, Modifier.weight(1f))
-            PrimaryButton(confirm, {
-                if (text.isBlank()) ToastBus.show("章节名不能为空") else onSubmit(text.trim())
-            }, Modifier.weight(1f))
-        }
-    }
+    // 3.26.48：与 BookEditorDialog 同一套——按钮 / X 走框架的 close()，退场播完才 onDismiss；
+    // 「保存」要改数据，所以先暂存名字，等退场结束再 onSubmit。
+    var pendingName by remember { mutableStateOf<String?>(null) }
+    GlassDialog(
+        onDismiss = {
+            val name = pendingName
+            pendingName = null
+            if (name != null) onSubmit(name) else onDismiss()
+        },
+        closeableContent = { close ->
+            val submit = {
+                val name = text.trim()
+                if (name.isBlank()) {
+                    ToastBus.show("章节名不能为空")
+                } else {
+                    pendingName = name
+                    close()
+                }
+            }
+            DialogTitle(title, "像「第七章 雨停之后」这样的名字，阅读器会自动识别。", onClose = { close() })
+            Spacer(Modifier.height(16.dp))
+            InkField(text, { text = it.take(40) }, "章节名称", textSize = 16f, onDone = { submit() })
+            Spacer(Modifier.height(18.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                GlassButton("取消", { close() }, Modifier.weight(1f))
+                PrimaryButton(confirm, { submit() }, Modifier.weight(1f))
+            }
+        },
+    )
 }
 
 
