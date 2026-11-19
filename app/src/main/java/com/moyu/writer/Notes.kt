@@ -808,21 +808,28 @@ private fun NoteCard(
                     LineIcon(Glyph.More, p.muted.copy(alpha = .7f), 17.dp)
                 }
             }
-            if (note.todos.isNotEmpty() || next != null || chapterBadge != null) {
-                Spacer(Modifier.height(12.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    if (chapterBadge != null) {
-                        NoteBadge(glyph = Glyph.Link, text = chapterBadge, accent = false)
-                    }
-                    if (note.todos.isNotEmpty()) {
-                        NoteBadge(
-                            glyph = Glyph.Check,
-                            text = if (pending == 0) "待办已完成" else "$pending 项待办",
-                            accent = pending > 0,
-                        )
-                    }
-                    if (next?.remindAt != null) {
-                        NoteBadge(glyph = Glyph.Clock, text = formatDateTime(next.remindAt), accent = true)
+            // 3.26.57：待办 / 提醒 / 关联章这一行原来是 if 同帧增减——笔记从「没有待办」变成
+            // 「有 1 项待办」（或最后一条被删、加上提醒/关联章）时，卡片高度在 12dp 间距 + 徽章高之间硬跳。
+            // 改走统一展开包装 MoyuExpand：高度 + 淡入一起长出来 / 收回去，与笔记夹空态、书架分栏行同一套；
+            // motion=none 在组件内部已降成 tween(0)（Design.kt 1975），静止态尺寸与改前完全一致。
+            val hasBadges = note.todos.isNotEmpty() || next != null || chapterBadge != null
+            MoyuExpand(expand = hasBadges) {
+                Column(Modifier.fillMaxWidth()) {
+                    Spacer(Modifier.height(12.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        if (chapterBadge != null) {
+                            NoteBadge(glyph = Glyph.Link, text = chapterBadge, accent = false)
+                        }
+                        if (note.todos.isNotEmpty()) {
+                            NoteBadge(
+                                glyph = Glyph.Check,
+                                text = if (pending == 0) "待办已完成" else "$pending 项待办",
+                                accent = pending > 0,
+                            )
+                        }
+                        if (next?.remindAt != null) {
+                            NoteBadge(glyph = Glyph.Clock, text = formatDateTime(next.remindAt), accent = true)
+                        }
                     }
                 }
             }
