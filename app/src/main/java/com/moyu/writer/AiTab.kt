@@ -2129,6 +2129,8 @@ private fun ChatPane(
 ) {
     val ui = LocalInk.current
     val p = ui.palette
+    // 3.26.48：本页新补的动效统一读这一个开关；motion=none 时全部退化成 tween(0)。
+    val motionOn = ui.settings.motion != "none"
     val scope = rememberCoroutineScope()
     val chapterIdByTitle = book.chapters.associate { it.title to it.id }
     // One continuous gap under the floating row: 96 dp above the page bottom
@@ -2346,6 +2348,21 @@ private fun ChatPane(
         },
         label = "quoteRowBottom",
     )
+    // 3.26.48：空态推荐清单在发出第一条时淡出。LazyColumn 的 item 一删就没退场，
+    // 所以整块先留着、淡完再拆；退场比飞行气泡晚 100ms 起步，两块不抢同一段时间。
+    // 这段状态必须放在 LazyColumn 的 LazyListScope 外面——里面不是 composable 上下文，
+    // remember/LaunchedEffect 都不能直接写在那里。
+    val emptySuggest = messages.isEmpty() && !sending
+    var suggestionsMounted by remember { mutableStateOf(emptySuggest) }
+    LaunchedEffect(emptySuggest) {
+        if (emptySuggest) {
+            suggestionsMounted = true
+        } else if (suggestionsMounted) {
+            // 100ms 错开飞行气泡 + 120ms 淡出，全部走完再拆 item。
+            if (motionOn) delay(220)
+            suggestionsMounted = false
+        }
+    }
     Box(
         Modifier
             .fillMaxSize()
@@ -2416,26 +2433,45 @@ private fun ChatPane(
             // row, which is what "new message should be at the bottom" means.
             verticalArrangement = Arrangement.spacedBy(10.dp, Alignment.Bottom),
         ) {
-            if (messages.isEmpty() && !sending) {
-                item {
-                    Txt(
-                        "可以这样问",
-                        size = 10.5f,
-                        color = p.muted,
-                        modifier = Modifier.padding(start = 4.dp, top = 8.dp, bottom = 2.dp),
-                    )
-                }
-                items(suggestions) { s ->
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .clip(SmoothCorner(14.dp))
-                            .bouncy { onSample(s) }
-                            .padding(vertical = 11.dp, horizontal = 4.dp),
-                        verticalAlignment = Alignment.Top,
+            // 3.26.48：空态推荐清单的挂载状态见上面 emptySuggest；这里按 LazyListScope
+            // 的规矩只铺 item，淡出期间整块还在，淡完 suggestionsMounted 才置 false。
+            if (suggestionsMounted) {
+                item(key = "empty-suggestions") {
+                    AnimatedVisibility(
+                        visible = emptySuggest,
+                        enter = fadeIn(tween(if (motionOn) 120 else 0)),
+                        exit = fadeOut(
+                            tween(
+                                durationMillis = if (motionOn) 120 else 0,
+                                delayMillis = if (motionOn) 100 else 0,
+                            )
+                        ),
                     ) {
-                        Txt("·", size = 13f, color = p.muted, modifier = Modifier.padding(end = 8.dp))
-                        Txt(s, size = 13.5f, color = p.ink, lineHeight = 21f)
+                        Column(Modifier.fillMaxWidth()) {
+                            Txt(
+                                "可以这样问",
+                                size = 10.5f,
+                                color = p.muted,
+                                modifier = Modifier.padding(start = 4.dp, top = 8.dp, bottom = 2.dp),
+                            )
+                            // 以前一条一个 LazyColumn item，行距靠列表的 10dp；
+                            // 收进一个 item 后这一层要自己把 10dp 补回来。
+                            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                suggestions.forEach { s ->
+                                    Row(
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .clip(SmoothCorner(14.dp))
+                                            .bouncy { onSample(s) }
+                                            .padding(vertical = 11.dp, horizontal = 4.dp),
+                                        verticalAlignment = Alignment.Top,
+                                    ) {
+                                        Txt("·", size = 13f, color = p.muted, modifier = Modifier.padding(end = 8.dp))
+                                        Txt(s, size = 13.5f, color = p.ink, lineHeight = 21f)
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -2461,6 +2497,18 @@ private fun ChatPane(
                 Column(
                     Modifier
                         .fillMaxWidth()
+                        // 3.26.48：长按删除一条回答后，其余条目弹簧落位、被删的那条
+                        // 120ms 淡出。fadeIn 关掉——新消息自带飞行/同柔 pop，再淡入
+                        // 一次会跟气泡打架。
+                        .animateItem(
+                            fadeInSpec = null,
+                            placementSpec = if (motionOn) {
+                                spring(dampingRatio = .6f, stiffness = 380f)
+                            } else {
+                                tween(0)
+                            },
+                            fadeOutSpec = tween(if (motionOn) 120 else 0),
+                        )
                         .onGloballyPositioned { itemRects[msg.id] = it.boundsInRoot() }
                         .graphicsLayer {
                             val pressedId = emphasisAnchor
@@ -2629,11 +2677,15 @@ private fun ChatPane(
                                     if (toolTrace && msg.tools.isNotEmpty()) {
                                         ToolTraceStrip(msg.tools, ui, p, msg.id)
                                     }
+                                    // 3.26.48：下面三块都改成 MoyuExpand —— 回答落定后
+                                    // 「冒出来」，发下一条时收回去；motion=none 退化成 tween(0)。
+                                    val lastAnswer = messages.lastOrNull { it.role != "user" }?.id
                                     // 这一轮改了什么：逐条列卡，正文改动可单独撤销。
                                     // 只挂在最后一条回答上——发下一条消息时就一起消失，
                                     // 和整轮撤销的口子同寿（只保最近一轮）。
-                                    if (msg.edits.isNotEmpty() && !running &&
-                                        msg.id == messages.lastOrNull { it.role != "user" }?.id
+                                    MoyuExpand(
+                                        expand = msg.edits.isNotEmpty() && !running &&
+                                            msg.id == lastAnswer,
                                     ) {
                                         ChatEditList(msg.id, msg.edits, onUndoEdit, onAcceptEdit, onRejectEdit)
                                     }
@@ -2641,119 +2693,127 @@ private fun ChatPane(
                                     // that asked for the change: it belongs to
                                     // that answer, and a row floating above the
                                     // input read as a second input field.
-                                    if (!running && pending.isNotEmpty() &&
-                                        msg.id == messages.lastOrNull { it.role != "user" }?.id
+                                    MoyuExpand(
+                                        expand = !running && pending.isNotEmpty() &&
+                                            msg.id == lastAnswer,
                                     ) {
-                                        Box(
-                                            Modifier
-                                                .fillMaxWidth()
-                                                .padding(start = 14.dp, end = 10.dp, bottom = 10.dp)
-                                                .height(1.dp)
-                                                .background(p.line.copy(alpha = .5f))
-                                        )
-                                        // Rewrites get a before/after block: the
-                                        // writer is approving a change to prose he
-                                        // already wrote, not just "a note".
-                                        val edits = pending.filter { it.kind == AiPendingKind.Replace }
-                                        if (edits.isNotEmpty()) {
-                                            Column(
+                                        // AnimatedVisibility 的内容是多子层叠（Box 语义），
+                                        // 这一块要竖排，自己包一层 Column。
+                                        Column(Modifier.fillMaxWidth()) {
+                                            Box(
                                                 Modifier
                                                     .fillMaxWidth()
-                                                    .padding(start = 14.dp, end = 10.dp, top = 10.dp),
-                                            ) {
-                                                edits.forEachIndexed { i, e ->
-                                                    if (i > 0) Spacer(Modifier.height(8.dp))
-                                                    Txt(
-                                                        "原文：" + e.findText,
-                                                        size = 11f,
-                                                        color = p.muted,
-                                                        lineHeight = 15f,
-                                                        maxLines = 2,
-                                                        overflow = TextOverflow.Ellipsis,
-                                                    )
-                                                    Spacer(Modifier.height(3.dp))
-                                                    Txt(
-                                                        "改后：" + e.text,
-                                                        size = 11.5f,
-                                                        color = p.ink,
-                                                        lineHeight = 16f,
-                                                        maxLines = 3,
-                                                        overflow = TextOverflow.Ellipsis,
-                                                    )
+                                                    .padding(start = 14.dp, end = 10.dp, bottom = 10.dp)
+                                                    .height(1.dp)
+                                                    .background(p.line.copy(alpha = .5f))
+                                            )
+                                            // Rewrites get a before/after block: the
+                                            // writer is approving a change to prose he
+                                            // already wrote, not just "a note".
+                                            val edits = pending.filter { it.kind == AiPendingKind.Replace }
+                                            if (edits.isNotEmpty()) {
+                                                Column(
+                                                    Modifier
+                                                        .fillMaxWidth()
+                                                        .padding(start = 14.dp, end = 10.dp, top = 10.dp),
+                                                ) {
+                                                    edits.forEachIndexed { i, e ->
+                                                        if (i > 0) Spacer(Modifier.height(8.dp))
+                                                        Txt(
+                                                            "原文：" + e.findText,
+                                                            size = 11f,
+                                                            color = p.muted,
+                                                            lineHeight = 15f,
+                                                            maxLines = 2,
+                                                            overflow = TextOverflow.Ellipsis,
+                                                        )
+                                                        Spacer(Modifier.height(3.dp))
+                                                        Txt(
+                                                            "改后：" + e.text,
+                                                            size = 11.5f,
+                                                            color = p.ink,
+                                                            lineHeight = 16f,
+                                                            maxLines = 3,
+                                                            overflow = TextOverflow.Ellipsis,
+                                                        )
+                                                    }
                                                 }
                                             }
-                                        }
-                                        Row(
-                                            Modifier
-                                                .fillMaxWidth()
-                                                .padding(start = 14.dp, end = 10.dp, top = 9.dp, bottom = 10.dp),
-                                            verticalAlignment = Alignment.CenterVertically,
-                                        ) {
-                                            Txt(
-                                                pending.joinToString("；") { it.label },
-                                                size = 11f,
-                                                color = p.muted,
-                                                lineHeight = 15f,
-                                                maxLines = 3,
-                                                modifier = Modifier.weight(1f),
-                                            )
-                                            Spacer(Modifier.width(10.dp))
-                                            Box(
+                                            Row(
                                                 Modifier
-                                                    .bouncy { onApplyPending() }
-                                                    .background(p.ink, SmoothCorner(999.dp))
-                                                    .padding(horizontal = 13.dp, vertical = 6.dp),
+                                                    .fillMaxWidth()
+                                                    .padding(start = 14.dp, end = 10.dp, top = 9.dp, bottom = 10.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
                                             ) {
-                                                Txt("确认", size = 11.5f, color = p.paper, weight = FontWeight.SemiBold)
-                                            }
-                                            Spacer(Modifier.width(6.dp))
-                                            // No outline: a 1 dp border on a 6 dp
-                                            // radius pill reads as a stray ring.
-                                            // The tint alone carries the shape.
-                                            Box(
-                                                Modifier
-                                                    .bouncy { onDropPending() }
-                                                    .background(
-                                                        lerp(p.paper, ui.accent, .20f),
-                                                        SmoothCorner(999.dp),
-                                                    )
-                                                    .padding(horizontal = 13.dp, vertical = 6.dp),
-                                            ) {
-                                                Txt("算了", size = 11.5f, color = p.ink)
+                                                Txt(
+                                                    pending.joinToString("；") { it.label },
+                                                    size = 11f,
+                                                    color = p.muted,
+                                                    lineHeight = 15f,
+                                                    maxLines = 3,
+                                                    modifier = Modifier.weight(1f),
+                                                )
+                                                Spacer(Modifier.width(10.dp))
+                                                Box(
+                                                    Modifier
+                                                        .bouncy { onApplyPending() }
+                                                        .background(p.ink, SmoothCorner(999.dp))
+                                                        .padding(horizontal = 13.dp, vertical = 6.dp),
+                                                ) {
+                                                    Txt("确认", size = 11.5f, color = p.paper, weight = FontWeight.SemiBold)
+                                                }
+                                                Spacer(Modifier.width(6.dp))
+                                                // No outline: a 1 dp border on a 6 dp
+                                                // radius pill reads as a stray ring.
+                                                // The tint alone carries the shape.
+                                                Box(
+                                                    Modifier
+                                                        .bouncy { onDropPending() }
+                                                        .background(
+                                                            lerp(p.paper, ui.accent, .20f),
+                                                            SmoothCorner(999.dp),
+                                                        )
+                                                        .padding(horizontal = 13.dp, vertical = 6.dp),
+                                                ) {
+                                                    Txt("算了", size = 11.5f, color = p.ink)
+                                                }
                                             }
                                         }
                                     }
                                     // 直接写入的那一条：改完就在这条回答里留一个撤销口子。
-                                    if (!running && pending.isEmpty() && undoCount > 0 &&
-                                        msg.id == messages.lastOrNull { it.role != "user" }?.id
+                                    MoyuExpand(
+                                        expand = !running && pending.isEmpty() && undoCount > 0 &&
+                                            msg.id == lastAnswer,
                                     ) {
-                                        Box(
-                                            Modifier
-                                                .fillMaxWidth()
-                                                .padding(start = 14.dp, end = 10.dp, bottom = 10.dp)
-                                                .height(1.dp)
-                                                .background(p.line.copy(alpha = .5f))
-                                        )
-                                        Row(
-                                            Modifier
-                                                .fillMaxWidth()
-                                                .padding(start = 14.dp, end = 10.dp, top = 9.dp, bottom = 10.dp),
-                                            verticalAlignment = Alignment.CenterVertically,
-                                        ) {
-                                            Txt(
-                                                "已写入 " + undoCount + " 处",
-                                                size = 11f,
-                                                color = p.muted,
-                                                modifier = Modifier.weight(1f),
-                                            )
-                                            Spacer(Modifier.width(10.dp))
+                                        Column(Modifier.fillMaxWidth()) {
                                             Box(
                                                 Modifier
-                                                    .bouncy { onUndoDirect() }
-                                                    .background(p.ink, SmoothCorner(999.dp))
-                                                    .padding(horizontal = 13.dp, vertical = 6.dp),
+                                                    .fillMaxWidth()
+                                                    .padding(start = 14.dp, end = 10.dp, bottom = 10.dp)
+                                                    .height(1.dp)
+                                                    .background(p.line.copy(alpha = .5f))
+                                            )
+                                            Row(
+                                                Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(start = 14.dp, end = 10.dp, top = 9.dp, bottom = 10.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
                                             ) {
-                                                Txt("撤销", size = 11.5f, color = p.paper, weight = FontWeight.SemiBold)
+                                                Txt(
+                                                    "已写入 " + undoCount + " 处",
+                                                    size = 11f,
+                                                    color = p.muted,
+                                                    modifier = Modifier.weight(1f),
+                                                )
+                                                Spacer(Modifier.width(10.dp))
+                                                Box(
+                                                    Modifier
+                                                        .bouncy { onUndoDirect() }
+                                                        .background(p.ink, SmoothCorner(999.dp))
+                                                        .padding(horizontal = 13.dp, vertical = 6.dp),
+                                                ) {
+                                                    Txt("撤销", size = 11.5f, color = p.paper, weight = FontWeight.SemiBold)
+                                                }
                                             }
                                         }
                                     }
@@ -3284,6 +3344,9 @@ private fun QuoteSheet(
     var level by remember { mutableIntStateOf(0) }
     var quoteBookId by remember { mutableStateOf(book.id) }
     var preview by remember { mutableStateOf(false) }
+    // 3.26.48：点「确定」不再直接卸载宿主（宿主 if(flag) 会把面板当帧拆掉、退场被跳过）。
+    // 先记下这次的选择，播完退场再由 ModalSheet 的 onDismiss 回调落库。
+    var accepted by remember { mutableStateOf<List<QuoteRef>?>(null) }
     val quoteBook = books.firstOrNull { it.id == quoteBookId } ?: book
     val bookRef = QuoteRef("book", quoteBook.id, "整本《${quoteBook.title}》", quoteBook.id)
     val bookChars = quoteBook.chapters.sumOf { it.content.length }
@@ -3321,7 +3384,13 @@ private fun QuoteSheet(
         }
     }
 
-    ModalSheet(onDismiss = onDismiss) {
+    ModalSheet(
+        onDismiss = {
+            // close() 播完退场才回调这里：这时再回传选中项、关宿主。
+            val done = accepted
+            if (done != null) onDone(done) else onDismiss()
+        },
+        closeableContent = { close ->
         Row(
             Modifier.fillMaxWidth().padding(start = 18.dp, end = 14.dp, top = 4.dp, bottom = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -3358,7 +3427,7 @@ private fun QuoteSheet(
                 )
             }
             Box(
-                Modifier.size(34.dp).clip(CircleShape).bouncy { onDismiss() },
+                Modifier.size(34.dp).clip(CircleShape).bouncy { close() },
                 contentAlignment = Alignment.Center,
             ) { LineIcon(Glyph.Close, p.muted, 15.dp, 1.8f) }
         }
@@ -3483,36 +3552,44 @@ private fun QuoteSheet(
         }
 
         // One summary row, not three chips.
-        if (picked.isNotEmpty()) {
-            Spacer(Modifier.height(10.dp))
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 20.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Txt(
-                    "已选 ${picked.size} 项 · 约 ${previewText.length} 字",
-                    size = 10.5f,
-                    color = p.muted,
-                )
-                Spacer(Modifier.weight(1f))
-                Box(
-                    Modifier
-                        .clip(CircleShape)
-                        .bouncy { preview = !preview }
-                        .padding(horizontal = 8.dp, vertical = 6.dp),
+        // 3.26.48：勾上第一项/取消最后一项时整块长出来/收回去，不再当帧跳高度；
+        // 「看原文」的预览块同样走 MoyuExpand（motion=none 时退化成 tween(0)）。
+        MoyuExpand(expand = picked.isNotEmpty()) {
+            // AnimatedVisibility 的内容是多子层叠（Box 语义），这几块要竖排，
+            // 自己包一层 Column。
+            Column(Modifier.fillMaxWidth()) {
+                Spacer(Modifier.height(10.dp))
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Txt(if (preview) "收起原文" else "看原文", size = 11f, color = p.ink)
+                    Txt(
+                        "已选 ${picked.size} 项 · 约 ${previewText.length} 字",
+                        size = 10.5f,
+                        color = p.muted,
+                    )
+                    Spacer(Modifier.weight(1f))
+                    Box(
+                        Modifier
+                            .clip(CircleShape)
+                            .bouncy { preview = !preview }
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                    ) {
+                        Txt(if (preview) "收起原文" else "看原文", size = 11f, color = p.ink)
+                    }
                 }
-            }
-            if (preview) {
-                Spacer(Modifier.height(6.dp))
-                MoyuSurface(
-                    Modifier.fillMaxWidth().padding(horizontal = 18.dp).heightIn(max = 180.dp),
-                    radius = 16f,
-                    flat = true,
-                ) {
-                    Column(Modifier.padding(12.dp).verticalScroll(rememberScrollState())) {
-                        Txt(previewText.take(4000), size = 10f, color = p.muted, lineHeight = 15f)
+                MoyuExpand(expand = preview) {
+                    Column(Modifier.fillMaxWidth()) {
+                        Spacer(Modifier.height(6.dp))
+                        MoyuSurface(
+                            Modifier.fillMaxWidth().padding(horizontal = 18.dp).heightIn(max = 180.dp),
+                            radius = 16f,
+                            flat = true,
+                        ) {
+                            Column(Modifier.padding(12.dp).verticalScroll(rememberScrollState())) {
+                                Txt(previewText.take(4000), size = 10f, color = p.muted, lineHeight = 15f)
+                            }
+                        }
                     }
                 }
             }
@@ -3553,10 +3630,18 @@ private fun QuoteSheet(
                 )
             }
             Spacer(Modifier.width((10 * split).dp))
-            PrimaryButton("确定", { onDone(picked) }, Modifier.weight(1f))
+            PrimaryButton(
+                "确定",
+                {
+                    accepted = picked
+                    close()
+                },
+                Modifier.weight(1f),
+            )
         }
         Spacer(Modifier.height(10.dp))
-    }
+        }
+    )
 }
 
 /** Which book this conversation belongs to: covers, sizes, one tap to switch. */
@@ -3568,7 +3653,15 @@ private fun BookPickerSheet(
     onDismiss: () -> Unit,
 ) {
     val p = LocalInk.current.palette
-    ModalSheet(onDismiss = onDismiss) {
+    // 3.26.48：选一本书和点 X 都走面板自己的 close()——先播退场，退场结束
+    // 才切书、关宿主；以前直接调外层 onDismiss，宿主 if(flag) 当帧就把面板拆了。
+    var pickedBook by remember { mutableStateOf<String?>(null) }
+    ModalSheet(
+        onDismiss = {
+            val picked = pickedBook
+            if (picked != null) onPick(picked) else onDismiss()
+        },
+        closeableContent = { close ->
         Row(
             Modifier.fillMaxWidth().padding(start = 18.dp, end = 14.dp, top = 4.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -3577,7 +3670,7 @@ private fun BookPickerSheet(
                 Txt("问哪本书", size = 18f, weight = FontWeight.Medium)
             }
             Box(
-                Modifier.size(34.dp).clip(CircleShape).bouncy { onDismiss() },
+                Modifier.size(34.dp).clip(CircleShape).bouncy { close() },
                 contentAlignment = Alignment.Center,
             ) { LineIcon(Glyph.Close, p.muted, 15.dp, 1.8f) }
         }
@@ -3589,12 +3682,16 @@ private fun BookPickerSheet(
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 books.forEachIndexed { i, b ->
                     if (i > 0) RowDivider(inset = 62.dp)
-                    BookQuoteRow(book = b, current = b.id == currentId, checkedCount = 0) { onPick(b.id) }
+                    BookQuoteRow(book = b, current = b.id == currentId, checkedCount = 0) {
+                        pickedBook = b.id
+                        close()
+                    }
                 }
             }
         }
         Spacer(Modifier.height(12.dp))
-    }
+        }
+    )
 }
 
 /** One book in the quote sheet: cover, title, size, and how much is pinned. */

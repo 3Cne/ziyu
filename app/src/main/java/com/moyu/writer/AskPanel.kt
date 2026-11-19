@@ -1,6 +1,9 @@
 package com.moyu.writer
 
 import android.content.Context
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -492,6 +495,8 @@ fun ColumnScope.AskChat(
 ) {
     val ui = LocalInk.current
     val p = ui.palette
+    // 3.26.48：本面板新补的动效统一读这一个开关；motion=none 时全部退化成 tween(0)。
+    val motionOn = ui.settings.motion != "none"
     val list = rememberLazyListState()
     val extra = (if (busy) 1 else 0) + (if (error != null) 1 else 0)
     // 每来一条、每收够一小段（120 字一档）就跟到底，不是每个 token 都滚一次。
@@ -503,6 +508,14 @@ fun ColumnScope.AskChat(
     Row(
         Modifier
             .fillMaxWidth()
+            // 3.26.48：选区预览展开/收起时高度用同一根 spring 长出来，不再当帧跳。
+            .animateContentSize(
+                animationSpec = if (motionOn) {
+                    spring(dampingRatio = .6f, stiffness = 380f)
+                } else {
+                    tween(0)
+                },
+            )
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
@@ -548,8 +561,18 @@ fun ColumnScope.AskChat(
             }
         }
         items(turns, key = { it.id }) { t ->
+            // 3.26.48：新的一轮 160ms 淡入，后面的轮次弹簧落位；
+            // motion=none 时两个 spec 都是 tween(0)。
+            val itemAnim = Modifier.animateItem(
+                fadeInSpec = tween(if (motionOn) 160 else 0),
+                placementSpec = if (motionOn) {
+                    spring(dampingRatio = .6f, stiffness = 380f)
+                } else {
+                    tween(0)
+                },
+            )
             if (t.mine) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                Row(itemAnim.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                     Box(
                         Modifier
                             .fillMaxWidth(.88f)
@@ -561,7 +584,7 @@ fun ColumnScope.AskChat(
                     }
                 }
             } else {
-                Column(Modifier.fillMaxWidth()) {
+                Column(itemAnim.fillMaxWidth()) {
                     AiMarkdown(t.text, size = 11.5f, lineHeight = 17f)
                     Spacer(Modifier.height(6.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
