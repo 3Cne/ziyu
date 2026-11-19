@@ -612,7 +612,7 @@ private fun LibraryHeader(store: AppStore, onAdd: () -> Unit) {
             GlassIconButton(
                 Glyph.Plus,
                 onClick = onAdd,
-                modifier = Modifier.tutorialAnchor("shelf.addBook"),
+                modifier = Modifier.tutorialAnchor("shelf.addBook", onActivate = onAdd),
             )
         }
         Spacer(Modifier.height(14.dp))
@@ -721,7 +721,7 @@ private fun ShelfHeader(
         Row(verticalAlignment = Alignment.CenterVertically) {
             // GlassChip 没有 modifier 形参：用无尺寸 Box 包一层挂锚点，
             // 只多一个测量包装节点，chip 的尺寸/位置与直接放在 Row 里完全一致。
-            Box(Modifier.tutorialAnchor("shelf.filter")) {
+            Box(Modifier.tutorialAnchor("shelf.filter", onActivate = onFilters)) {
                 GlassChip("筛选", false) { onFilters() }
             }
             Spacer(Modifier.width(9.dp))
@@ -1283,7 +1283,13 @@ fun BookDetailScreen(
                             val chapter = book.lastChapter() ?: book.chapters.firstOrNull()
                             if (chapter != null) onOpenChapter(book.id, chapter.id)
                         },
-                        Modifier.weight(1f).tutorialAnchor("book.continue"),
+                        Modifier.weight(1f).tutorialAnchor(
+                            "book.continue",
+                            onActivate = {
+                                val chapter = book.lastChapter() ?: book.chapters.firstOrNull()
+                                if (chapter != null) onOpenChapter(book.id, chapter.id)
+                            },
+                        ),
                         glyph = Glyph.Edit,
                     )
                     GlassButton("导出", { exportOpen = true }, Modifier.width(104.dp), glyph = Glyph.Export)
@@ -1295,7 +1301,13 @@ fun BookDetailScreen(
                 val bible = book.bible
                 val haptic = LocalHaptic.current
                 MoyuSurface(
-                    Modifier.fillMaxWidth().tutorialAnchor("book.story"),
+                    Modifier.fillMaxWidth().tutorialAnchor(
+                        "book.story",
+                        onActivate = {
+                            haptic(1)
+                            storyOpen = true
+                        },
+                    ),
                     radius = 20f,
                     flat = true,
                 ) {
@@ -1332,7 +1344,7 @@ fun BookDetailScreen(
                         GlassIconButton(
                             Glyph.Plus,
                             { addChapter = true },
-                            modifier = Modifier.tutorialAnchor("book.toc.add"),
+                            modifier = Modifier.tutorialAnchor("book.toc.add", onActivate = { addChapter = true }),
                         )
                     }
                 )
