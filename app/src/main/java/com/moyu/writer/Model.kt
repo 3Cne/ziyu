@@ -423,6 +423,73 @@ data class AppSettings(
     val bubbleGlassDispersion: Boolean = false,
 )
 
+/**
+ * 3.26.53：「恢复默认外观」的唯一出口，值全部取自 [AppSettings] 的默认（3.26.52 改成真机外观）。
+ *
+ * 不能直接拿 `AppSettings()` 整对象替换——那会把 AI 开关/写入方式、每日目标、笔记浮窗、
+ * 引导进度、dock 展开状态这些功能类设置一起重置。这里只换外观类字段：
+ * 主题、点缀色、字体与排版、分节、纸面、书架/笔记列表形态、标签栏（含标签名与镜头玻璃）、
+ * 三组玻璃、动效、glow/grain。
+ * `hiddenTabs`（哪些页签显示）属于导航选择，刻意不在外观重置里。
+ */
+fun AppSettings.withDefaultAppearance(): AppSettings {
+    val d = AppSettings()
+    return copy(
+        theme = d.theme,
+        accent = d.accent,
+        font = d.font,
+        fontScale = d.fontScale,
+        lineHeight = d.lineHeight,
+        pageMargin = d.pageMargin,
+        glow = d.glow,
+        grain = d.grain,
+        motion = d.motion,
+        pageMotion = d.pageMotion,
+        libraryMode = d.libraryMode,
+        noteMode = d.noteMode,
+        librarySort = d.librarySort,
+        columns = d.columns,
+        cardScale = d.cardScale,
+        coverRadius = d.coverRadius,
+        showTabLabels = d.showTabLabels,
+        tabNames = d.tabNames,
+        tabBlur = d.tabBlur,
+        tabRefraction = d.tabRefraction,
+        tabDispersion = d.tabDispersion,
+        tabShadow = d.tabShadow,
+        tabBarOpacity = d.tabBarOpacity,
+        tabLensOpacity = d.tabLensOpacity,
+        tabEdge = d.tabEdge,
+        lensEdge = d.lensEdge,
+        lensRefraction = d.lensRefraction,
+        lensBlur = d.lensBlur,
+        lensDispersion = d.lensDispersion,
+        lensShadow = d.lensShadow,
+        sectionStyle = d.sectionStyle,
+        sectionSymbol = d.sectionSymbol,
+        paperStyle = d.paperStyle,
+        paperLineAlpha = d.paperLineAlpha,
+        fieldGlassOpacity = d.fieldGlassOpacity,
+        fieldGlassBlur = d.fieldGlassBlur,
+        fieldGlassEdge = d.fieldGlassEdge,
+        fieldGlassRefraction = d.fieldGlassRefraction,
+        fieldGlassShadow = d.fieldGlassShadow,
+        fieldGlassDispersion = d.fieldGlassDispersion,
+        btnGlassOpacity = d.btnGlassOpacity,
+        btnGlassBlur = d.btnGlassBlur,
+        btnGlassEdge = d.btnGlassEdge,
+        btnGlassRefraction = d.btnGlassRefraction,
+        btnGlassShadow = d.btnGlassShadow,
+        btnGlassDispersion = d.btnGlassDispersion,
+        bubbleGlassOpacity = d.bubbleGlassOpacity,
+        bubbleGlassBlur = d.bubbleGlassBlur,
+        bubbleGlassEdge = d.bubbleGlassEdge,
+        bubbleGlassRefraction = d.bubbleGlassRefraction,
+        bubbleGlassShadow = d.bubbleGlassShadow,
+        bubbleGlassDispersion = d.bubbleGlassDispersion,
+    )
+}
+
 data class AppData(
     val books: List<Book> = emptyList(),
     val notes: List<Note> = emptyList(),
@@ -1448,108 +1515,115 @@ private fun decodeStringList(o: JSONObject?, key: String): List<String> {
     return out
 }
 
-private fun decodeSettings(o: JSONObject?) = AppSettings(
-    theme = o?.optString("theme", "paper") ?: "paper",
-    accent = o?.optLong("accent", 0xFF22221E) ?: 0xFF22221E,
-    font = o?.optString("font", "serif") ?: "serif",
-    fontScale = (o?.optDouble("fontScale", 1.0) ?: 1.0).toFloat(),
-    lineHeight = (o?.optDouble("lineHeight", 1.82) ?: 1.82).toFloat(),
-    pageMargin = (o?.optDouble("pageMargin", 22.0) ?: 22.0).toFloat(),
-    glow = o?.optBoolean("glow", true) ?: true,
-    grain = o?.optBoolean("grain", true) ?: true,
-    motion = o?.optString("motion", "spring") ?: "spring",
-    pageMotion = o?.optString("pageMotion", "slide") ?: "slide",
-    libraryMode = o?.optString("libraryMode", "grid") ?: "grid",
-    noteMode = o?.optString("noteMode", "list") ?: "list",
-    librarySort = o?.optString("librarySort", "updated") ?: "updated",
-    columns = o?.optInt("columns", 3) ?: 3,
-    cardScale = (o?.optDouble("cardScale", 1.0) ?: 1.0).toFloat(),
-    coverRadius = (o?.optDouble("coverRadius", 18.0) ?: 18.0).toFloat(),
-    showTabLabels = o?.optBoolean("showTabLabels", true) ?: true,
-            dockOpen = o?.optBoolean("dockOpen", false) ?: false,
-    tabBlur = (o?.optDouble("tabBlur", 8.0) ?: 8.0).toFloat(),
-    tabRefraction = (o?.optDouble("tabRefraction", 30.0) ?: 30.0).toFloat(),
-    tabDispersion = o?.optBoolean("tabDispersion", true) ?: true,
-    tabShadow = (o?.optDouble("tabShadow", .30) ?: .30).toFloat(),
-    tabBarOpacity = (o?.optDouble("tabBarOpacity", 0.0) ?: 0.0).toFloat().coerceIn(0f, 1f),
-    tabLensOpacity = (o?.optDouble("tabLensOpacity", 0.0) ?: 0.0).toFloat().coerceIn(0f, 1f),
-    tabEdge = (o?.optDouble("tabEdge", 1.0) ?: 1.0).toFloat().coerceIn(0f, 1f),
-    lensEdge = (o?.optDouble("lensEdge", 1.0) ?: 1.0).toFloat().coerceIn(0f, 1f),
-    lensRefraction = (o?.optDouble("lensRefraction", 9.0) ?: 9.0).toFloat(),
-    lensBlur = (o?.optDouble("lensBlur", 0.0) ?: 0.0).toFloat(),
-    lensDispersion = o?.optBoolean("lensDispersion", true) ?: true,
-    lensShadow = (o?.optDouble("lensShadow", .28) ?: .28).toFloat(),
-    tabNames = o?.optJSONArray("tabNames")?.let { a -> (0 until a.length()).map { a.optString(it) } }
-        ?: listOf("书架", "笔记", "数据", "设置"),
-    hiddenTabs = o?.optJSONArray("hiddenTabs")
-        ?.let { a -> (0 until a.length()).map { a.optString(it) } }
-        ?.filter { it in setOf("library", "notes", "stats", "ai") }
-        ?: emptyList(),
-    dailyGoal = o?.optInt("dailyGoal", 2000) ?: 2000,
-    indent = o?.optBoolean("indent", true) ?: true,
-    sectionStyle = o?.optString("sectionStyle", "asterisk") ?: "asterisk",
-    sectionSymbol = o?.optString("sectionSymbol", "＊　＊　＊") ?: "＊　＊　＊",
-    autoSave = o?.optInt("autoSave", 700) ?: 700,
-    showWordCount = o?.optBoolean("showWordCount", true) ?: true,
-    showStats = o?.optBoolean("showStats", true) ?: true,
-    haptics = o?.optBoolean("haptics", true) ?: true,
-    appName = o?.optString("appName", "素纸") ?: "素纸",
-    showFps = o?.optBoolean("showFps", false) ?: false,
-    autoUpdate = o?.optBoolean("autoUpdate", true) ?: true,
-    paperStyle = when (o?.optString("paperStyle", "plain")) {
-        "ruled" -> "ruled"
-        "solid" -> "solid"
-        else -> "plain"
-    },
-    paperLineAlpha = (o?.optDouble("paperLineAlpha", .5) ?: .5).toFloat(),
-    onboardingDone = o?.optBoolean("onboardingDone", false) ?: false,
-    // 旧备份没有 tutorialDone：空列表 = 一组都没教过。解码走已有的容错列表读取，
-    // 坏值/空串/重复项都会被压掉，不会让整份设置读失败。
-    tutorialDone = decodeStringList(o, "tutorialDone"),
-    noteFloat = o?.optBoolean("noteFloat", false) ?: false,
-    noteFloatX = (o?.optDouble("noteFloatX", .62) ?: .62).toFloat().coerceIn(0f, 1f),
-    noteFloatY = (o?.optDouble("noteFloatY", 0.0) ?: 0.0).toFloat().coerceIn(0f, 1f),
-    noteFloatW = (o?.optDouble("noteFloatW", .34) ?: .34).toFloat().coerceIn(.34f, .60f),
-    noteFloatH = (o?.optDouble("noteFloatH", .52) ?: .52).toFloat().coerceIn(.24f, .86f),
-    aiEnabled = o?.optBoolean("aiEnabled", false) ?: false,
-    aiBaseUrl = o?.optString("aiBaseUrl", AiDefaults.BASE_URL) ?: AiDefaults.BASE_URL,
-    aiModel = o?.optString("aiModel", AiDefaults.MODEL) ?: AiDefaults.MODEL,
-    aiTopK = (o?.optInt("aiTopK", 5) ?: 5).coerceIn(1, 8),
-    aiContextChars = (o?.optInt("aiContextChars", 3000) ?: 3000).coerceIn(400, 8000),
-    aiTemperature = (o?.optDouble("aiTemperature", .7) ?: .7).toFloat().coerceIn(0f, 1.4f),
-    aiAutoMemory = o?.optBoolean("aiAutoMemory", true) ?: true,
-    aiBibleSync = o?.optBoolean("aiBibleSync", true) ?: true,
-    aiQuoteMaxChars = (o?.optInt("aiQuoteMaxChars", 20_000) ?: 20_000).coerceIn(2_000, 60_000),
-    aiMemoryLimit = (o?.optInt("aiMemoryLimit", 200) ?: 200).coerceIn(20, 500),
-    aiWeb = o?.optBoolean("aiWeb", false) ?: false,
-    aiWebMax = (o?.optInt("aiWebMax", 3) ?: 3).coerceIn(1, 5),
-    aiToolTrace = o?.optBoolean("aiToolTrace", true) ?: true,
-    aiDeepThink = o?.optBoolean("aiDeepThink", false) ?: false,
-    // 旧备份没有这个字段 = 询问档：宁可多点一次，也不默认替作者改正文。
-    aiWriteMode = (o?.optInt("aiWriteMode", 1) ?: 1).coerceIn(0, 2),
-    noteContextCount = (o?.optInt("noteContextCount", 8) ?: 8)
-        .let { if (it == 0) 0 else it.coerceIn(2, 40) },
-    noteMaxTokens = (o?.optInt("noteMaxTokens", 8000) ?: 8000)
-        .let { if (it >= 8000) 8000 else 4000 },
-    fieldGlassOpacity = (o?.optDouble("fieldGlassOpacity", .18) ?: .18).toFloat().coerceIn(0f, 1f),
-    fieldGlassBlur = (o?.optDouble("fieldGlassBlur", 10.0) ?: 10.0).toFloat().coerceIn(0f, 40f),
-    fieldGlassEdge = (o?.optDouble("fieldGlassEdge", 1.0) ?: 1.0).toFloat().coerceIn(0f, 2f),
-    fieldGlassRefraction = (o?.optDouble("fieldGlassRefraction", 16.0) ?: 16.0).toFloat().coerceIn(0f, 40f),
-    fieldGlassShadow = (o?.optDouble("fieldGlassShadow", .14) ?: .14).toFloat().coerceIn(0f, 1f),
-    fieldGlassDispersion = o?.optBoolean("fieldGlassDispersion", true) ?: true,
-    btnGlassOpacity = (o?.optDouble("btnGlassOpacity", .18) ?: .18).toFloat().coerceIn(0f, 1f),
-    btnGlassBlur = (o?.optDouble("btnGlassBlur", 12.0) ?: 12.0).toFloat().coerceIn(0f, 40f),
-    btnGlassEdge = (o?.optDouble("btnGlassEdge", 1.0) ?: 1.0).toFloat().coerceIn(0f, 2f),
-    btnGlassRefraction = (o?.optDouble("btnGlassRefraction", 18.0) ?: 18.0).toFloat().coerceIn(0f, 40f),
-    btnGlassShadow = (o?.optDouble("btnGlassShadow", .16) ?: .16).toFloat().coerceIn(0f, 1f),
-    btnGlassDispersion = o?.optBoolean("btnGlassDispersion", true) ?: true,
-    bubbleGlassOpacity = (o?.optDouble("bubbleGlassOpacity", .18) ?: .18).toFloat().coerceIn(0f, 1f),
-    bubbleGlassBlur = (o?.optDouble("bubbleGlassBlur", 12.0) ?: 12.0).toFloat().coerceIn(0f, 40f),
-    bubbleGlassEdge = (o?.optDouble("bubbleGlassEdge", 1.0) ?: 1.0).toFloat().coerceIn(0f, 2f),
-    bubbleGlassRefraction = (o?.optDouble("bubbleGlassRefraction", 18.0) ?: 18.0).toFloat().coerceIn(0f, 40f),
-    bubbleGlassShadow = (o?.optDouble("bubbleGlassShadow", .16) ?: .16).toFloat().coerceIn(0f, 1f),
-    bubbleGlassDispersion = o?.optBoolean("bubbleGlassDispersion", true) ?: true,
-)
+private fun decodeSettings(o: JSONObject?): AppSettings {
+    // 3.26.53：兜底值统一取自 AppSettings 的默认。3.26.52 把默认外观换成用户真机那套之后，
+    // 这里还是旧字面量（paper / 0xFF22221E / serif / tabBlur=8 …），极老备份缺字段会落回旧外观。
+    // 只换兜底，解码逻辑与字段名不变。
+    val d = AppSettings()
+    return AppSettings(
+        theme = o?.optString("theme", d.theme) ?: d.theme,
+        accent = o?.optLong("accent", d.accent) ?: d.accent,
+        font = o?.optString("font", d.font) ?: d.font,
+        fontScale = (o?.optDouble("fontScale", d.fontScale.toDouble()) ?: d.fontScale.toDouble()).toFloat(),
+        lineHeight = (o?.optDouble("lineHeight", d.lineHeight.toDouble()) ?: d.lineHeight.toDouble()).toFloat(),
+        pageMargin = (o?.optDouble("pageMargin", d.pageMargin.toDouble()) ?: d.pageMargin.toDouble()).toFloat(),
+        glow = o?.optBoolean("glow", d.glow) ?: d.glow,
+        grain = o?.optBoolean("grain", d.grain) ?: d.grain,
+        motion = o?.optString("motion", d.motion) ?: d.motion,
+        pageMotion = o?.optString("pageMotion", d.pageMotion) ?: d.pageMotion,
+        libraryMode = o?.optString("libraryMode", d.libraryMode) ?: d.libraryMode,
+        noteMode = o?.optString("noteMode", d.noteMode) ?: d.noteMode,
+        librarySort = o?.optString("librarySort", d.librarySort) ?: d.librarySort,
+        columns = o?.optInt("columns", d.columns) ?: d.columns,
+        cardScale = (o?.optDouble("cardScale", d.cardScale.toDouble()) ?: d.cardScale.toDouble()).toFloat(),
+        coverRadius = (o?.optDouble("coverRadius", d.coverRadius.toDouble()) ?: d.coverRadius.toDouble()).toFloat(),
+        showTabLabels = o?.optBoolean("showTabLabels", d.showTabLabels) ?: d.showTabLabels,
+        dockOpen = o?.optBoolean("dockOpen", d.dockOpen) ?: d.dockOpen,
+        tabBlur = (o?.optDouble("tabBlur", d.tabBlur.toDouble()) ?: d.tabBlur.toDouble()).toFloat(),
+        tabRefraction = (o?.optDouble("tabRefraction", d.tabRefraction.toDouble()) ?: d.tabRefraction.toDouble()).toFloat(),
+        tabDispersion = o?.optBoolean("tabDispersion", d.tabDispersion) ?: d.tabDispersion,
+        tabShadow = (o?.optDouble("tabShadow", d.tabShadow.toDouble()) ?: d.tabShadow.toDouble()).toFloat(),
+        tabBarOpacity = (o?.optDouble("tabBarOpacity", d.tabBarOpacity.toDouble()) ?: d.tabBarOpacity.toDouble()).toFloat().coerceIn(0f, 1f),
+        tabLensOpacity = (o?.optDouble("tabLensOpacity", d.tabLensOpacity.toDouble()) ?: d.tabLensOpacity.toDouble()).toFloat().coerceIn(0f, 1f),
+        tabEdge = (o?.optDouble("tabEdge", d.tabEdge.toDouble()) ?: d.tabEdge.toDouble()).toFloat().coerceIn(0f, 1f),
+        lensEdge = (o?.optDouble("lensEdge", d.lensEdge.toDouble()) ?: d.lensEdge.toDouble()).toFloat().coerceIn(0f, 1f),
+        lensRefraction = (o?.optDouble("lensRefraction", d.lensRefraction.toDouble()) ?: d.lensRefraction.toDouble()).toFloat(),
+        lensBlur = (o?.optDouble("lensBlur", d.lensBlur.toDouble()) ?: d.lensBlur.toDouble()).toFloat(),
+        lensDispersion = o?.optBoolean("lensDispersion", d.lensDispersion) ?: d.lensDispersion,
+        lensShadow = (o?.optDouble("lensShadow", d.lensShadow.toDouble()) ?: d.lensShadow.toDouble()).toFloat(),
+        tabNames = o?.optJSONArray("tabNames")?.let { a -> (0 until a.length()).map { a.optString(it) } }
+            ?: d.tabNames,
+        hiddenTabs = o?.optJSONArray("hiddenTabs")
+            ?.let { a -> (0 until a.length()).map { a.optString(it) } }
+            ?.filter { it in setOf("library", "notes", "stats", "ai") }
+            ?: d.hiddenTabs,
+        dailyGoal = o?.optInt("dailyGoal", d.dailyGoal) ?: d.dailyGoal,
+        indent = o?.optBoolean("indent", d.indent) ?: d.indent,
+        sectionStyle = o?.optString("sectionStyle", d.sectionStyle) ?: d.sectionStyle,
+        sectionSymbol = o?.optString("sectionSymbol", d.sectionSymbol) ?: d.sectionSymbol,
+        autoSave = o?.optInt("autoSave", d.autoSave) ?: d.autoSave,
+        showWordCount = o?.optBoolean("showWordCount", d.showWordCount) ?: d.showWordCount,
+        showStats = o?.optBoolean("showStats", d.showStats) ?: d.showStats,
+        haptics = o?.optBoolean("haptics", d.haptics) ?: d.haptics,
+        appName = o?.optString("appName", d.appName) ?: d.appName,
+        showFps = o?.optBoolean("showFps", d.showFps) ?: d.showFps,
+        autoUpdate = o?.optBoolean("autoUpdate", d.autoUpdate) ?: d.autoUpdate,
+        // 缺字段落到新默认（solid）；显式旧值 "plain" 仍按原样读，不动已有数据。
+        paperStyle = when (o?.optString("paperStyle", d.paperStyle)) {
+            "ruled" -> "ruled"
+            "solid" -> "solid"
+            else -> "plain"
+        },
+        paperLineAlpha = (o?.optDouble("paperLineAlpha", d.paperLineAlpha.toDouble()) ?: d.paperLineAlpha.toDouble()).toFloat(),
+        onboardingDone = o?.optBoolean("onboardingDone", d.onboardingDone) ?: d.onboardingDone,
+        // 旧备份没有 tutorialDone：空列表 = 一组都没教过。解码走已有的容错列表读取，
+        // 坏值/空串/重复项都会被压掉，不会让整份设置读失败。
+        tutorialDone = decodeStringList(o, "tutorialDone"),
+        noteFloat = o?.optBoolean("noteFloat", d.noteFloat) ?: d.noteFloat,
+        noteFloatX = (o?.optDouble("noteFloatX", d.noteFloatX.toDouble()) ?: d.noteFloatX.toDouble()).toFloat().coerceIn(0f, 1f),
+        noteFloatY = (o?.optDouble("noteFloatY", d.noteFloatY.toDouble()) ?: d.noteFloatY.toDouble()).toFloat().coerceIn(0f, 1f),
+        noteFloatW = (o?.optDouble("noteFloatW", d.noteFloatW.toDouble()) ?: d.noteFloatW.toDouble()).toFloat().coerceIn(.34f, .60f),
+        noteFloatH = (o?.optDouble("noteFloatH", d.noteFloatH.toDouble()) ?: d.noteFloatH.toDouble()).toFloat().coerceIn(.24f, .86f),
+        aiEnabled = o?.optBoolean("aiEnabled", d.aiEnabled) ?: d.aiEnabled,
+        aiBaseUrl = o?.optString("aiBaseUrl", d.aiBaseUrl) ?: d.aiBaseUrl,
+        aiModel = o?.optString("aiModel", d.aiModel) ?: d.aiModel,
+        aiTopK = (o?.optInt("aiTopK", d.aiTopK) ?: d.aiTopK).coerceIn(1, 8),
+        aiContextChars = (o?.optInt("aiContextChars", d.aiContextChars) ?: d.aiContextChars).coerceIn(400, 8000),
+        aiTemperature = (o?.optDouble("aiTemperature", d.aiTemperature.toDouble()) ?: d.aiTemperature.toDouble()).toFloat().coerceIn(0f, 1.4f),
+        aiAutoMemory = o?.optBoolean("aiAutoMemory", d.aiAutoMemory) ?: d.aiAutoMemory,
+        aiBibleSync = o?.optBoolean("aiBibleSync", d.aiBibleSync) ?: d.aiBibleSync,
+        aiQuoteMaxChars = (o?.optInt("aiQuoteMaxChars", d.aiQuoteMaxChars) ?: d.aiQuoteMaxChars).coerceIn(2_000, 60_000),
+        aiMemoryLimit = (o?.optInt("aiMemoryLimit", d.aiMemoryLimit) ?: d.aiMemoryLimit).coerceIn(20, 500),
+        aiWeb = o?.optBoolean("aiWeb", d.aiWeb) ?: d.aiWeb,
+        aiWebMax = (o?.optInt("aiWebMax", d.aiWebMax) ?: d.aiWebMax).coerceIn(1, 5),
+        aiToolTrace = o?.optBoolean("aiToolTrace", d.aiToolTrace) ?: d.aiToolTrace,
+        aiDeepThink = o?.optBoolean("aiDeepThink", d.aiDeepThink) ?: d.aiDeepThink,
+        // 旧备份没有这个字段 = 询问档：宁可多点一次，也不默认替作者改正文。
+        aiWriteMode = (o?.optInt("aiWriteMode", d.aiWriteMode) ?: d.aiWriteMode).coerceIn(0, 2),
+        noteContextCount = (o?.optInt("noteContextCount", d.noteContextCount) ?: d.noteContextCount)
+            .let { if (it == 0) 0 else it.coerceIn(2, 40) },
+        noteMaxTokens = (o?.optInt("noteMaxTokens", d.noteMaxTokens) ?: d.noteMaxTokens)
+            .let { if (it >= 8000) 8000 else 4000 },
+        fieldGlassOpacity = (o?.optDouble("fieldGlassOpacity", d.fieldGlassOpacity.toDouble()) ?: d.fieldGlassOpacity.toDouble()).toFloat().coerceIn(0f, 1f),
+        fieldGlassBlur = (o?.optDouble("fieldGlassBlur", d.fieldGlassBlur.toDouble()) ?: d.fieldGlassBlur.toDouble()).toFloat().coerceIn(0f, 40f),
+        fieldGlassEdge = (o?.optDouble("fieldGlassEdge", d.fieldGlassEdge.toDouble()) ?: d.fieldGlassEdge.toDouble()).toFloat().coerceIn(0f, 2f),
+        fieldGlassRefraction = (o?.optDouble("fieldGlassRefraction", d.fieldGlassRefraction.toDouble()) ?: d.fieldGlassRefraction.toDouble()).toFloat().coerceIn(0f, 40f),
+        fieldGlassShadow = (o?.optDouble("fieldGlassShadow", d.fieldGlassShadow.toDouble()) ?: d.fieldGlassShadow.toDouble()).toFloat().coerceIn(0f, 1f),
+        fieldGlassDispersion = o?.optBoolean("fieldGlassDispersion", d.fieldGlassDispersion) ?: d.fieldGlassDispersion,
+        btnGlassOpacity = (o?.optDouble("btnGlassOpacity", d.btnGlassOpacity.toDouble()) ?: d.btnGlassOpacity.toDouble()).toFloat().coerceIn(0f, 1f),
+        btnGlassBlur = (o?.optDouble("btnGlassBlur", d.btnGlassBlur.toDouble()) ?: d.btnGlassBlur.toDouble()).toFloat().coerceIn(0f, 40f),
+        btnGlassEdge = (o?.optDouble("btnGlassEdge", d.btnGlassEdge.toDouble()) ?: d.btnGlassEdge.toDouble()).toFloat().coerceIn(0f, 2f),
+        btnGlassRefraction = (o?.optDouble("btnGlassRefraction", d.btnGlassRefraction.toDouble()) ?: d.btnGlassRefraction.toDouble()).toFloat().coerceIn(0f, 40f),
+        btnGlassShadow = (o?.optDouble("btnGlassShadow", d.btnGlassShadow.toDouble()) ?: d.btnGlassShadow.toDouble()).toFloat().coerceIn(0f, 1f),
+        btnGlassDispersion = o?.optBoolean("btnGlassDispersion", d.btnGlassDispersion) ?: d.btnGlassDispersion,
+        bubbleGlassOpacity = (o?.optDouble("bubbleGlassOpacity", d.bubbleGlassOpacity.toDouble()) ?: d.bubbleGlassOpacity.toDouble()).toFloat().coerceIn(0f, 1f),
+        bubbleGlassBlur = (o?.optDouble("bubbleGlassBlur", d.bubbleGlassBlur.toDouble()) ?: d.bubbleGlassBlur.toDouble()).toFloat().coerceIn(0f, 40f),
+        bubbleGlassEdge = (o?.optDouble("bubbleGlassEdge", d.bubbleGlassEdge.toDouble()) ?: d.bubbleGlassEdge.toDouble()).toFloat().coerceIn(0f, 2f),
+        bubbleGlassRefraction = (o?.optDouble("bubbleGlassRefraction", d.bubbleGlassRefraction.toDouble()) ?: d.bubbleGlassRefraction.toDouble()).toFloat().coerceIn(0f, 40f),
+        bubbleGlassShadow = (o?.optDouble("bubbleGlassShadow", d.bubbleGlassShadow.toDouble()) ?: d.bubbleGlassShadow.toDouble()).toFloat().coerceIn(0f, 1f),
+        bubbleGlassDispersion = o?.optBoolean("bubbleGlassDispersion", d.bubbleGlassDispersion) ?: d.bubbleGlassDispersion,
+    )
+}
 
 private fun decodeData(text: String): AppData {
     val root = JSONObject(text)

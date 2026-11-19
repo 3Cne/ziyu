@@ -565,13 +565,10 @@ private fun AppearancePage(store: AppStore, onBack: () -> Unit, onOpen: (String)
             GlassButton(
                 "恢复默认外观",
                 {
-                    store.updateSettings {
-                        it.copy(
-                            theme = "paper", accent = 0xFF22221E, font = "serif", fontScale = 1f,
-                            lineHeight = 1.82f, pageMargin = 22f,
-                            grain = true, glow = true,
-                        )
-                    }
+                    // 3.26.53：默认外观在 3.26.52 换成了用户真机的那套，这里不能再写旧字面量。
+                    // 逐字段换成 AppSettings() 的默认（见 Model.withDefaultAppearance），不整对象替换——
+                    // AI 开关、引导进度、笔记浮窗等功能类设置要留着。
+                    store.updateSettings { it.withDefaultAppearance() }
                     preview = 1
                     ToastBus.show("外观已恢复默认")
                 },
