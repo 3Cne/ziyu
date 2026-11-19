@@ -2,6 +2,7 @@ package com.moyu.writer
 
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
@@ -11,6 +12,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -33,18 +35,23 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
@@ -52,12 +59,16 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.sin
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 
 /**
  * 故事圣经（3.26.16）：角色 / 关系 / 时间线 / 大纲。
@@ -402,6 +413,16 @@ private fun RelationLegend() {
  * 位置在**绘制阶段**按 centerId 算，不在布局阶段：换中心时节点沿弹簧从旧位置走到新位置，
  * 而不是整块淡出淡入（淡出淡入会被读成「换了一张图」）。整张图一个 Canvas、一个 Animatable，
  * 不进 Compose 的逐帧重组。
+ *
+ * 3.26.43（用户报「球挨着球，关系线全长被两头的球盖掉」）：
+ * ① 球径按角色数分档 48 / 42 / 36dp；② 环半径按「相邻球之间至少露出 14dp 线」反推
+ * （见 [graphGeometry]），再夹进画布可用半径；③ 关系线两端各退到 r + 2dp 处断开，用圆周交点
+ * 算而不是简单减法，线不会在球边露出黑头；④ 球先画一圈大 3dp 的纸色 halo 再画球，线和球
+ * 之间留一层纸；⑤ 双指缩放 0.6–2.5×（以双指中心为锚）+ 单指拖动平移（四边允许露出 25%）+
+ * 双击空白复位。缩放平移只存内存，面板离开组合即复位。
+ *
+ * 点球换中心不能被手势吃掉：点击用 onTap 立即回调（不用 onDoubleTap——它会让单击先等一个
+ * 双击超时）；变换手势在 Main pass 里更靠内层、先消费移动，所以拖动/捏合时点击器会自己取消。
  */
 @Composable
 private fun RelationGraph(
@@ -423,65 +444,91 @@ private fun RelationGraph(
         if (tick > 0) t.animateTo(1f, spring(MOYU_DAMPING, 420f))
     }
 
-    BoxWithConstraints(modifier) {
+    // 3.26.43：视口（缩放 / 平移）。直接读 remember 里的同一个 State 就是当前值；写它只让
+    // Canvas 重绘、不触发重组，所以整个捏合/拖动过程不会重组这张图。
+    var viewScale by remember { mutableFloatStateOf(GRAPH_SCALE_DEFAULT) }
+    var viewPan by remember { mutableStateOf(Offset.Zero) }
+    val viewScope = rememberCoroutineScope()
+    var resetJob by remember { mutableStateOf<Job?>(null) }
+
+    /** 双击空白：弹簧回到 1× 居中；任意手势按下时由 onPress 取消。 */
+    fun resetView() {
+        resetJob?.cancel()
+        val s0 = viewScale
+        val p0 = viewPan
+        if (s0 == GRAPH_SCALE_DEFAULT && p0 == Offset.Zero) return
+        resetJob = viewScope.launch {
+            coroutineScope {
+                launch {
+                    animate(s0, GRAPH_SCALE_DEFAULT, animationSpec = spring(MOYU_DAMPING, 420f)) { value, _ ->
+                        viewScale = value
+                    }
+                }
+                launch {
+                    animate(p0.x, 0f, animationSpec = spring(MOYU_DAMPING, 420f)) { value, _ ->
+                        viewPan = Offset(value, viewPan.y)
+                    }
+                }
+                launch {
+                    animate(p0.y, 0f, animationSpec = spring(MOYU_DAMPING, 420f)) { value, _ ->
+                        viewPan = Offset(viewPan.x, value)
+                    }
+                }
+            }
+        }
+    }
+
+    // 缩放后图形会超出这块画布，必须裁在画布内：否则放大的球会画到下面的图例/角色卡上。
+    BoxWithConstraints(modifier.clipToBounds()) {
         val w = constraints.maxWidth.toFloat()
         val h = constraints.maxHeight.toFloat()
-        val nodeR = with(density) { 21.dp.toPx() }
-        val centerR = with(density) { 27.dp.toPx() }
         val cx = w / 2f
         val cy = h / 2f - with(density) { 6.dp.toPx() }
+        val geom = remember(bible.characters.size, w, h) {
+            graphGeometry(bible.characters.size, w, h, density)
+        }
 
-        fun ring(center: String): List<StoryCharacter> =
-            bible.characters.filter { it.id != center }.take(10)
+        fun ringOf(center: String): List<StoryCharacter> =
+            bible.characters.filter { it.id != center }.take(geom.nodes)
 
-        fun pos(center: String): Map<String, Offset> {
-            val list = ring(center)
+        fun positions(center: String): Map<String, Offset> {
+            val list = ringOf(center)
             if (list.isEmpty()) return emptyMap()
-            // 椭圆而不是正圆：面板是竖长条，正圆会把 2 个节点排成一条竖线。
-            val rx = w * .34f
-            val ry = h * .31f
             // 1–2 个节点时从右侧起排（横过去），3 个以上从正上方起排（像个环）。
             val start = if (list.size <= 2) 0.0 else -PI / 2
             val step = 2 * PI / list.size
             return list.mapIndexed { i, c ->
-                val a = start + i * step
+                val angle = start + i * step
                 c.id to Offset(
-                    cx + (rx * cos(a)).toFloat(),
-                    cy + (ry * sin(a)).toFloat(),
+                    cx + (geom.ringR * cos(angle)).toFloat(),
+                    cy + (geom.ringR * sin(angle)).toFloat(),
                 )
             }.toMap()
         }
 
-        val from = remember(bible, fromId, w, h) { pos(fromId) }
-        val to = remember(bible, centerId, w, h) { pos(centerId) }
-        val namePaint = remember(ui.palette.ink) {
+        val from = remember(bible, fromId, w, h) { positions(fromId) }
+        val to = remember(bible, centerId, w, h) { positions(centerId) }
+        val hintPaint = remember {
             android.graphics.Paint().apply {
                 isAntiAlias = true
                 textSize = with(density) { 11.dp.toPx() } * .82f
                 textAlign = android.graphics.Paint.Align.CENTER
             }
         }
-        val centerPaint = remember(ui.palette.ink) {
+        // 3.26.43：球内字的基准字号跟着球径分档走；绘制时再被视图缩放矩阵放大。Skia 按最终
+        // 矩阵栅格化文字，所以放大后字不会糊。
+        val ballPaint = remember(geom.ballTextSize) {
             android.graphics.Paint().apply {
                 isAntiAlias = true
-                textSize = with(density) { 12.dp.toPx() } * .9f
+                textSize = geom.ballTextSize
                 textAlign = android.graphics.Paint.Align.CENTER
                 typeface = android.graphics.Typeface.DEFAULT_BOLD
             }
         }
-        // 3.26.24：名字进圈后的两种字，字号按球径收，颜色每球按底色算。
-        val ballPaint = remember {
+        val centerBallPaint = remember(geom.centerTextSize) {
             android.graphics.Paint().apply {
                 isAntiAlias = true
-                textSize = with(density) { 10.dp.toPx() }
-                textAlign = android.graphics.Paint.Align.CENTER
-                typeface = android.graphics.Typeface.DEFAULT_BOLD
-            }
-        }
-        val centerBallPaint = remember {
-            android.graphics.Paint().apply {
-                isAntiAlias = true
-                textSize = with(density) { 11.dp.toPx() }
+                textSize = geom.centerTextSize
                 textAlign = android.graphics.Paint.Align.CENTER
                 typeface = android.graphics.Typeface.DEFAULT_BOLD
             }
@@ -489,131 +536,299 @@ private fun RelationGraph(
 
         // pointerInput 的 key 必须恒定：以 to 为 key 时，点中节点 → centerId 变 → to 变 →
         // 手势器在抬手前被重启，抬手事件漏到遮罩上，面板会自己 close()（3.26.16 实测）。
+        // 3.26.43 同理不能拿 viewScale/viewPan 当 key，否则捏合中途会重启手势器。
         val hitTargets = rememberUpdatedState(to)
+        val geomState = rememberUpdatedState(geom)
+        var lastTapAt by remember { mutableLongStateOf(0L) }
+        var lastTapPos by remember { mutableStateOf(Offset.Zero) }
+
+        /**
+         * 3.26.43：平移约束——内容放大后是 [0,w]×[0,h] 映射出来的矩形，四边各允许最多
+         * 露出 25% 视口，拖不飞、也拖不没。
+         */
+        fun clampPan(candidate: Offset, scale: Float): Offset {
+            val left = cx + (0f - cx) * scale + candidate.x
+            val right = cx + (w - cx) * scale + candidate.x
+            val top = cy + (0f - cy) * scale + candidate.y
+            val bottom = cy + (h - cy) * scale + candidate.y
+            var x = candidate.x
+            var y = candidate.y
+            if (left > w * .25f) x -= left - w * .25f
+            if (right < w * .75f) x += w * .75f - right
+            if (top > h * .25f) y -= top - h * .25f
+            if (bottom < h * .75f) y += h * .75f - bottom
+            return Offset(x, y)
+        }
+
         Canvas(
             Modifier
                 .fillMaxSize()
-                .pointerInput(Unit) {
-                    detectTapGestures { p ->
-                        val cur = hitTargets.value
-                        val hit = cur.entries.minByOrNull { (it.value - p).getDistance() }
-                        if (hit != null && (hit.value - p).getDistance() < nodeR * 1.7f) onPick(hit.key)
+                // 先声明点击、后声明变换：Main pass 从最内层往外派发，变换器先看到移动并消费，
+                // 点击器看到「已消费」就取消自己——拖动/捏合不会被误判成点球。
+                .pointerInput(w, h) {
+                    detectTapGestures(
+                        onPress = { resetJob?.cancel() },
+                        onTap = { screenTap ->
+                            // 视图变换 = 以画布中心为锚的缩放 + 平移；命中改在屏幕坐标里比，
+                            // 容差 = 球在屏幕上的半径 + 8dp。不把容差按缩放倍数放大，否则
+                            // 放大后空白处的点击也会被判成点球，把双击复位吃掉。
+                            val scale = viewScale
+                            val pan = viewPan
+                            fun screenOf(base: Offset) = Offset(
+                                cx + (base.x - cx) * scale + pan.x,
+                                cy + (base.y - cy) * scale + pan.y,
+                            )
+                            val cur = hitTargets.value
+                            val hit = cur.entries.minByOrNull { (screenOf(it.value) - screenTap).getDistance() }
+                            val touchR = geomState.value.nodeR * scale + with(density) { 8.dp.toPx() }
+                            if (hit != null && (screenOf(hit.value) - screenTap).getDistance() < touchR) {
+                                // 点球换中心：立即响应，不参与双击判定。
+                                lastTapAt = 0L
+                                onPick(hit.key)
+                            } else {
+                                val now = android.os.SystemClock.uptimeMillis()
+                                val near = (screenTap - lastTapPos).getDistance() < with(density) { 40.dp.toPx() }
+                                if (now - lastTapAt in 1L..GRAPH_DOUBLE_TAP_MS && near) {
+                                    lastTapAt = 0L
+                                    resetView()
+                                } else {
+                                    lastTapAt = now
+                                    lastTapPos = screenTap
+                                }
+                            }
+                        },
+                    )
+                }
+                .pointerInput(w, h) {
+                    detectTransformGestures { centroid, panChange, zoomChange, _ ->
+                        resetJob?.cancel()
+                        val old = viewScale
+                        val next = (old * zoomChange).coerceIn(GRAPH_SCALE_MIN, GRAPH_SCALE_MAX)
+                        // 以双指中心为锚：缩放前后，双指中心下面的那个图形点仍在同一屏幕位置。
+                        val factor = next / old
+                        val rel = centroid - Offset(cx, cy)
+                        viewPan = clampPan(rel - (rel - viewPan) * factor + panChange, next)
+                        viewScale = next
                     }
                 }
         ) {
             val v = t.value.coerceIn(0f, 1f)
             val center = bible.character(centerId)
             val shownName = bible.character(fromId)?.name ?: ""
+            val centerPos = Offset(cx, cy)
+            val lineInset = 2.dp.toPx()
+            val halo = 1.5.dp.toPx()
 
-            // 旧中心（渐隐）
-            if (v < 1f) {
-                val old = from
-                old.forEach { (id, p0) ->
-                    val c = bible.character(id) ?: return@forEach
-                    val kind = relationKindBetween(bible, fromId, id) ?: return@forEach
-                    drawLine(
-                        relationTone(kind, ui).copy(alpha = .5f * (1f - v)),
-                        Offset(cx, cy),
-                        p0,
-                        strokeWidth = 1.4.dp.toPx(),
-                        cap = StrokeCap.Round,
-                    )
+            withTransform({
+                translate(viewPan.x, viewPan.y)
+                scale(viewScale, viewScale, Offset(cx, cy))
+            }) {
+                // 旧中心（渐隐）
+                if (v < 1f) {
+                    from.forEach { (id, p0) ->
+                        val kind = relationKindBetween(bible, fromId, id) ?: return@forEach
+                        val dir = unitDirection(centerPos, p0) ?: return@forEach
+                        val start = centerPos + dir * (geom.centerR + lineInset)
+                        // 旧节点从 72% 半径长到 100%，断开位置跟着当时的球径走。
+                        val end = p0 - dir * (geom.nodeR * .72f + lineInset)
+                        if ((end - start).getDistance() > 0f) {
+                            drawLine(
+                                relationTone(kind, ui).copy(alpha = .5f * (1f - v)),
+                                start,
+                                end,
+                                strokeWidth = 1.4.dp.toPx(),
+                                cap = StrokeCap.Round,
+                            )
+                        }
+                    }
+                    val oldBall = bible.character(fromId)?.let { ballColor(it) } ?: ui.palette.faint
+                    drawCircle(oldBall.copy(alpha = .6f * (1f - v)), radius = geom.centerR, center = centerPos)
+                    if (shownName.isNotBlank()) {
+                        centerBallPaint.color = inkOnBall(oldBall, ui.palette).toArgb()
+                        centerBallPaint.alpha = (255 * (1f - v)).toInt().coerceIn(0, 255)
+                        drawContext.canvas.nativeCanvas.drawText(
+                            ballLabel(shownName),
+                            cx,
+                            cy + centerBallPaint.textSize * .35f,
+                            centerBallPaint,
+                        )
+                    }
                 }
-                val oldBall = bible.character(fromId)?.let { ballColor(it) } ?: ui.palette.faint
-                drawCircle(
-                    oldBall.copy(alpha = .6f * (1f - v)),
-                    radius = centerR,
-                    center = Offset(cx, cy),
-                )
-                if (shownName.isNotBlank()) {
-                    centerBallPaint.color = inkOnBall(oldBall, ui.palette).toArgb()
-                    centerBallPaint.alpha = (255 * (1f - v)).toInt().coerceIn(0, 255)
-                    drawContext.canvas.nativeCanvas.drawText(
-                        ballLabel(shownName),
-                        cx,
-                        cy + centerBallPaint.textSize * .35f,
-                        centerBallPaint,
-                    )
-                }
-            }
 
-            // 新中心
-            to.forEach { (id, p1) ->
-                val c = bible.character(id) ?: return@forEach
-                val kind = relationKindBetween(bible, centerId, id)
-                // 同一角色在旧布局里的位置就是起点：换中心时它是「走过去」，
+                // 新中心：同一角色在旧布局里的位置就是起点，换中心时它是「走过去」，
                 // 不是先塌到中心再长出来（3.26.16 实测第一版的观感像「收起来再打开」）。
-                val p0 = from[id] ?: Offset(cx, cy)
-                val p = Offset(
-                    p0.x + (p1.x - p0.x) * v,
-                    p0.y + (p1.y - p0.y) * v,
-                )
-                if (kind != null) {
-                    drawLine(
-                        relationTone(kind, ui).copy(alpha = v),
-                        Offset(cx, cy),
-                        p,
-                        strokeWidth = 1.6.dp.toPx(),
-                        cap = StrokeCap.Round,
+                to.forEach { (id, p1) ->
+                    val c = bible.character(id) ?: return@forEach
+                    val p0 = from[id] ?: centerPos
+                    val p = Offset(
+                        p0.x + (p1.x - p0.x) * v,
+                        p0.y + (p1.y - p0.y) * v,
+                    )
+                    val ballR = geom.nodeR * (.72f + .28f * v)
+                    val kind = relationKindBetween(bible, centerId, id)
+                    val dir = unitDirection(centerPos, p)
+                    if (kind != null && dir != null) {
+                        // 两端都用圆周交点断开：从球心沿方向退 r + 2dp，线不会在球边露头。
+                        val start = centerPos + dir * (geom.centerR + lineInset)
+                        val end = p - dir * (ballR + lineInset)
+                        if ((end - start).getDistance() > 0f) {
+                            drawLine(
+                                relationTone(kind, ui).copy(alpha = v),
+                                start,
+                                end,
+                                strokeWidth = 1.6.dp.toPx(),
+                                cap = StrokeCap.Round,
+                            )
+                        }
+                    }
+                    val ball = ballColor(c)
+                    // 3.26.43：先铺一圈大 3dp 的纸色 halo 再画球——线与球之间留一层纸。
+                    drawCircle(ui.palette.paper.copy(alpha = v), radius = ballR + halo, center = p)
+                    drawCircle(ball.copy(alpha = v), radius = ballR, center = p)
+                    drawCircle(
+                        ui.palette.ink.copy(alpha = .20f * v),
+                        radius = ballR,
+                        center = p,
+                        style = Stroke(width = .8.dp.toPx()),
+                    )
+                    ballPaint.color = inkOnBall(ball, ui.palette).toArgb()
+                    ballPaint.alpha = (255 * v).toInt().coerceIn(0, 255)
+                    drawContext.canvas.nativeCanvas.drawText(
+                        ballLabel(c.name),
+                        p.x,
+                        p.y + ballPaint.textSize * .36f,
+                        ballPaint,
                     )
                 }
-                val ball = ballColor(c)
-                val r = nodeR * (.72f + .28f * v)
-                drawCircle(ball.copy(alpha = v), radius = r, center = p)
+
+                // 3.26.24：中心球也用角色自己的颜色，外圈 2dp 强调环区分「当前中心」。
+                val centerBall = center?.let { ballColor(it) } ?: ui.palette.faint
+                drawCircle(ui.palette.paper, radius = geom.centerR + halo, center = centerPos)
+                drawCircle(centerBall, radius = geom.centerR, center = centerPos)
                 drawCircle(
-                    ui.palette.ink.copy(alpha = .20f * v),
-                    radius = r,
-                    center = p,
+                    ui.accent.copy(alpha = .9f),
+                    radius = geom.centerR + 1.dp.toPx(),
+                    center = centerPos,
+                    style = Stroke(width = 2.dp.toPx()),
+                )
+                drawCircle(
+                    ui.palette.ink.copy(alpha = .16f),
+                    radius = geom.centerR,
+                    center = centerPos,
                     style = Stroke(width = .8.dp.toPx()),
                 )
-                ballPaint.color = inkOnBall(ball, ui.palette).toArgb()
-                ballPaint.alpha = (255 * v).toInt().coerceIn(0, 255)
+                centerBallPaint.color = inkOnBall(centerBall, ui.palette).toArgb()
+                centerBallPaint.alpha = 255
                 drawContext.canvas.nativeCanvas.drawText(
-                    ballLabel(c.name),
-                    p.x,
-                    p.y + ballPaint.textSize * .36f,
-                    ballPaint,
+                    ballLabel(center?.name ?: ""),
+                    cx,
+                    cy + centerBallPaint.textSize * .35f,
+                    centerBallPaint,
                 )
             }
 
-            // 显示节点总数上限的提示（>10 时）
+            // 显示节点总数上限的提示（>10 时）。不跟缩放走，固定在画布底，始终可读。
             val hidden = (bible.characters.size - 1 - to.size).coerceAtLeast(0)
             if (hidden > 0) {
-                namePaint.color = ui.palette.muted.toArgb()
-                namePaint.alpha = 255
+                hintPaint.color = ui.palette.muted.toArgb()
+                hintPaint.alpha = 255
                 drawContext.canvas.nativeCanvas.drawText(
                     "还有 $hidden 位在下面",
                     cx,
-                    h - with(density) { 4.dp.toPx() },
-                    namePaint,
+                    h - 4.dp.toPx(),
+                    hintPaint,
                 )
             }
-
-            // 3.26.24：中心球也用角色自己的颜色，外圈 2dp 强调环区分「当前中心」。
-            val centerBall = center?.let { ballColor(it) } ?: ui.palette.faint
-            drawCircle(centerBall, radius = centerR, center = Offset(cx, cy))
-            drawCircle(
-                ui.accent.copy(alpha = .9f),
-                radius = centerR + with(density) { 1.dp.toPx() },
-                center = Offset(cx, cy),
-                style = Stroke(width = 2.dp.toPx()),
-            )
-            drawCircle(
-                ui.palette.ink.copy(alpha = .16f),
-                radius = centerR,
-                center = Offset(cx, cy),
-                style = Stroke(width = .8.dp.toPx()),
-            )
-            centerBallPaint.color = inkOnBall(centerBall, ui.palette).toArgb()
-            centerBallPaint.alpha = 255
-            drawContext.canvas.nativeCanvas.drawText(
-                ballLabel(center?.name ?: ""),
-                cx,
-                cy + centerBallPaint.textSize * .35f,
-                centerBallPaint,
-            )
         }
     }
+}
+
+// ───────────────────────── 角色图几何（3.26.43） ─────────────────────────
+// 用户报：球挨着球（相邻球心距≈2r），关系线全长被两头的球盖掉，画面上根本看不到线。
+
+private const val GRAPH_SCALE_MIN = .6f
+private const val GRAPH_SCALE_MAX = 2.5f
+private const val GRAPH_SCALE_DEFAULT = 1f
+private const val GRAPH_DOUBLE_TAP_MS = 320L
+
+/** 角色图一帧的几何量（px）。 */
+private class GraphGeometry(
+    /** 环上球的半径。 */
+    val nodeR: Float,
+    /** 中心球半径（直径比旁球大 12dp，保留 3.26.16 的中心强调）。 */
+    val centerR: Float,
+    /** 环半径；0 表示现场只有中心一个角色。 */
+    val ringR: Float,
+    /** 环上最多画几个球（超出部分写「还有 N 位在下面」）。 */
+    val nodes: Int,
+    val ballTextSize: Float,
+    val centerTextSize: Float,
+)
+
+/**
+ * 3.26.43：角色图尺寸。
+ *
+ * 球径按角色数分三档：N≤6 → 48dp，7–10 → 42dp，>10 → 36dp；名字字号跟着降一档。
+ * 环半径要让相邻两个环上球之间至少露出 14dp 的关系线：
+ *
+ *     R ≥ (2r + 14dp) / (2 · sin(π / n))      n = 环上的球数
+ *
+ * 但每条线都从中心球出发，所以中心球与环上球之间也要留 14dp：
+ *
+ *     R ≥ centerR + r + 14dp
+ *
+ * 两个下界取大。放不下时先按档缩球（用户点名的顺序）；缩到最小档还放不下，就把环半径
+ * 夹进画布可用半径——宁可露出的线短一点，也不把球画到画布外或让球叠在一起。
+ */
+private fun graphGeometry(
+    characterCount: Int,
+    width: Float,
+    height: Float,
+    density: Density,
+): GraphGeometry {
+    fun dp(value: Float): Float = with(density) { value.dp.toPx() }
+    val lineGap = dp(14f)
+    val halo = dp(1.5f)
+    val pad = dp(2f)
+    val diameters = floatArrayOf(48f, 42f, 36f)
+    val nodeText = floatArrayOf(10f, 9f, 8f)
+    val centerText = floatArrayOf(11f, 10f, 9f)
+    // >10 位时环上最多画 10 个，其余在「还有 N 位在下面」里提示（3.26.16 的老规矩）。
+    val nodes = min(characterCount - 1, 10).coerceAtLeast(0)
+    // 中心球上移 6dp，给底部提示留位置（沿用 3.26.16 的画布中心）。
+    val centerY = height / 2f - dp(6f)
+    var tier = when {
+        characterCount <= 6 -> 0
+        characterCount <= 10 -> 1
+        else -> 2
+    }
+    while (true) {
+        val nodeR = dp(diameters[tier] / 2f)
+        val centerR = nodeR + dp(6f)
+        // 画布能给的环半径：上下左右都要留出球半径 + halo，再加 2dp 呼吸位。
+        val room = minOf(centerY, height - centerY, width / 2f) - pad - nodeR - halo
+        val byCenter = centerR + nodeR + lineGap
+        val byRing = if (nodes <= 1) 0f else (2f * nodeR + lineGap) / (2f * sin(PI / nodes).toFloat())
+        val need = maxOf(byCenter, byRing)
+        if (need <= room + .5f || tier >= diameters.lastIndex) {
+            return GraphGeometry(
+                nodeR = nodeR,
+                centerR = centerR,
+                ringR = if (nodes <= 0) 0f else minOf(need, room.coerceAtLeast(0f)),
+                nodes = nodes,
+                ballTextSize = dp(nodeText[tier]),
+                centerTextSize = dp(centerText[tier]),
+            )
+        }
+        tier++
+    }
+}
+
+/** 两点之间的单位向量；两点重合时没有方向可断，返回 null。 */
+private fun unitDirection(from: Offset, to: Offset): Offset? {
+    val delta = to - from
+    val length = delta.getDistance()
+    return if (length < .01f) null else delta / length
 }
 
 private fun relationKindBetween(bible: BookBible, a: String, b: String): RelationKind? =
