@@ -24,8 +24,8 @@ android {
         applicationId = "com.moyu.writer"
         minSdk = 26
         targetSdk = 36
-        versionCode = 857
-        versionName = "3.26.38"
+        versionCode = 858
+        versionName = "3.26.39"
         val updateRepo = (project.findProperty("updateRepo") as String?) ?: ""
         buildConfigField("String", "UPDATE_REPO", "\"$updateRepo\"")
         vectorDrawables { useSupportLibrary = true }

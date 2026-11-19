@@ -53,6 +53,7 @@ import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.AnimatedVisibility
@@ -5094,7 +5095,12 @@ private fun EditorDock(
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             if (onProof != null || onPolish != null || onAsk != null) {
-                                DockCell(if (aiOpen) 3f else 1f) {
+                                val aiT by animateFloatAsState(
+                                    targetValue = if (aiOpen) 1f else 0f,
+                                    animationSpec = spring(dampingRatio = .6f, stiffness = 380f),
+                                    label = "aiT",
+                                )
+                                DockCell(1f + 2f * aiT) {
                                 AnimatedContent(
                                     targetState = aiOpen,
                                     transitionSpec = {
@@ -5275,6 +5281,7 @@ private fun DockTool(
             .bouncy(
                 enabled,
                 scale = .88f,
+                hapticType = 1,
                 overshoot = true,
                 onLongPress = currentOnLong,
                 onPressChange = { pressed = it },
