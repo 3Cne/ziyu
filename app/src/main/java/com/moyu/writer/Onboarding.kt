@@ -3,18 +3,31 @@ package com.moyu.writer
 /**
  * 上手 6 步（[TutorialGroups.LANDING]）——教练式引导的第一组。
  *
- * 只保留「上手」语义：建书 / 建章 / 写第一句 / 选一段字 / 叫一次 AI / 保存退出。
+ * 语义：建书 / 建章 / 写第一句 / 选一段字 / 叫一次 AI / 保存退出；
  * 功能说明不再挤进首次引导（旧 13 页里的功能页已过期：记忆页签 3.26.23 就下线了，
  * 「说完就生效」也和默认询问档不符），改由后续的页内首次教学按页承担。
  *
- * 视觉语言沿用原来的引导页：大图标 + 标题 + 说明；有锚点的步（[TutorialTarget.Anchor]）
- * 改成指向控件的气泡 + 挖洞高亮，锚点不存在时引擎会自动跳过该步并记日志。
+ * 3.26.52 起第 1 步改成「真点才能过」：用户否掉了「只读说明点下一步」的做法，
+ * 要的是「教你点哪点哪」——所以这一步设成 [TutorialAdvance.OnTargetTap]，
+ * 气泡不显示「下一步」，只显示指向挖洞的「点一下这里」；必须真的点到 + 才算过。
  *
- * 第 1 步的锚点 id 是 `shelf.addBook`（书架标题右侧的 +）。页面侧加锚点由 Lead 接线：
- * `GlassIconButton(Glyph.Plus, onClick = onAdd, modifier = Modifier.tutorialAnchor("shelf.addBook"))`。
+ * 页面侧接线（Lead 把这一行加到书架标题右侧的 + 上）：
  *
- * 其余 5 步没有可指的控件（建章/写作在书里、AI 在编辑器），用居中大卡说明，
- * 不做成「目标不存在就跳过」，否则首次启动只会剩 1 步。
+ * ```kotlin
+ * GlassIconButton(
+ *     Glyph.Plus,
+ *     onClick = onAdd,
+ *     modifier = Modifier.tutorialAnchor("shelf.addBook", onActivate = onAdd),
+ * )
+ * ```
+ *
+ * - `tutorialAnchor(id)` 登记坐标，引擎每帧取最新值画挖洞；
+ * - `onActivate` 是洞被点中时执行的真实动作（通常就是同一个 `onClick`）。
+ *   不传也能过步，只是不会真的打开建书框；
+ * - 锚点不存在时引擎自动跳过该步（不会卡死），所以页面暂时没接线也不会崩。
+ *
+ * 其余 5 步暂时没有可指的控件（建章/写作在书里、AI 在编辑器），用居中大卡说明，
+ * 等工作台那几页的锚点接好后再逐步改成 OnTargetTap。
  */
 val LANDING_TUTORIAL: TutorialGroup = TutorialGroup(
     id = TutorialGroups.LANDING,
@@ -26,6 +39,7 @@ val LANDING_TUTORIAL: TutorialGroup = TutorialGroup(
             title = "第一本书",
             body = "点右上角的 +，填一个书名就能建好；作者、分组、简介都可以留空。素纸没有账号，书只存在这台手机里。",
             target = TutorialTarget.Anchor("shelf.addBook"),
+            advanceOn = TutorialAdvance.OnTargetTap,
             glyph = Glyph.Book,
         ),
         TutorialStep(
