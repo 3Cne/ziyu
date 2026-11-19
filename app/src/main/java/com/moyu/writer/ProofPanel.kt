@@ -1,4 +1,4 @@
-﻿package com.moyu.writer
+package com.moyu.writer
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -17,6 +17,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.lazy.LazyColumn
@@ -102,6 +103,9 @@ fun ProofSidePanel(
     onAcceptAll: (() -> Unit)? = null,
     /** 「全书巡检」入口（头部 / 底部的可选操作）；null 时不显示。 */
     onConsistencyCheck: (() -> Unit)? = null,
+    /** 3.26.32：自定义内容区（选段「问」的对话）。非 null 时整块内容换成它，
+     *  外框、拖宽、宽度动画、标题行、关闭键仍然共用同一套。 */
+    content: (@Composable ColumnScope.() -> Unit)? = null,
 ) {
     val ui = LocalInk.current
     val p = ui.palette
@@ -275,6 +279,9 @@ fun ProofSidePanel(
                         }
                     }
                     RowDivider(inset = 14.dp)
+                    if (content != null) {
+                        content()
+                    } else {
                     Box(Modifier.weight(1f).fillMaxWidth()) {
                         when {
                             issues.isNotEmpty() -> LazyColumn(
@@ -399,6 +406,7 @@ fun ProofSidePanel(
                                 }
                             }
                         }
+                    }
                     }
                 }
             }

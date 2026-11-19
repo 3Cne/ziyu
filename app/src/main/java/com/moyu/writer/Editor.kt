@@ -644,6 +644,18 @@ fun WritingScreen(
     /** 校核打开后自动发一次请求（本地规则已停用，改成 AI 全量查）。 */
     var proofAutoAsk by remember { mutableStateOf(false) }
 
+    // 3.26.32 选段「问」：右侧浮窗里的对话，回答可替换回选中那一段。
+    // 只在内存；替换前写 ChapterHistory 快照。
+    var askOpen by remember { mutableStateOf(false) }
+    var askTurns by remember { mutableStateOf<List<AskTurn>>(emptyList()) }
+    var askInput by remember { mutableStateOf("") }
+    var askBusy by remember { mutableStateOf(false) }
+    var askError by remember { mutableStateOf<String?>(null) }
+    var askPreview by remember { mutableStateOf("") }
+    var askRange by remember { mutableStateOf(0 to 0) }
+    var askExpanded by remember { mutableStateOf(false) }
+    var askSeq by remember { mutableIntStateOf(0) }
+
     fun startProof() {
         val a = min(body.selection.start, body.selection.end).coerceIn(0, body.text.length)
         val b = max(body.selection.start, body.selection.end).coerceIn(0, body.text.length)
@@ -660,6 +672,7 @@ fun WritingScreen(
         // Two right-side panels never stack: the notes window gives way, and the
         // body keeps its scroll position while the writing column re-wraps.
         floatNotePanel = false
+        askOpen = false
         bodyEditor?.captureScrollAnchor()
         // 本地规则不再跑（2026-11-14 用户定：本地一条都不命中，等于没用，全交给 AI）。
         proofIssues = emptyList()
@@ -825,6 +838,7 @@ fun WritingScreen(
         polishMode = true
         // 两块右侧浮窗不叠：打开修饰先让笔记窗退场，正文保持滚动位置。
         floatNotePanel = false
+        askOpen = false
         bodyEditor?.captureScrollAnchor()
         proofIssues = emptyList()
         proofBusy = false
@@ -894,6 +908,130 @@ fun WritingScreen(
             val ed = bodyEditor
             ed?.post { runCatching { ed.setSelection(a, b) } }
         }
+    }
+
+    /** 3.26.32：打开「问」——带着选中的那一段进浮窗。 */
+    fun startAsk() {
+        val a = min(body.selection.start, body.selection.end).coerceIn(0, body.text.length)
+        val b = max(body.selection.start, body.selection.end).coerceIn(0, body.text.length)
+        if (b - a < 2) {
+            ToastBus.show("先选中一段正文再问")
+            return
+        }
+        askPreview = body.text.substring(a, b)
+        askRange = a to b
+        askTurns = emptyList()
+        askInput = ""
+        askError = null
+        askBusy = false
+        askExpanded = false
+        // 三块右侧浮窗不叠：开「问」先让校核和笔记窗退场。
+        proofOpen = false
+        floatNotePanel = false
+        bodyEditor?.captureScrollAnchor()
+        bodyEditor?.collapseSelection()
+        body = body.copy(selection = TextRange(a, a))
+        askOpen = true
+    }
+
+    /** 关「问」：选区放回这一段。 */
+    fun closeAsk() {
+        askOpen = false
+        val (a, b) = askRange
+        if (b > a && b <= body.text.length) {
+            body = body.copy(selection = TextRange(a, b))
+            val ed = bodyEditor
+            ed?.post { runCatching { ed.setSelection(a, b) } }
+        }
+    }
+
+    /** 发一条：上下文只带这一段 + 前后 200 字 + 章名 + 圣经摘要，不跑工具。 */
+    fun sendAsk() {
+        val q = askInput.trim()
+        if (q.isEmpty() || askBusy) return
+        if (askTurns.count { it.mine } >= 6) {
+            ToastBus.show("这一段已经问了 6 次，换一段再问吧")
+            return
+        }
+        val key = AiKey.load(context)
+        if (!settings.aiEnabled || key.isNullOrBlank()) {
+            askError = "还没配置 AI：设置 → 问书 AI"
+            return
+        }
+        val (a, b) = askRange
+        val book = proofBookId?.let { store.book(it) }
+        val facts = book?.let { AiBible.summary(it) }?.take(2000).orEmpty()
+        val before = body.text.substring(max(0, a - 200), a.coerceIn(0, body.text.length))
+        val history = askTurns.joinToString("\n") { (if (it.mine) "作者：" else "AI：") + it.text }
+        val user = buildString {
+            append("【章节】").append(title.ifBlank { "未命名" }).append('\n')
+            if (facts.isNotBlank()) append("【设定】").append(facts).append('\n')
+            if (before.isNotBlank()) append("【紧接在上文】").append(before).append('\n')
+            append("【选中】\n").append(askPreview).append('\n')
+            if (history.isNotBlank()) append("【对话】\n").append(history).append('\n')
+            append("作者：").append(q)
+        }
+        askInput = ""
+        askError = null
+        askBusy = true
+        askSeq += 1
+        askTurns = askTurns + AskTurn("q" + askSeq, true, q)
+        scope.launch {
+            val r = AiClient.chat(
+                baseUrl = settings.aiBaseUrl,
+                model = settings.aiModel,
+                key = key,
+                temperature = .6f,
+                system = ASK_SYSTEM,
+                user = user,
+                maxTokens = 1600,
+                disableThinking = false,
+            )
+            askBusy = false
+            if (r.ok && r.text.isNotBlank()) {
+                askSeq += 1
+                askTurns = askTurns + AskTurn("q" + askSeq, false, r.text.trim())
+            } else {
+                askError = r.error ?: "没拿到回答，再试一次"
+            }
+        }
+    }
+
+    /**
+     * 把一条回答替换回选中那一段。
+     *
+     * 乐观锁：替换瞬间原文必须还等于打开时的那段，否则作废（期间作者手改过）。
+     * 替换前写一份 ChapterHistory 快照；撤销由正文自己的 undo 栈负责。
+     */
+    fun applyAsk(turn: AskTurn) {
+        if (!settings.aiEnabled) return
+        if (settings.aiWriteMode == 0) {
+            ToastBus.show("只读档：不改正文")
+            return
+        }
+        val (a, b) = askRange
+        val src = body.text
+        if (a < 0 || a > b || b > src.length || src.substring(a, b) != askPreview) {
+            askTurns = askTurns.map { if (it.id == turn.id) it.copy(stale = true) else it }
+            ToastBus.show("这段正文已经改过了，这条作废")
+            return
+        }
+        // seedKey 在章节页就是 chapter.id；笔记页不写章节历史。
+        if (!isNote && !ChapterHistory.record(context, seedKey, src)) {
+            ToastBus.show("没能留底，这次不替换")
+            return
+        }
+        val ed = bodyEditor
+        if (ed != null) {
+            ed.replaceKeepingViewport(a, b, turn.text)
+        } else {
+            pushUndo()
+            body = body.copy(text = src.replaceRange(a, b, turn.text))
+        }
+        askPreview = turn.text
+        askRange = a to (a + turn.text.length)
+        askTurns = askTurns.map { if (it.id == turn.id) it.copy(applied = true) else it }
+        ToastBus.show("已替换选中 ${turn.text.length} 字，可以撤销")
     }
 
     /** 3.26.23：修饰模式下一键采纳本章所有卡片（逐条走 acceptProof，位置判定与撤销都沿用）。 */
@@ -1759,6 +1897,53 @@ fun WritingScreen(
                     .fillMaxHeight()
                     .padding(bottom = dockReserve + 12.dp),
             )
+            // 3.26.32 选段「问」：和校核/修饰同一块浮窗、同一套拖宽，
+            // 内容换成对话；两块互斥（开一个就关另一个）。
+            ProofSidePanel(
+                visible = askOpen && !sideOfNotes,
+                issues = emptyList(),
+                busy = false,
+                status = null,
+                error = null,
+                asked = true,
+                chars = askPreview.length,
+                canAsk = false,
+                onAsk = {},
+                onAccept = {},
+                onIgnore = {},
+                onLocate = {},
+                onClose = { closeAsk() },
+                heading = "问 · " + askPreview.length + " 字",
+                headingIcon = Glyph.Sparkles,
+                onClearEditorFocus = {
+                    val ed = bodyEditor
+                    if (ed != null && ed.hasFocus()) {
+                        ed.clearFocus()
+                        collapseBodySelection()
+                    }
+                },
+                onWidthAnimating = { bodyEditor?.captureScrollAnchorIfNone() },
+                onWidthSettled = { bodyEditor?.releaseScrollAnchor() },
+                onResizeStart = { bodyEditor?.captureScrollAnchor() },
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .padding(bottom = dockReserve + 12.dp),
+            ) {
+                AskChat(
+                    preview = askPreview,
+                    chars = askPreview.length,
+                    expanded = askExpanded,
+                    onToggleExpand = { askExpanded = !askExpanded },
+                    turns = askTurns,
+                    input = askInput,
+                    onInput = { askInput = it },
+                    busy = askBusy,
+                    error = askError,
+                    canWrite = settings.aiEnabled && settings.aiWriteMode != 0,
+                    onSend = { sendAsk() },
+                    onApply = { applyAsk(it) },
+                )
+            }
             // 3.26.23: floating story bible (same panes as the story page).
             val storyBook = proofBookId?.let { store.book(it) }
             val storyJournal = remember(storyFloat, storyBook?.id, storyJournalTick) {
@@ -1921,6 +2106,7 @@ fun WritingScreen(
                     },
                     onProof = { startProof() },
                     onPolish = { startPolish() },
+                    onAsk = { startAsk() },
                     backdrop = editorBodyBackdrop,
                     epoch = bodyScrollTick.intValue,
                     scrollTick = bodyScrollTick,
@@ -4814,6 +5000,8 @@ private fun EditorDock(
     onProof: (() -> Unit)? = null,
     /** AI 入口里的「修饰」：只顺句，出改写版本；点一个才替换正文。 */
     onPolish: (() -> Unit)? = null,
+    /** 3.26.32：AI 入口里的「问」：就选中的这一段对话，回答可一键替换回选区。 */
+    onAsk: (() -> Unit)? = null,
     /** 1型玻璃 sampling source. Pass the body's software backdrop so the real
      *  EditText text shows through the dock; null falls back to a paper bar. */
     backdrop: Backdrop? = null,
@@ -4901,7 +5089,7 @@ private fun EditorDock(
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            if (onProof != null || onPolish != null) {
+                            if (onProof != null || onPolish != null || onAsk != null) {
                                 AnimatedContent(
                                     targetState = aiOpen,
                                     transitionSpec = {
@@ -4925,6 +5113,12 @@ private fun EditorDock(
                                                 aiOpen = false
                                                 onPolish?.invoke()
                                             })
+                                            if (onAsk != null) {
+                                                DockTool(Glyph.Sparkles, "问", true, onClick = {
+                                                    aiOpen = false
+                                                    onAsk?.invoke()
+                                                })
+                                            }
                                         }
                                     }
                                 }
