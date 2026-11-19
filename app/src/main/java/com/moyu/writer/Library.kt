@@ -1198,11 +1198,15 @@ fun BookDetailScreen(
                 // 3.26.16：故事圣经入口。角色 / 关系 / 时间线 / 大纲都是「这本书的」，
                 // 所以挂在书籍详情而不是新开一个 tab；空着也常驻，点进去是带引导的空态。
                 val bible = book.bible
+                val haptic = LocalHaptic.current
                 MoyuSurface(Modifier.fillMaxWidth(), radius = 20f, flat = true) {
                     Row(
                         Modifier
                             .fillMaxWidth()
-                            .clickable { storyOpen = true }
+                            .clickable {
+                                haptic(1)
+                                storyOpen = true
+                            }
                             .padding(horizontal = 16.dp, vertical = 14.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
