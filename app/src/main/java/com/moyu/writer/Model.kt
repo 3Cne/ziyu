@@ -1569,9 +1569,12 @@ private fun decodeSettings(o: JSONObject?): AppSettings {
         showFps = o?.optBoolean("showFps", d.showFps) ?: d.showFps,
         autoUpdate = o?.optBoolean("autoUpdate", d.autoUpdate) ?: d.autoUpdate,
         // 缺字段落到新默认（solid）；显式旧值 "plain" 仍按原样读，不动已有数据。
+        // o == null（整份 settings 对象都没有）时 when 会落到 else，所以单独给出 null 分支。
         paperStyle = when (o?.optString("paperStyle", d.paperStyle)) {
             "ruled" -> "ruled"
             "solid" -> "solid"
+            "plain" -> "plain"
+            null -> d.paperStyle
             else -> "plain"
         },
         paperLineAlpha = (o?.optDouble("paperLineAlpha", d.paperLineAlpha.toDouble()) ?: d.paperLineAlpha.toDouble()).toFloat(),
