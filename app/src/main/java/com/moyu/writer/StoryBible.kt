@@ -487,16 +487,23 @@ private fun CharacterPane(
             bible = book.bible.mineWith(synced),
             from = from,
             onDismiss = { linking = null },
-            onSave = { to, kind, kindLabel, kindColor ->
+            onSave = { to, kind, kindLabel, kindColor, kindTier ->
                 val b = book.bible
-                // 同一对角色只留一条关系：再连一次就是改类型（含自定义名 / 颜色）。
+                // 同一对角色只留一条关系：再连一次就是改类型（含自定义名 / 颜色 / 档位）。
                 val existing = b.relations.firstOrNull {
                     (it.from == from.id && it.to == to) || (it.from == to && it.to == from.id)
                 }
                 val next = if (existing != null) {
-                    existing.copy(kind = kind, kindLabel = kindLabel, kindColor = kindColor)
+                    existing.copy(kind = kind, kindLabel = kindLabel, kindColor = kindColor, kindTier = kindTier)
                 } else {
-                    StoryRelation(from = from.id, to = to, kind = kind, kindLabel = kindLabel, kindColor = kindColor)
+                    StoryRelation(
+                        from = from.id,
+                        to = to,
+                        kind = kind,
+                        kindLabel = kindLabel,
+                        kindColor = kindColor,
+                        kindTier = kindTier,
+                    )
                 }
                 onBible(
                     if (existing != null) {
@@ -533,22 +540,33 @@ private fun CharacterPane(
     }
 }
 
-/** 关系颜色只给三档：亲近 / 对立 / 其他。八种类型靠文字区分，不靠八种颜色。 */
-private fun relationTone(kind: RelationKind, ui: InkUi): Color = when (kind) {
-    RelationKind.FAMILY, RelationKind.LOVER, RelationKind.FRIEND, RelationKind.ALLY ->
-        lerp(ui.palette.muted, ui.accent, .55f)
-    RelationKind.RIVAL, RelationKind.ENEMY ->
-        lerp(ui.palette.muted, Color(0xFFB4543C), .62f)
+/**
+ * 3.26.50：关系档位三档的显示名（下标 = 档位 0 / 1 / 2）。
+ *
+ * 自定义类型在 [RelationEditor] 里显式选一档（存 [StoryRelation.kindTier]）；内置类型 / 旧数据
+ * 没有这个字段，按 [StoryRelation.tier] 从 `kind` 派生——旧数据的外观与 3.26.49 完全一致。
+ */
+private val RELATION_TIER_LABELS = listOf("亲近", "对立", "其他")
+
+/**
+ * 关系颜色只给三档：亲近 / 对立 / 其他。八种类型靠文字区分，不靠八种颜色。
+ *
+ * 3.26.50：入参从 `kind` 换成**生效档位** [StoryRelation.tier]——自定义类型选了「亲近」，
+ * 关系行圆点 / 图上关系线 / 图例就都和亲人 / 恋人 / 朋友同属一档（按档位归组）。
+ */
+private fun relationTone(tier: Int, ui: InkUi): Color = when (tier) {
+    0 -> lerp(ui.palette.muted, ui.accent, .55f)
+    1 -> lerp(ui.palette.muted, Color(0xFFB4543C), .62f)
     else -> ui.palette.line
 }
 
 /**
- * 3.26.49：一条关系的颜色 = 作者自定义色优先，没设色（或存的是坏值）按内置三档取色。
+ * 3.26.49：一条关系的颜色 = 作者自定义色优先，没设色（或存的是坏值）按生效档位取色。
  * 内置类型永远没有 kindColor，所以它们的外观与 3.26.48 完全一致。
  */
-private fun relationColor(kind: RelationKind, kindColor: String?, ui: InkUi): Color =
+private fun relationColor(tier: Int, kindColor: String?, ui: InkUi): Color =
     kindColor?.let { raw -> runCatching { Color(android.graphics.Color.parseColor(raw)) }.getOrNull() }
-        ?: relationTone(kind, ui)
+        ?: relationTone(tier, ui)
 
 // ───────────────────────── 角色球颜色（3.26.24） ─────────────────────────
 // 手动色存在 StoryCharacter.color；没设过就按 id 稳定取色板里的一色，重排/重启不变。
@@ -595,14 +613,13 @@ private fun RelationLegend() {
         horizontalArrangement = Arrangement.spacedBy(14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        listOf(RelationKind.FRIEND to "亲近", RelationKind.ENEMY to "对立", RelationKind.OTHER to "其他")
-            .forEach { (kind, label) ->
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.size(6.dp).background(relationTone(kind, ui), CircleShape))
-                    Spacer(Modifier.width(6.dp))
-                    Txt(label, size = 10f, color = ui.palette.muted)
-                }
+        RELATION_TIER_LABELS.forEachIndexed { tier, label ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(6.dp).background(relationTone(tier, ui), CircleShape))
+                Spacer(Modifier.width(6.dp))
+                Txt(label, size = 10f, color = ui.palette.muted)
             }
+        }
     }
 }
 
@@ -962,7 +979,7 @@ private fun RelationGraph(
                     val end = pb - dir * (b.r + lineInset)
                     if ((end - start).getDistance() <= 0f) return
                     drawLine(
-                        relationColor(s.kind, s.kindColor, ui).copy(alpha = if (strong) .9f else .28f),
+                        relationColor(s.tier, s.kindColor, ui).copy(alpha = if (strong) .9f else .28f),
                         start,
                         end,
                         strokeWidth = if (strong) 1.6.dp.toPx() else 1.2.dp.toPx(),
@@ -1063,8 +1080,9 @@ private class ForceGraph(private val bookId: String) {
         val id: String get() = char.id
     }
 
-    // 3.26.49：每条边带上自定义颜色（null = 按底档取色），绘制阶段直接算。
-    class Spring(val a: Int, val b: Int, val rest: Float, val kind: RelationKind, val kindColor: String?)
+    // 3.26.49：每条边带上自定义颜色（null = 按档位取色），绘制阶段直接算。
+    // 3.26.50：档位改用 `StoryRelation.tier`（显式 kindTier 优先，缺省按 kind 派生）。
+    class Spring(val a: Int, val b: Int, val rest: Float, val tier: Int, val kindColor: String?)
 
     val nodes = mutableListOf<Node>()
     val springs = mutableListOf<Spring>()
@@ -1140,7 +1158,9 @@ private class ForceGraph(private val bookId: String) {
         nodes.forEachIndexed { i, node -> index[node.id] = i }
 
         val ids = nodes.map { it.id }
-        val relationKey = relations.map { "${it.from}\u0000${it.to}\u0000${it.kind.ordinal}" }
+        // 3.26.50：档位也进 key——自定义关系改档位会改弹簧长度，得重新收敛；
+        // 内置类型 / 旧数据的 tier 由 kind 派生，key 与旧版等价，不会多触发一次布局。
+        val relationKey = relations.map { "${it.from}\u0000${it.to}\u0000${it.kind.ordinal}\u0000${it.tier}" }
         if (ids != lastIds || relationKey != lastRelations || centerId != lastCenter) {
             layoutChanged = true
             settleFrames = 0
@@ -1154,7 +1174,7 @@ private class ForceGraph(private val bookId: String) {
             val a = index[r.from] ?: return@forEach
             val b = index[r.to] ?: return@forEach
             if (a == b) return@forEach
-            springs += Spring(a, b, (nodes[a].r + nodes[b].r) * springRestFactor(r.kind), r.kind, r.kindColor)
+            springs += Spring(a, b, (nodes[a].r + nodes[b].r) * springRestFactor(r), r.tier, r.kindColor)
         }
         val pinned = pinnedId
         if (pinned != null && index[pinned] == null) pinnedId = null
@@ -1277,14 +1297,27 @@ private class ForceGraph(private val bookId: String) {
     }
 }
 
-/** 关系类型 → 弹簧目标长度系数（× 两球半径和）：越亲近越短。 */
-private fun springRestFactor(kind: RelationKind): Float = when (kind) {
-    RelationKind.LOVER, RelationKind.FAMILY -> 1.24f
-    RelationKind.FRIEND, RelationKind.ALLY -> 1.45f
-    RelationKind.MENTOR -> 1.60f
-    RelationKind.OTHER -> 1.78f
-    RelationKind.RIVAL -> 1.95f
-    RelationKind.ENEMY -> 2.12f
+/**
+ * 关系 → 弹簧目标长度系数（× 两球半径和）：越亲近越短。
+ *
+ * 3.26.50：自定义类型没有自己的内置档位（底档固定 OTHER），显式选了档位就按该档的代表值取长度；
+ * 内置类型 / 旧数据（kindTier = null）**仍按原来的 6 档**算，旧数据布局与 3.26.49 逐像素一致。
+ */
+private fun springRestFactor(relation: StoryRelation): Float = if (relation.kindTier != null) {
+    when (relation.tier) {
+        0 -> 1.45f // 亲近：取「朋友」一档
+        1 -> 1.95f // 对立：取「对手」一档
+        else -> 1.78f // 其他：与底档 OTHER 相同
+    }
+} else {
+    when (relation.kind) {
+        RelationKind.LOVER, RelationKind.FAMILY -> 1.24f
+        RelationKind.FRIEND, RelationKind.ALLY -> 1.45f
+        RelationKind.MENTOR -> 1.60f
+        RelationKind.OTHER -> 1.78f
+        RelationKind.RIVAL -> 1.95f
+        RelationKind.ENEMY -> 2.12f
+    }
 }
 
 /** 固定种子的来源：bookId + 角色 id，同一本书同一批角色每次落点一致。 */
@@ -2146,21 +2179,23 @@ private fun CharacterEditor(
 }
 
 /**
- * 关系编辑器（3.26.16；3.26.49 支持自定义类型）。
+ * 关系编辑器（3.26.16；3.26.49 支持自定义类型；3.26.50 自定义类型可选档位）。
  *
  * 「类型」= 8 个内置 chip + 一个「自定义」。选自定义时下面用 spring(dampingRatio = .6f,
- * stiffness = 380f) 展开名字输入 + 颜色（复用角色球那套 ColorDot / HueSlider）：
+ * stiffness = 380f) 展开名字输入 + **档位** + 颜色（复用角色球那套 ColorDot / HueSlider）：
  * - 名字：存 [StoryRelation.kindLabel]，关系行、图上提示、AI 读圣经都用它；
- * - 颜色：存 [StoryRelation.kindColor]；选「自动」= null，按内置三档取色；
- * - 底档：自定义固定落在 [RelationKind.OTHER]（图例仍只有 亲近/对立/其他 三档）。
- * 保存回调带 4 个值（对象、底档、显示名、颜色），调用方原样写进 bible。
+ * - 档位：存 [StoryRelation.kindTier]（0 亲近 / 1 对立 / 2 其他），关系行圆点、图上关系线
+ *   与图例按它归组；默认「其他」= 3.26.49 自定义固定底档的旧行为；
+ * - 颜色：存 [StoryRelation.kindColor]；选「自动」= null，按生效档位取色；
+ * - 底档枚举：自定义仍固定落在 [RelationKind.OTHER]（枚举不扩，旧版本读 kind 不会读坏）。
+ * 保存回调带 5 个值（对象、底档、显示名、颜色、档位），调用方原样写进 bible。
  */
 @Composable
 private fun RelationEditor(
     bible: BookBible,
     from: StoryCharacter,
     onDismiss: () -> Unit,
-    onSave: (String, RelationKind, String, String?) -> Unit,
+    onSave: (String, RelationKind, String, String?, Int?) -> Unit,
 ) {
     val ui = LocalInk.current
     val motion = ui.settings.motion != "none"
@@ -2171,6 +2206,9 @@ private fun RelationEditor(
     var custom by remember { mutableStateOf(false) }
     var customName by remember { mutableStateOf("") }
     var customColor by remember { mutableStateOf<String?>(null) }
+    // 3.26.50：自定义类型的档位。默认「其他」——与 3.26.49「自定义固定落其他档」一致，
+    // 不改档位的人看到的外观与上一版完全相同。
+    var customTier by remember { mutableStateOf(RelationKind.OTHER.tier) }
     GlassDialog(onDismiss, dismissOnOutsideClick = false) {
         // 3.26.48：内容里的按钮一律走 close（见 [storyClose] 的 TODO）。
         val close = storyClose(onDismiss)
@@ -2224,6 +2262,14 @@ private fun RelationEditor(
                 Spacer(Modifier.height(10.dp))
                 InkField(customName, { customName = capRelationLabel(it) }, "关系名：结义兄弟 / 主仆 / 宿敌")
                 Spacer(Modifier.height(12.dp))
+                Txt("归到哪一档", size = 11f, color = ui.palette.muted)
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    RELATION_TIER_LABELS.forEachIndexed { tier, label ->
+                        GlassChip(label, customTier == tier) { customTier = tier }
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
                 Txt("颜色", size = 11f, color = ui.palette.muted)
                 Spacer(Modifier.height(8.dp))
                 Row(
@@ -2251,7 +2297,7 @@ private fun RelationEditor(
                 }
                 Spacer(Modifier.height(8.dp))
                 Txt(
-                    "自定义类型按「其他」档参与图例；选了颜色，关系线和圆点就用这个颜色。",
+                    "档位决定关系行圆点、图上关系线和图例的归组；选了颜色，就用这个颜色盖过档位色。",
                     size = 10f,
                     color = ui.palette.muted,
                     lineHeight = 16f,
@@ -2266,9 +2312,9 @@ private fun RelationEditor(
                 {
                     target?.let { to ->
                         if (custom) {
-                            onSave(to, RelationKind.OTHER, customName.trim(), customColor)
+                            onSave(to, RelationKind.OTHER, customName.trim(), customColor, customTier)
                         } else {
-                            onSave(to, kind, kind.label, null)
+                            onSave(to, kind, kind.label, null, null)
                         }
                     }
                     close()
@@ -3061,19 +3107,41 @@ private class StorySyncHost(val bookId: String, val pager: StoryPagerState) {
     /** 非 null = 同步预览面板开着（先看字段级差异再落地）。 */
     var previewRows by mutableStateOf<List<BibleChange>?>(null)
 
+    /**
+     * 3.26.50：预览里勾中的 merge id。每次 [requestSync] 打开预览时**默认全选**，
+     * 点条目可以逐条取消；全不选时确认按钮禁用（`applyMerge` 只收勾中的那一部分）。
+     */
+    var pickedIds by mutableStateOf<Set<String>>(emptySet())
+
     /** 撤销这次同步的「···」菜单。 */
     var undoMenu by mutableStateOf(false)
 
     fun requestSync() {
         // 先出预览再确认：预览里列的是字段级差异，确认后一次 applyMerge 落地。
         val rows = previewMerge(bookId)
-        if (rows.isEmpty()) ToastBus.show("没有可同步的 AI 内容") else previewRows = rows
+        if (rows.isEmpty()) {
+            ToastBus.show("没有可同步的 AI 内容")
+        } else {
+            previewRows = rows
+            // 默认全选（保持旧行为：点「同步」再确认就是整批并入）。
+            pickedIds = rows.mapTo(LinkedHashSet()) { it.id }
+        }
     }
 
-    /** 落地预览里的这批改动；对话框自己播完退场再关。 */
+    /** 预览里点一行 = 切换这一条的勾选。 */
+    fun togglePick(id: String) {
+        pickedIds = if (id in pickedIds) pickedIds - id else pickedIds + id
+    }
+
+    /** 落地预览里**勾中**的这批改动；对话框自己播完退场再关。 */
     fun apply() {
         val rows = previewRows ?: return
-        val n = applyMerge(bookId, rows.map { it.id })
+        val ids = rows.filter { it.id in pickedIds }.map { it.id }
+        if (ids.isEmpty()) {
+            ToastBus.show("还没有勾选要同步的改动")
+            return
+        }
+        val n = applyMerge(bookId, ids)
         if (n > 0) {
             pager.synced = n
             pager.syncTick++
@@ -3106,6 +3174,8 @@ private fun StorySyncDialogs(host: StorySyncHost) {
     host.previewRows?.let { rows ->
         SyncPreviewDialog(
             rows = rows,
+            picked = host.pickedIds,
+            onToggle = { host.togglePick(it) },
             onDismiss = { host.previewRows = null },
             onConfirm = { host.apply() },
         )
@@ -3236,16 +3306,27 @@ private fun StoryPageFooter(
     }
 }
 
-/** 同步前先出预览：字段级差异逐条列出来（谁 · 哪个字段 · 原文 → 新文），确认才落地。 */
+/**
+ * 同步前先出预览：字段级差异逐条列出来（谁 · 哪个字段 · 原文 → 新文），确认才落地。
+ *
+ * 3.26.50：每条带全局 [SelectMark]，打开时默认全选；点条目切换这一条的勾选。
+ * 确认只把**勾中**的 id 交给 `applyMerge`，全不选时按钮禁用。
+ */
 @Composable
-private fun SyncPreviewDialog(rows: List<BibleChange>, onDismiss: () -> Unit, onConfirm: () -> Unit) {
+private fun SyncPreviewDialog(
+    rows: List<BibleChange>,
+    picked: Set<String>,
+    onToggle: (String) -> Unit,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
     val ui = LocalInk.current
     GlassDialog(onDismiss, dismissOnOutsideClick = false) {
         // 3.26.48：内容里的按钮一律走 close（见 [storyClose] 的 TODO）。
         val close = storyClose(onDismiss)
         DialogTitle(
             "同步 AI 内容到我的",
-            subtitle = "共 ${rows.size} 处差异；同步后归到「我的」，AI 页保留并标「已同步」",
+            subtitle = "共 ${rows.size} 处差异，已勾选 ${picked.size} 处；同步后归到「我的」，AI 页保留并标「已同步」",
         )
         Spacer(Modifier.height(12.dp))
         Column(
@@ -3255,27 +3336,45 @@ private fun SyncPreviewDialog(rows: List<BibleChange>, onDismiss: () -> Unit, on
                 .verticalScroll(rememberScrollState()),
         ) {
             rows.forEach { c ->
-                Column(Modifier.fillMaxWidth().padding(vertical = 5.dp)) {
-                    Txt(
-                        "${bibleKindLabel(c.kind)}「${c.title}」· ${c.field}",
-                        size = 12f,
-                        weight = FontWeight.Medium,
-                    )
-                    Spacer(Modifier.height(2.dp))
-                    Txt(
-                        "${c.before} → ${c.after}",
-                        size = 10.5f,
-                        color = ui.palette.muted,
-                        lineHeight = 16f,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
+                val checked = c.id in picked
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(SmoothCorner(12.dp))
+                        // 一行 = 一条勾选：标记只画不点，点击交给整行（同「章节抽屉」的写法）。
+                        .bouncy { onToggle(c.id) }
+                        .padding(horizontal = 6.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Txt(
+                            "${bibleKindLabel(c.kind)}「${c.title}」· ${c.field}",
+                            size = 12f,
+                            weight = FontWeight.Medium,
+                        )
+                        Spacer(Modifier.height(2.dp))
+                        Txt(
+                            "${c.before} → ${c.after}",
+                            size = 10.5f,
+                            color = ui.palette.muted,
+                            lineHeight = 16f,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Spacer(Modifier.width(10.dp))
+                    SelectMark(
+                        checked = checked,
+                        onToggle = { onToggle(c.id) },
+                        size = 20.dp,
+                        interactive = false,
                     )
                 }
             }
         }
         Spacer(Modifier.height(10.dp))
         Txt(
-            "只把字段并进「我的」，不删 AI 条目；同步完可以一步撤销。",
+            "只把勾中的字段并进「我的」，不删 AI 条目；同步完可以一步撤销。",
             size = 10.5f,
             color = ui.palette.muted,
             lineHeight = 17f,
@@ -3284,12 +3383,13 @@ private fun SyncPreviewDialog(rows: List<BibleChange>, onDismiss: () -> Unit, on
         Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
             GlassButton("取消", close, Modifier.weight(1f))
             PrimaryButton(
-                "同步",
+                if (picked.isEmpty()) "同步" else "同步 ${picked.size} 处",
                 {
                     onConfirm()
                     close()
                 },
                 Modifier.weight(1f),
+                enabled = picked.isNotEmpty(),
             )
         }
     }
@@ -3520,6 +3620,8 @@ private fun StoryCharacterCard(
  * 3.26.49：圆点与类型名都读 [StoryRelation.kindText] / [StoryRelation.kindColor]——自定义类型
  * 显示作者起的名字，圆点用自定义色（没设色按内置三档）；刚保存的那一行 `fresh = true`，
  * 用 spring(dampingRatio = .6f, stiffness = 380f) 从左侧淡入（motion = none 直接落位）。
+ * 3.26.50：没设自定义色时圆点颜色改读**生效档位** [StoryRelation.tier]——自定义关系选了
+ * 「亲近 / 对立 / 其他」就与图例同档同色。
  */
 @Composable
 private fun StoryRelationRow(
@@ -3554,7 +3656,7 @@ private fun StoryRelationRow(
             .padding(vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(Modifier.size(7.dp).background(relationColor(relation.kind, relation.kindColor, ui), CircleShape))
+        Box(Modifier.size(7.dp).background(relationColor(relation.tier, relation.kindColor, ui), CircleShape))
         Spacer(Modifier.width(10.dp))
         Txt(title, size = 13f)
         Spacer(Modifier.width(8.dp))
