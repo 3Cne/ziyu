@@ -114,6 +114,7 @@ import androidx.compose.ui.graphics.PathMeasure
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.addOutline
@@ -158,6 +159,9 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
+private val lightGlassBase = Color(0x55FFFFFF)
+private val darkGlassBase = Color(0x2A1C1E1C)
+
 data class InkPalette(
     val bgTop: Color,
     val bgBottom: Color,
@@ -166,10 +170,24 @@ data class InkPalette(
     val muted: Color,
     val faint: Color,
     val line: Color,
-    val isDark: Boolean,
+    /**
+     * 0 = light, 1 = dark. MoyuTheme animates this with the same 220 ms spec as the
+     * palette colours, so a day/night switch can cross-fade everything derived from
+     * "is the theme dark" instead of snapping it on the first frame.
+     */
+    val darkAmount: Float,
 ) {
-    val glassTint: Color get() = if (isDark) Color.White else Color.White
-    val glassBase: Color get() = if (isDark) Color(0x2A1C1E1C) else Color(0x55FFFFFF)
+    /**
+     * Single flip instant for consumers that need a boolean (status-bar icon
+     * appearance, structural branches). It changes at the middle of the day/night
+     * cross-fade, so every boolean consumer flips at the same moment instead of on
+     * frame 0.
+     */
+    val isDark: Boolean get() = darkAmount >= .5f
+    /** Both themes used the same white tint; kept as one source instead of an isDark branch. */
+    val glassTint: Color get() = Color.White
+    /** Cross-fades with [darkAmount] instead of reading the raw theme flag. */
+    val glassBase: Color get() = lerp(lightGlassBase, darkGlassBase, darkAmount)
 }
 
 data class InkUi(
@@ -189,7 +207,7 @@ val LocalInk = staticCompositionLocalOf {
             muted = Color(0xFF8A857B),
             faint = Color(0x0F1B1710),
             line = Color(0x1A1B1710),
-            isDark = false,
+            darkAmount = 0f,
         ),
         settings = AppSettings(),
         accent = Color(0xFF22221E),
@@ -233,26 +251,51 @@ fun MoyuTheme(settings: AppSettings, content: @Composable () -> Unit) {
     }
     val palette = paletteFor(settings.theme, dark)
     val accentTarget = accentFor(settings.accent, dark)
-    // 3.26.49：换主题 / 换点缀色时，paper、ink、muted、line、accent 五个颜色原来
-    // 是整屏硬切换。过渡只在这一处（LocalInk 的出口）做一次，所有页面读
-    // LocalInk 自动继承，不需要逐页改；`motion = none` 退化成 tween(0) 瞬切。
-    // 注意不要顺手动画 bgTop / bgBottom / faint：AmbientBackground 已经对
-    // bgTop 自己跑了一个 animateColorAsState，这里再包一层就会变成双层动画。
+    // 3.26.50：昼夜/换主题的整屏颜色过渡，唯一出口仍然在这里（LocalInk 的出口）。
+    // 3.26.49 只动画了 paper/ink/muted/line/accent，`isDark` 还是布尔硬翻，于是纸底
+    // （bgTop/bgBottom/faint）、玻璃底色和所有 if (isDark) 分支在主题切换的第一帧就
+    // 跳到目标值，观感是「文字渐变、背景跳」。现在：
+    //  ① bgTop/bgBottom/faint 与其它颜色共用同一个 220ms spec（motion=none → tween(0)）；
+    //  ② 额外动画 darkAmount，InkPalette.isDark 由它派生（中点翻转），glassBase /
+    //     玻璃填充等由 isDark 派生的颜色改按 darkAmount 连续插值；
+    //  ③ 全屏底色只在 MoyuTheme 这里动画一次：AmbientBackground 里原来那层
+    //     spring(420) 的 animateColorAsState 已删除，避免两层追同一个目标。
     val colorSpec: FiniteAnimationSpec<Color> =
+        if (settings.motion == "none") tween(0) else tween(220)
+    val amountSpec: FiniteAnimationSpec<Float> =
         if (settings.motion == "none") tween(0) else tween(220)
     val paper by animateColorAsState(palette.paper, colorSpec, label = "themePaper")
     val ink by animateColorAsState(palette.ink, colorSpec, label = "themeInk")
     val muted by animateColorAsState(palette.muted, colorSpec, label = "themeMuted")
     val line by animateColorAsState(palette.line, colorSpec, label = "themeLine")
     val accent by animateColorAsState(accentTarget, colorSpec, label = "themeAccent")
-    val animatedPalette = palette.copy(paper = paper, ink = ink, muted = muted, line = line)
+    val bgTop by animateColorAsState(palette.bgTop, colorSpec, label = "themeBgTop")
+    val bgBottom by animateColorAsState(palette.bgBottom, colorSpec, label = "themeBgBottom")
+    val faint by animateColorAsState(palette.faint, colorSpec, label = "themeFaint")
+    val darkAmount by animateFloatAsState(
+        targetValue = if (dark) 1f else 0f,
+        animationSpec = amountSpec,
+        label = "themeDarkAmount",
+    )
+    val animatedPalette = palette.copy(
+        bgTop = bgTop,
+        bgBottom = bgBottom,
+        paper = paper,
+        ink = ink,
+        muted = muted,
+        faint = faint,
+        line = line,
+        darkAmount = darkAmount,
+    )
     val view = LocalView.current
     val haptics = settings.haptics
-    LaunchedEffect(dark) {
+    // 系统栏图标跟着动画后的明暗翻转，而不是第一帧就翻：否则浅底白图标 / 深底黑图标
+    // 会各占过渡的一半。翻转时刻与所有 isDark 布尔分支一致（中点）。
+    LaunchedEffect(animatedPalette.isDark) {
         val window = (view.context as? Activity)?.window ?: return@LaunchedEffect
         val controller = androidx.core.view.WindowCompat.getInsetsController(window, view)
-        controller.isAppearanceLightStatusBars = !dark
-        controller.isAppearanceLightNavigationBars = !dark
+        controller.isAppearanceLightStatusBars = !animatedPalette.isDark
+        controller.isAppearanceLightNavigationBars = !animatedPalette.isDark
     }
     val haptic: (Int) -> Unit = remember(haptics) {
         { type ->
@@ -285,7 +328,7 @@ fun paletteFor(theme: String, dark: Boolean): InkPalette {
         muted = Color(0xFF8C8E87),
         faint = Color(0x14FFFFFF),
         line = Color(0x18FFFFFF),
-        isDark = true,
+        darkAmount = 1f,
     )
     return when (theme) {
         "mist" -> InkPalette(
@@ -296,7 +339,7 @@ fun paletteFor(theme: String, dark: Boolean): InkPalette {
             muted = Color(0xFF788789),
             faint = Color(0x0D183033),
             line = Color(0x18183033),
-            isDark = false,
+            darkAmount = 0f,
         )
         "white" -> InkPalette(
             bgTop = Color(0xFFFDFDFB),
@@ -306,7 +349,7 @@ fun paletteFor(theme: String, dark: Boolean): InkPalette {
             muted = Color(0xFF8B8B85),
             faint = Color(0x0D161613),
             line = Color(0x17161613),
-            isDark = false,
+            darkAmount = 0f,
         )
         "sepia" -> InkPalette(
             bgTop = Color(0xFFF7F0E1),
@@ -316,7 +359,7 @@ fun paletteFor(theme: String, dark: Boolean): InkPalette {
             muted = Color(0xFF8D806A),
             faint = Color(0x12281E0D),
             line = Color(0x1E281E0D),
-            isDark = false,
+            darkAmount = 0f,
         )
         "night" -> InkPalette(
             bgTop = Color(0xFF111312),
@@ -326,7 +369,7 @@ fun paletteFor(theme: String, dark: Boolean): InkPalette {
             muted = Color(0xFF8C8E87),
             faint = Color(0x14FFFFFF),
             line = Color(0x18FFFFFF),
-            isDark = true,
+            darkAmount = 1f,
         )
         else -> InkPalette(
             bgTop = Color(0xFFF8F6F1),
@@ -336,7 +379,7 @@ fun paletteFor(theme: String, dark: Boolean): InkPalette {
             muted = Color(0xFF8A857B),
             faint = Color(0x0F1B1710),
             line = Color(0x1A1B1710),
-            isDark = false,
+            darkAmount = 0f,
         )
     }
 }
@@ -520,8 +563,12 @@ fun Modifier.liquidGlass(
         // high end from disappearing into white paper.
         val fillAmount = (fillOverride ?: opacity).coerceIn(0f, 1f)
         val bodyAlpha = (0.04f + 0.96f * fillAmount).coerceIn(0f, 1f)
-        val frostColor = if (p.isDark) Color(0xFF191C1A) else tint
-        val bodyTint = lerp(frostColor, if (p.isDark) Color.White else p.ink, fillAmount * .12f)
+        // 3.26.50：昼夜过渡时这些量不再读原始 isDark（主题切换第一帧硬翻），而是按
+        // 动画后的 darkAmount 连续插值；静止态 darkAmount 恰为 0/1，像素与旧版一致。
+        val d = p.darkAmount
+        fun mix(light: Float, dark: Float): Float = light + (dark - light) * d
+        val frostColor = lerp(tint, Color(0xFF191C1A), d)
+        val bodyTint = lerp(frostColor, lerp(p.ink, Color.White, d), fillAmount * .12f)
         fun rimAlpha(alpha: Float): Float =
             (alpha * rimStrength).coerceIn(0f, 1f)
         // MoyuSurface always passes frost = 1f. Treating that as a solid
@@ -533,39 +580,34 @@ fun Modifier.liquidGlass(
 // and its labels ghosted onto whatever sat behind. Interpolate towards fully
 // opaque instead: at fill 1 the three stops are all alpha 1, and the old
 // falloff only applies below that.
-        val fill = if (p.isDark) {
-            val stops = if (fillAmount >= 1f) {
-                floatArrayOf(1f, 1f, 1f)
-            } else {
-                floatArrayOf(.045f, .86f, .96f)
-            }
-            Brush.linearGradient(
-                colors = listOf(
-                    Color.White.copy(alpha = if (solid) .06f else bodyAlpha * stops[0]),
-                    frostColor.copy(alpha = if (solid) .985f else bodyAlpha * stops[1]),
-                    bodyTint.copy(alpha = if (solid) .99f else bodyAlpha * stops[2]),
-                ),
-                start = Offset(0f, 0f),
-                end = Offset(w, h),
-            )
+        // Dark and light used different gradient stops. Blend both the stop colours and
+        // their alphas by darkAmount so a theme switch fades the surface instead of
+        // swapping brushes in one frame; at d = 0 / 1 this is exactly the old branch.
+        val darkStops = if (fillAmount >= 1f) {
+            floatArrayOf(1f, 1f, 1f)
         } else {
-            // Stops no longer fade to 74% at the far corner once fill is 1: that fade is
-            // what made a solid control look like a ghost of itself.
-            val stops = if (fillAmount >= 1f) {
-                floatArrayOf(1f, 1f, 1f)
-            } else {
-                floatArrayOf(.90f, .84f, .74f)
-            }
-            Brush.linearGradient(
-                colors = listOf(
-                    bodyTint.copy(alpha = if (solid) .96f else bodyAlpha * stops[0]),
-                    bodyTint.copy(alpha = if (solid) .985f else bodyAlpha * stops[1]),
-                    bodyTint.copy(alpha = if (solid) .99f else bodyAlpha * stops[2]),
-                ),
-                start = Offset(0f, 0f),
-                end = Offset(w, h),
-            )
+            floatArrayOf(.045f, .86f, .96f)
         }
+        val lightStops = if (fillAmount >= 1f) {
+            floatArrayOf(1f, 1f, 1f)
+        } else {
+            floatArrayOf(.90f, .84f, .74f)
+        }
+        val fill = Brush.linearGradient(
+            colors = listOf(
+                lerp(bodyTint, Color.White, d).copy(
+                    alpha = mix(if (solid) .96f else bodyAlpha * lightStops[0], if (solid) .06f else bodyAlpha * darkStops[0]),
+                ),
+                lerp(bodyTint, frostColor, d).copy(
+                    alpha = mix(if (solid) .985f else bodyAlpha * lightStops[1], if (solid) .985f else bodyAlpha * darkStops[1]),
+                ),
+                bodyTint.copy(
+                    alpha = mix(if (solid) .99f else bodyAlpha * lightStops[2], if (solid) .99f else bodyAlpha * darkStops[2]),
+                ),
+            ),
+            start = Offset(0f, 0f),
+            end = Offset(w, h),
+        )
         val caustic = Brush.radialGradient(
             colors = listOf(
                 // 折射 is the only thing that may push these two glows around.
@@ -573,7 +615,7 @@ fun Modifier.liquidGlass(
                 // the surface look hazier instead of more opaque, which is the
                 // opposite of what the slider promises.
                 Color.White.copy(
-                    alpha = if (p.isDark) .06f * refractionStrength else .52f * refractionStrength,
+                    alpha = mix(.52f, .06f) * refractionStrength,
                 ),
                 Color.Transparent,
             ),
@@ -589,15 +631,15 @@ fun Modifier.liquidGlass(
             center = Offset(w * .86f, h * .94f),
             radius = w * .72f,
         )
-        val edgeTone = if (p.isDark) Color.White else p.ink
+        val edgeTone = lerp(p.ink, Color.White, d)
         val rim = Brush.linearGradient(
             colors = listOf(
-                edgeTone.copy(alpha = rimAlpha(if (p.isDark) .24f else .22f)),
-                Color.White.copy(alpha = rimAlpha(if (p.isDark) .06f else .78f)),
+                edgeTone.copy(alpha = rimAlpha(mix(.22f, .24f))),
+                Color.White.copy(alpha = rimAlpha(mix(.78f, .06f))),
                 if (iridescent) accentColor.copy(
-                    alpha = rimAlpha((if (p.isDark) .24f else .42f) * refractionStrength),
+                    alpha = rimAlpha(mix(.42f, .24f) * refractionStrength),
                 ) else Color.Transparent,
-                edgeTone.copy(alpha = rimAlpha(if (p.isDark) .16f else .16f)),
+                edgeTone.copy(alpha = rimAlpha(.16f)),
             ),
             start = Offset(0f, 0f),
             end = Offset(w, h),
@@ -646,7 +688,7 @@ fun Modifier.liquidGlass(
                         listOf(
                             Color.Transparent,
                             Color.White.copy(
-                                alpha = (if (p.isDark) .20f else .94f) * specularStrength,
+                                alpha = mix(.94f, .20f) * specularStrength,
                             ),
                             Color.Transparent,
                         ),
@@ -666,7 +708,7 @@ fun Modifier.liquidGlass(
                     val x = (sin(n) * .5f + .5f) * w
                     val y = (sin(n * 1.71f + .4f) * .5f + .5f) * h
                     drawCircle(
-                        Color.White.copy(alpha = if (p.isDark) .022f else .05f),
+                        Color.White.copy(alpha = mix(.05f, .022f)),
                         .6f.dp.toPx(),
                         Offset(x, y),
                     )
@@ -712,8 +754,14 @@ fun GlassSurface(
     val resolvedShape = shape ?: SmoothCorner(radius.dp)
     val clipped = modifier.clip(resolvedShape)
     // Haze used to hard-code a 25% white tint, which turned the dark TabBar into
-    // a flat gray slab. Tint the blur toward the paper color in each theme.
-    val hazeTint = if (LocalInk.current.palette.isDark) 0x4D101312L else 0x40FFFFFFL
+    // a flat gray slab. Tint the blur toward the paper color in each theme, and
+    // cross-fade that tint by darkAmount so the blur does not swap in one frame
+    // while the rest of the palette is still animating.
+    val hazeTint = lerp(
+        Color(0x40FFFFFF),
+        Color(0x4D101312),
+        LocalInk.current.palette.darkAmount,
+    ).toArgb().toLong()
     val blurScale = .55f
     val blurValue = (blurOverride ?: blurScale).coerceIn(0f, 1f)
     // 模糊 0 must mean no blurring at all. The old curve kept a 35% floor, so
@@ -2458,15 +2506,13 @@ fun AmbientBackground(modifier: Modifier = Modifier, overlayOnly: Boolean = fals
     // white radial bloom at 12% width and 90 dots of grain; all three made the
     // paper read as uneven even on a still screen. A page is a sheet of paper,
     // not a lit surface.
-    // Theme switches now cross-fade the paper colour instead of snapping.
-    val bg by animateColorAsState(
-        targetValue = p.bgTop,
-        animationSpec = spring(MOYU_DAMPING, 420f),
-        label = "ambientBg",
-    )
+    // The colour itself is already cross-faded one layer up (MoyuTheme animates
+    // p.bgTop with the same 220 ms spec as the rest of the palette). Do not put an
+    // animateColorAsState back here: two animations chasing the same target made
+    // the page keep drifting after the switch.
     Canvas(modifier.fillMaxSize()) {
         if (!overlayOnly) {
-            drawRect(bg)
+            drawRect(p.bgTop)
         }
     }
 }
