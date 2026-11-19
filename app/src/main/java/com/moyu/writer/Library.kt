@@ -1276,19 +1276,19 @@ fun BookDetailScreen(
                 }
             }
             item {
+                // 3.26.54：继续写作的点击逻辑只留一份——按钮本体与引导锚点共用同一个回调，
+                // 避免以后改一处、另一处还留着旧的（3.26.52 遗留的内联复制）。
+                val openChapter: () -> Unit = {
+                    val chapter = book.lastChapter() ?: book.chapters.firstOrNull()
+                    if (chapter != null) onOpenChapter(book.id, chapter.id)
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     PrimaryButton(
                         "继续写作",
-                        {
-                            val chapter = book.lastChapter() ?: book.chapters.firstOrNull()
-                            if (chapter != null) onOpenChapter(book.id, chapter.id)
-                        },
+                        openChapter,
                         Modifier.weight(1f).tutorialAnchor(
                             "book.continue",
-                            onActivate = {
-                                val chapter = book.lastChapter() ?: book.chapters.firstOrNull()
-                                if (chapter != null) onOpenChapter(book.id, chapter.id)
-                            },
+                            onActivate = openChapter,
                         ),
                         glyph = Glyph.Edit,
                     )
@@ -1300,13 +1300,15 @@ fun BookDetailScreen(
                 // 所以挂在书籍详情而不是新开一个 tab；空着也常驻，点进去是带引导的空态。
                 val bible = book.bible
                 val haptic = LocalHaptic.current
+                // 3.26.54：故事行的点击逻辑只留一份——整行 clickable 与引导锚点共用同一个回调。
+                val openStory: () -> Unit = {
+                    haptic(1)
+                    storyOpen = true
+                }
                 MoyuSurface(
                     Modifier.fillMaxWidth().tutorialAnchor(
                         "book.story",
-                        onActivate = {
-                            haptic(1)
-                            storyOpen = true
-                        },
+                        onActivate = openStory,
                     ),
                     radius = 20f,
                     flat = true,
@@ -1314,10 +1316,7 @@ fun BookDetailScreen(
                     Row(
                         Modifier
                             .fillMaxWidth()
-                            .clickable {
-                                haptic(1)
-                                storyOpen = true
-                            }
+                            .clickable(onClick = openStory)
                             .padding(horizontal = 16.dp, vertical = 14.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
