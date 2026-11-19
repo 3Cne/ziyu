@@ -99,6 +99,28 @@ fun StorySheet(
             DialogTitle("故事", onClose = close)
             Spacer(Modifier.height(12.dp))
             Segmented(listOf("角色", "时间线", "大纲"), tab, { tab = it })
+            // 3.26.43：打开即触发「全书补齐」（受 3 分钟窗口节流）；有进度时显示一行 + 手动补齐。
+            val appCtx = androidx.compose.ui.platform.LocalContext.current.applicationContext
+            val store = LocalStore.current
+            LaunchedEffect(book.id) { AiBibleSync.noteBookOpened(appCtx, store, book.id) }
+            val sync = AiBibleSync.progressFor(book.id)
+            if (sync.label.isNotBlank()) {
+                Spacer(Modifier.height(4.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Txt(sync.label, size = 10.5f, color = LocalInk.current.palette.ink.copy(alpha = .55f))
+                    if (!sync.running) {
+                        Spacer(Modifier.width(8.dp))
+                        Txt(
+                            "再补一次",
+                            size = 10.5f,
+                            color = LocalInk.current.accent,
+                            modifier = Modifier.bouncy(scale = .94f) {
+                                AiBibleSync.syncAll(appCtx, store, book.id, force = true)
+                            },
+                        )
+                    }
+                }
+            }
             Spacer(Modifier.height(4.dp))
         },
     ) { _ ->
