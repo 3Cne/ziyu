@@ -209,22 +209,19 @@ object AiBible {
                     label = "删关系 $fromName—$toName"
                 } else {
                     // 3.26.49：relation 既认内置枚举名 / 中文名，也认作者自定义的名字。
-                    // 自定义名字归到底档 OTHER（图例仍只有三档），显示名用作者/ AI 给的那个词。
+                    // 3.26.50：自定义类型再认「这本书里已有的同名自定义类型」——同一显示名取同一底档与
+                    // 档位，AI / 自动整理写出「宿敌」时不会在两条关系上落成两个不同档位。
+                    // 认不出来就保留这条关系原来的底档 / 档位（新关系 = OTHER / 派生）。
                     val rawKind = args.optString("relation").trim()
-                    val builtIn = RelationKind.entries.firstOrNull { it.name == rawKind }
-                        ?: RelationKind.entries.firstOrNull { it.label == rawKind }
+                    val spec = relationTypeSpec(rawKind, old, before)
                     val base = old ?: StoryRelation(id = uuid(), from = from.id, to = to.id)
-                    val kindValue = builtIn ?: base.kind
-                    val labelValue = when {
-                        builtIn != null -> builtIn.label
-                        rawKind.isNotBlank() -> capRelationLabel(rawKind)
-                        else -> base.kindText
-                    }
                     val next = base.copy(
-                        kind = kindValue,
-                        kindLabel = labelValue,
+                        kind = spec.kind,
+                        kindLabel = spec.label,
                         // 换回内置类型 = 丢掉自定义色（按档位取色）；自定义改自定义保留原色。
-                        kindColor = if (builtIn != null) null else base.kindColor,
+                        kindColor = if (spec.builtIn) null else base.kindColor,
+                        // 换回内置类型 = 档位回到枚举派生（null）；自定义改自定义保留原档位。
+                        kindTier = if (spec.builtIn) null else spec.kindTier,
                         origin = source,
                         updatedAt = now(),
                     )
@@ -713,11 +710,13 @@ object AiBible {
                     val next = when (key) {
                         "kind" -> {
                             // 3.26.49：底档 + 显示名 + 自定义色是一条差异的三个部分，一次写入。
+                            // 3.26.50：档位也随类型一起写（null = 按底档派生）。
                             val kind = parseRelationKind(payload.optString("kind", value))
                             old.copy(
                                 kind = kind,
                                 kindLabel = capRelationLabel(payload.optString("kindLabel").trim()).ifBlank { kind.label },
                                 kindColor = normalizeRelationColor(payload.optString("kindColor")),
+                                kindTier = decodeRelationTier(payload.opt("kindTier")),
                             )
                         }
                         "ends" -> {
@@ -825,6 +824,7 @@ object AiBible {
     /**
      * 3.26.49：类型差异把 kind（底档）和 kindLabel（显示名）一起比较——内置名字换自定义、
      * 自定义名字互改都会出差异；颜色随类型一起改（payload 也带 kindColor，同意时一次落库）。
+     * 3.26.50：档位（实际生效值）也一起比，payload 带 kindTier，同意时档位一并落库。
      */
     private fun relationDrafts(
         before: BookBible,
@@ -836,7 +836,7 @@ object AiBible {
     ): List<PendingDraft> {
         val title = "${charName(before, old.from)}—${charName(before, old.to)}"
         val out = ArrayList<PendingDraft>(2)
-        if (old.kind != next.kind || old.kindText != next.kindText) {
+        if (old.kind != next.kind || old.kindText != next.kindText || old.tier != next.tier) {
             out += PendingDraft(
                 "relation", "update", old.id, title, "kind", "类型",
                 old.kindText, next.kindText,
@@ -844,6 +844,7 @@ object AiBible {
                     put("kind", next.kind.name)
                     put("kindLabel", next.kindText)
                     put("kindColor", next.kindColor ?: "")
+                    put("kindTier", next.kindTier ?: JSONObject.NULL)
                 },
             )
         }
@@ -1035,8 +1036,9 @@ object AiBible {
                     )
                 }
             } else {
-                if (counterpart.kind != r.kind || counterpart.kindText != r.kindText) {
+                if (counterpart.kind != r.kind || counterpart.kindText != r.kindText || counterpart.tier != r.tier) {
                     // 3.26.49：类型差异带显示名（自定义名词也参与差异），不再只比枚举。
+                    // 3.26.50：实际生效档位不同也算类型差异。
                     add("relation", r.id, "kind", title, "类型", counterpart.kindText, r.kindText)
                 }
                 add("relation", r.id, "merge", title, "并入", "AI 关系", "并进我的同名关系")
@@ -1184,10 +1186,12 @@ object AiBible {
             if ("kind" in keys) {
                 // 3.26.49：类型同步连显示名与自定义色一起并过去。AI 自定义类型没带颜色时
                 // 保留作者原来设的颜色（不静默丢色）；并回内置类型则清掉自定义色。
+                // 3.26.50：档位同理——AI 自定义类型没带档位时保留作者原档位，并回内置类型则派生。
                 target = target.copy(
                     kind = current.kind,
                     kindLabel = current.kindText,
                     kindColor = if (current.customKind) current.kindColor ?: target.kindColor else null,
+                    kindTier = if (current.customKind) current.kindTier ?: target.kindTier else null,
                     updatedAt = now(),
                 )
                 applied++
@@ -1423,6 +1427,44 @@ object AiBible {
         book.bible.characters.firstOrNull { it.id == id }?.name ?: id
 
     private fun now(): Long = System.currentTimeMillis()
+}
+
+/**
+ * 3.26.50：AI / 自动整理给的 `relation` 文本 → 落库后的类型三件套（底档 + 显示名 + 档位）。
+ *
+ * 与 [AiBible.mutate] 的关系 upsert 是**同一口径**（那边直接调这个函数），自动整理判断
+ * 「无变化」时也复用它，避免「判据说没变、落库却改了一处」这种两处漂移。
+ *
+ * - 内置枚举名 / 中文名（[RelationKind]）→ 内置类型，档位回到枚举派生（null）；
+ * - 其它文本 = 自定义类型：先认这本书里已有的同名自定义类型（取它的底档 / 档位），
+ *   认不出来就保留 `old` 这条关系原来的底档 / 档位；`old == null`（新关系）落 OTHER / null。
+ */
+internal data class RelationTypeSpec(
+    val kind: RelationKind,
+    val label: String,
+    val kindTier: Int?,
+    val builtIn: Boolean,
+) {
+    /** 实际生效档位：显式值优先，缺 / 越界按底档派生（与 [StoryRelation.tier] 同口径）。 */
+    val tier: Int get() = kindTier?.takeIf { it in RELATION_TIER_MIN..RELATION_TIER_MAX } ?: kind.tier
+}
+
+internal fun relationTypeSpec(raw: String, old: StoryRelation?, bible: BookBible): RelationTypeSpec {
+    val rawKind = raw.trim()
+    val builtIn = RelationKind.entries.firstOrNull { it.name == rawKind }
+        ?: RelationKind.entries.firstOrNull { it.label == rawKind }
+    if (builtIn != null) return RelationTypeSpec(builtIn, builtIn.label, null, builtIn = true)
+    val base = old ?: StoryRelation(from = "", to = "")
+    if (rawKind.isBlank()) {
+        return RelationTypeSpec(base.kind, base.kindText, base.kindTier, builtIn = false)
+    }
+    val label = capRelationLabel(rawKind)
+    val known = bible.relations.firstOrNull { it.customKind && it.kindText == label }
+    return if (known != null) {
+        RelationTypeSpec(known.kind, label, known.kindTier, builtIn = false)
+    } else {
+        RelationTypeSpec(base.kind, label, base.kindTier, builtIn = false)
+    }
 }
 
 // ───────────────────── 3.26.45 故事页直接调的对外签名 ─────────────────────

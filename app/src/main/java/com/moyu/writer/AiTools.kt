@@ -1718,9 +1718,12 @@ object AiTools {
     /**
      * 「按大纲建章」回填 chapterId 的那一步：新章标题对上还没落地的大纲节点就挂上
      * （与 chapters_from_outline 的落地行为一致）。返回是否挂上了。
+     *
+     * 3.26.50：只挂**章级**节点——`free_` 自由节点不参与（与 [chapters_from_outline] 同口径）。
+     * 以前只判断「章节标题撞上节点标题」，撞上自由节点会回填 chapterId、让它不再是自由节点。
      */
     private fun linkOutlineNode(store: AppStore, b: Book, chapterId: String, title: String): Boolean {
-        val node = b.bible.outline.firstOrNull { n ->
+        val node = outlineChapterNodes(b).firstOrNull { n ->
             b.chapters.none { it.id == n.chapterId } &&
                 (n.title.trim() == title || (n.title.trim().length >= 2 && title.contains(n.title.trim())))
         } ?: return false

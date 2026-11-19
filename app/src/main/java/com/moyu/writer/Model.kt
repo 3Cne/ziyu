@@ -107,17 +107,21 @@ data class Group(
  *
  * 为什么还留着枚举而不是纯自由文本：图例的三档颜色（亲近 / 对立 / 其他）、图上弹簧的档位、
  * 问书 / 自动整理读回来时认类型，都靠它；旧备份里的 `kind` 枚举名照原样读回来，一条不丢。
- * 自定义类型另外存 [StoryRelation.kindLabel] / [StoryRelation.kindColor]，底档落在 OTHER。
+ * 自定义类型另外存 [StoryRelation.kindLabel] / [StoryRelation.kindColor] / [StoryRelation.kindTier]。
+ *
+ * 3.26.50：每种底档带一个 [tier]（0 亲近 / 1 对立 / 2 其他），给自定义类型当缺省档位用。
+ * 刻意与 3.26.49 的 `relationTone` 三档同口径（师徒归「其他」），所以旧数据缺 `kindTier`
+ * 时派生出来的颜色 / 档位与 3.26.49 完全一致。
  */
-enum class RelationKind(val label: String) {
-    FAMILY("亲人"),
-    LOVER("恋人"),
-    FRIEND("朋友"),
-    ALLY("同盟"),
-    RIVAL("对手"),
-    ENEMY("仇敌"),
-    MENTOR("师徒"),
-    OTHER("其他"),
+enum class RelationKind(val label: String, val tier: Int) {
+    FAMILY("亲人", 0),
+    LOVER("恋人", 0),
+    FRIEND("朋友", 0),
+    ALLY("同盟", 0),
+    RIVAL("对手", 1),
+    ENEMY("仇敌", 1),
+    MENTOR("师徒", 2),
+    OTHER("其他", 2),
 }
 
 data class StoryCharacter(
@@ -134,17 +138,20 @@ data class StoryCharacter(
 )
 
 /**
- * 一条关系。3.26.49：类型可自定义（内置 8 种 + 作者自建）。
+ * 一条关系。3.26.49：类型可自定义（内置 8 种 + 作者自建）。3.26.50：自定义类型可挑档位。
  *
- * 四个字段的分工：
+ * 五个字段的分工：
  * - [kind]：底档，旧数据就是它；决定默认颜色（三档）和图上弹簧长度。
  * - [kindLabel]：显示名。内置类型 = 枚举中文名；自定义类型 = 作者起的名字。空时回退 [kind].label
  *   （老备份没有这个字段，解码时按 kind 派生，所以读回来永远不会是空白）。
  * - [kindColor]：自定义颜色 #RRGGBB；null / 非法 = 按 [kind] 的三档取色。
+ * - [kindTier]：3.26.50 档位 0 亲近 / 1 对立 / 2 其他；null = 按 [kind].tier 派生。
+ *   自定义类型底档固定 OTHER 时靠它决定图例颜色与弹簧档位；旧数据没有这个字段，
+ *   一律按 kind 派生（= 3.26.49 的表现），一条不丢。
  * - `origin / updatedAt`：来源与修改时间（沿用 3.26.23）。
  *
- * 编码时 `kind`（枚举名）和 `kindLabel`（显示名）都写：新版本读两个，旧版本只认 `kind`，
- * 所以降级 / 老备份都不会把内置类型读丢。
+ * 编码时 `kind`（枚举名）、`kindLabel`（显示名）、`kindTier`（档位）都写：新版本都读，
+ * 旧版本只认 `kind`，所以降级 / 老备份都不会把内置类型读丢。
  */
 data class StoryRelation(
     val id: String = uuid(),
@@ -155,6 +162,8 @@ data class StoryRelation(
     val kindLabel: String = "",
     /** 3.26.49：自定义颜色 #RRGGBB；null = 按 [kind] 的档位取色。 */
     val kindColor: String? = null,
+    /** 3.26.50：档位 0 亲近 / 1 对立 / 2 其他；null = 按 [kind] 派生。 */
+    val kindTier: Int? = null,
     val origin: String = "author",
     val updatedAt: Long = 0L,
 ) {
@@ -163,6 +172,32 @@ data class StoryRelation(
 
     /** 是否作者自建类型（显示名与内置枚举名不同）。 */
     val customKind: Boolean get() = kindLabel.isNotBlank() && kindLabel != kind.label
+
+    /**
+     * 实际生效的档位（3.26.50）：显式 [kindTier] 优先；缺字段 / 越界按 [kind].tier 派生。
+     * 图例取色与弹簧档位都应该读这个，而不是直接读 [kindTier]。
+     */
+    val tier: Int get() = kindTier?.takeIf { it in RELATION_TIER_MIN..RELATION_TIER_MAX } ?: kind.tier
+}
+
+/**
+ * 3.26.50：关系档位 0 亲近 / 1 对立 / 2 其他。合法区间只认这三个值；
+ * 越界 / 非数字一律当「没设」，解码后按 [RelationKind.tier] 派生（与 kindColor 同一套缺省策略）。
+ */
+internal const val RELATION_TIER_MIN = 0
+internal const val RELATION_TIER_MAX = 2
+
+/**
+ * 3.26.50：解码 `kindTier`。旧备份没有这个字段（原样返回 null）、坏值 / 越界也返回 null，
+ * 不让非法档位进数据；数字或数字字符串都认，便于手改 JSON 后还能读回来。
+ */
+internal fun decodeRelationTier(raw: Any?): Int? {
+    val value = when (raw) {
+        is Number -> raw.toInt()
+        is String -> raw.trim().toIntOrNull()
+        else -> null
+    } ?: return null
+    return value.takeIf { it in RELATION_TIER_MIN..RELATION_TIER_MAX }
 }
 
 /**
@@ -1182,9 +1217,11 @@ internal fun encodeBible(b: BookBible): JSONObject = JSONObject().apply {
             put("id", r.id); put("from", r.from); put("to", r.to)
             // 3.26.49：kind 与 kindLabel 一起写。新版本两个都读；旧版本只认 kind（枚举名），
             // 内置类型不会读丢；kindColor 只在自定义类型上有值。
+            // 3.26.50：kindTier 也写（null = 按 kind 派生）；旧版本忽略这个键。
             put("kind", r.kind.name)
             put("kindLabel", r.kindText)
             put("kindColor", r.kindColor ?: JSONObject.NULL)
+            put("kindTier", r.kindTier ?: JSONObject.NULL)
             put("origin", r.origin); put("updatedAt", r.updatedAt)
         })
     }
@@ -1241,6 +1278,7 @@ internal fun decodeBible(o: JSONObject?): BookBible {
         if (from.isBlank() || to.isBlank() || from == to) continue
         // 3.26.49：老备份没有 kindLabel —— 从 kind 枚举派生显示名（内置类型的映射原样保留）；
         // kindColor 缺 / 非法 = null（按内置档位取色），不让坏颜色进数据。
+        // 3.26.50：kindTier 缺 / 非法 = null（按 kind 派生档位），旧数据外观与 3.26.49 一致。
         val relKind = RelationKind.entries.firstOrNull { it.name == r.optString("kind") } ?: RelationKind.OTHER
         val relLabel = r.optString("kindLabel").trim().ifBlank { relKind.label }
         rels += StoryRelation(
@@ -1250,6 +1288,7 @@ internal fun decodeBible(o: JSONObject?): BookBible {
             kind = relKind,
             kindLabel = relLabel,
             kindColor = if (r.isNull("kindColor")) null else normalizeRelationColor(r.optString("kindColor")),
+            kindTier = decodeRelationTier(r.opt("kindTier")),
             origin = r.optString("origin", "author"),
             updatedAt = r.optLong("updatedAt", 0L),
         )

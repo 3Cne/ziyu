@@ -55,6 +55,9 @@ object AiBibleSync {
     private const val MAX_EVENTS = 12
     private const val MAX_BEATS = 12
 
+    /** 提示词里最多列几个自定义关系类型名（3.26.50）；只是一本小说实际用过的名字，不会太多。 */
+    private const val MAX_PROMPT_CUSTOM_TYPES = 10
+
     /** 侧车文件名：只记 hash，不进 moyu.json、不改 schema。 */
     private const val SYNC_FILE = "sync-state.json"
 
@@ -302,7 +305,9 @@ object AiBibleSync {
             }
             publish(bookId, done, chapters.size, fresh.title, running = true)
             Log.d(TAG, "开始整理《${book.title}》${fresh.title}（${countWords(fresh.content)} 字）")
-            when (val outcome = askPlan(settings, key, buildUser(freshBook, fresh))) {
+            // 3.26.50：提示词按这本书实例化（内置 8 种 + 本书已有的自定义关系类型）。
+            val system = systemFor(freshBook)
+            when (val outcome = askPlan(settings, key, system, buildUser(freshBook, fresh))) {
                 is AskOutcome.Down -> {
                     // 网络 / 服务挂了：后面的章节多半也一样，停掉这一轮，等下次触发。
                     Log.d(TAG, "请求失败，停止本轮：${outcome.reason}")
@@ -368,8 +373,8 @@ object AiBibleSync {
         class Bad(val reason: String) : AskOutcome()
     }
 
-    private suspend fun askPlan(settings: AppSettings, key: String, user: String): AskOutcome {
-        val first = chat(settings, key, user, .2f)
+    private suspend fun askPlan(settings: AppSettings, key: String, system: String, user: String): AskOutcome {
+        val first = chat(settings, key, system, user, .2f)
         if (!first.ok) {
             Log.d(TAG, "请求失败，放弃本次整理：${first.error}")
             return AskOutcome.Down(first.error.orEmpty())
@@ -377,7 +382,7 @@ object AiBibleSync {
         parse(first.text)?.let { return AskOutcome.Ok(it) }
         // 解析失败重试一次：同一请求，temperature 降到 0.1；再失败就静默放弃，不写数据。
         Log.d(TAG, "输出不是合法 JSON，重试一次：${first.text.take(160)}")
-        val second = chat(settings, key, user, .1f)
+        val second = chat(settings, key, system, user, .1f)
         if (!second.ok) {
             Log.d(TAG, "重试请求失败，放弃本次整理：${second.error}")
             return AskOutcome.Down(second.error.orEmpty())
@@ -393,6 +398,7 @@ object AiBibleSync {
     private suspend fun chat(
         settings: AppSettings,
         key: String,
+        system: String,
         user: String,
         temperature: Float,
     ): AiResult = AiClient.chat(
@@ -400,7 +406,7 @@ object AiBibleSync {
         model = settings.aiModel,
         key = key,
         temperature = temperature,
-        system = SYSTEM,
+        system = system,
         user = user,
         maxTokens = MAX_TOKENS,
         disableThinking = true,
@@ -497,9 +503,17 @@ object AiBibleSync {
                         (it.from == from.id && it.to == to.id) || (it.from == to.id && it.to == from.id)
                     }
                     val rawKind = args.optString("relation").trim()
-                    if (old != null && (rawKind.isBlank() || kindOf(rawKind) == old.kind)) {
-                        unchanged++
-                        continue
+                    if (old != null) {
+                        // 3.26.50：无变化判据同时比 kind / kindLabel / kindTier（任一不同就算有变化），
+                        // 换算口径与 AiBible.mutate 的落库逻辑是同一个函数，不会「判据说没变、落库却改了」。
+                        // 以前只比 kind：自定义关系被自动整理改名时 kind 都是 OTHER，会被误判无变化跳过。
+                        val spec = relationTypeSpec(rawKind, old, book.bible)
+                        if (rawKind.isBlank() ||
+                            (spec.kind == old.kind && spec.label == old.kindText && spec.tier == old.tier)
+                        ) {
+                            unchanged++
+                            continue
+                        }
                     }
                 }
             }
@@ -597,13 +611,6 @@ object AiBibleSync {
             }
         }
         return out
-    }
-
-    private fun kindOf(raw: String): RelationKind {
-        val value = raw.trim()
-        return RelationKind.entries.firstOrNull { it.name == value }
-            ?: RelationKind.entries.firstOrNull { it.label == value }
-            ?: RelationKind.OTHER
     }
 
     // ───────────────────────── 解析 ─────────────────────────
@@ -896,12 +903,18 @@ object AiBibleSync {
 
     // ───────────────────────── prompt ─────────────────────────
 
+    /** 3.26.50：关系类型清单占位符；每本书按自己已有的自定义类型实例化，见 [systemFor]。 */
+    private const val RELATION_TYPES_TOKEN = "{{RELATION_TYPES}}"
+
+    /** 内置 8 种关系类型的中文名（提示词里排在自定义类型前面）。 */
+    private val builtInRelationLabels = RelationKind.entries.map { it.label }
+
     private val SYSTEM = """
 你是一个故事圣经整理器。作者保存了一章正文，你要把这一章里「已经写定」的信息整理进这本书的故事圣经。
 
 四类必须同时过一遍，每类都要认真判断，不许只看其中一两类：
 1. characters 角色：本章出场、有戏份的人物全部列出。name 用正文里的叫法；role 是身份（主角/配角/反派/师长等，正文没写就留空）；note 一句话说清他是谁、想要什么，只依据正文。故事圣经里已经有的角色，正文没给新信息时 role / note 留空即可。
-2. relations 关系：本章已经写明的关系。from / to 是人名，必须出现在 characters 或已有故事圣经里；relation 只能是：亲人、恋人、朋友、同盟、对手、仇敌、师徒、其他。
+2. relations 关系：本章已经写明的关系。from / to 是人名，必须出现在 characters 或已有故事圣经里；relation 只能用：${RELATION_TYPES_TOKEN}
 3. events 事件：本章已经发生的事。title 一句话说清发生了什么；note 一两句补充；characters 列出牵涉的人名；whenText 必须按下面的时间格式写。
 4. outline.beats 情节点：这一章实际写出来的情节，按正文顺序，每条一句话，3–8 条。
 
@@ -916,10 +929,32 @@ C. 第几天：「第N天」，如「第3天」。
 - 正文里没出现过的名字一律不写。
 - 同一件事不要换说法重复输出。
 - 关系两端必须是人物；拿不准是什么关系就写「其他」。
+- relation 只能用上面列出的类型名（内置 8 种，或这本书已有的自定义类型）；自定义类型必须一字不差照抄，不要自己造近义词。
 - 四类都没有可提取的内容时，只输出 {"skip":true}。
 
 只输出一个 JSON 对象，不要解释，不要 Markdown 代码块，不要前后缀文字。格式：
 {"characters":[{"name":"","role":"","note":""}],"relations":[{"from":"","to":"","relation":""}],"events":[{"whenText":"","title":"","note":"","characters":[""]}],"outline":{"beats":[""]}}
 没有的类别给空数组；最多 12 个角色、12 条关系、12 个事件、12 个情节点。
 """.trim()
+
+    /**
+     * 3.26.50：把静态 [SYSTEM] 实例化成这本书的提示词——内置 8 种类型 + 这本书已有的自定义
+     * `kindLabel`。书里还没有自定义类型时，提示词与 3.26.49 完全一致。
+     */
+    private fun systemFor(book: Book): String = SYSTEM.replace(RELATION_TYPES_TOKEN, relationTypesFor(book))
+
+    /**
+     * relation 字段的合法取值清单。自定义类型按出现顺序去重，最多列 [MAX_PROMPT_CUSTOM_TYPES] 个：
+     * 列太多会稀释模型对关系判断的注意力，而且这些名字本来就只有本书实际用过的几个。
+     */
+    private fun relationTypesFor(book: Book): String {
+        val builtIn = builtInRelationLabels.joinToString("、")
+        val custom = LinkedHashSet<String>()
+        book.bible.relations.forEach { r ->
+            if (r.customKind && r.kindText !in builtInRelationLabels) custom += r.kindText
+        }
+        if (custom.isEmpty()) return "$builtIn。"
+        return builtIn + "，以及这本书已有的自定义类型：" +
+            custom.take(MAX_PROMPT_CUSTOM_TYPES).joinToString("、") + "。"
+    }
 }
