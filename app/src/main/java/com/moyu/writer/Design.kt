@@ -887,8 +887,13 @@ fun PrimaryButton(
     dark: Boolean = false,
 ) {
     val ui = LocalInk.current
-    val bg = if (dark || !ui.palette.isDark) ui.palette.ink else Color(0xFFF3EFE6)
-    val fg = if (dark || !ui.palette.isDark) ui.palette.bgTop else Color(0xFF191813)
+    // 3.26.53：按钮在昼夜之间是反相的（浅色主题 = 墨底浅字，深色主题 = 纸底墨字）。
+    // 不能留 `if (isDark)` 布尔硬翻——换主题那一帧整块按钮突然反色；改成两套色按
+    // darkAmount 插值。`dark` 是调用方指定的「强制暗底」变体（与主题无关），保持原样。
+    // 静止态 darkAmount 恰为 0/1，像素与旧分支一致。
+    val darkAmount = ui.palette.darkAmount
+    val bg = if (dark) ui.palette.ink else lerp(ui.palette.ink, Color(0xFFF3EFE6), darkAmount)
+    val fg = if (dark) ui.palette.bgTop else lerp(ui.palette.bgTop, Color(0xFF191813), darkAmount)
     Box(
         modifier
             .heightIn(min = 50.dp)
@@ -928,7 +933,8 @@ fun PrimaryButton(
 /** The dock tone, shared by the editor toolbar and every flat button.
  *  Paper nudged towards the accent: low contrast, one solid colour, no shadow. */
 internal fun dockTone(ui: InkUi): Color =
-    lerp(ui.palette.paper, ui.accent, if (ui.palette.isDark) .14f else .10f)
+    // 3.26.53：混合量也按 darkAmount 连续走（.10 → .14），中点不再硬翻。
+    lerp(ui.palette.paper, ui.accent, .10f + .04f * ui.palette.darkAmount)
 
 @Composable
 fun GlassButton(
@@ -1383,7 +1389,8 @@ fun SelectMark(
     val shape = SmoothCorner(corner)
     val v = p.coerceIn(0f, 1f)
     val borderColor = lerp(ui.palette.muted.copy(alpha = .55f), accent, v)
-    val checkColor = if (ui.palette.isDark) ui.palette.bgTop else Color.White
+    // 3.26.53：勾色随昼夜连续从白过渡到纸底（原来 if (isDark) 在中点整条硬翻）。
+    val checkColor = lerp(Color.White, ui.palette.bgTop, ui.palette.darkAmount)
     val base = Modifier.size(size)
     Canvas(
         (if (interactive) base.bouncy(scale = .92f, hapticType = hapticType) { onToggle(!checked) }
@@ -1427,8 +1434,9 @@ fun SelectMark(
 @Composable
 fun InkToggle(checked: Boolean, onChange: (Boolean) -> Unit) {
     val ui = LocalInk.current
-    val off = if (ui.palette.isDark) Color(0xFF3C403D) else Color(0xFFE4DFD4)
-    val knob = if (ui.palette.isDark) Color(0xFFF3F1EA) else Color(0xFFFDFCF8)
+    // 3.26.53：关态轨道/滑块色按 darkAmount 连续插值，中点不再硬翻。
+    val off = lerp(Color(0xFFE4DFD4), Color(0xFF3C403D), ui.palette.darkAmount)
+    val knob = lerp(Color(0xFFFDFCF8), Color(0xFFF3F1EA), ui.palette.darkAmount)
     // 水滴滑动：圆点被拖着走时沿运动方向拉长、到位弹回正圆；
     // 体积感用镜片同款边缘带（内缘奶白渐变 + 1.1dp 亮线），不加任何阴影。
     val pos = remember { androidx.compose.animation.core.Animatable(if (checked) 1f else 0f) }
@@ -1504,11 +1512,12 @@ fun lerp(a: Color, b: Color, t: Float): Color = Color(
  * made the app look assembled from parts.
  */
 fun accentTint(p: InkPalette, accent: Color): Color =
-    lerp(p.paper, accent, if (p.isDark) .20f else .13f)
+    // 3.26.53：混合比例按 darkAmount 连续走（.13 → .20），中点不再跳一次。
+    lerp(p.paper, accent, .13f + .07f * p.darkAmount)
 
 /** The edge of a selected block: the same tint, denser, so a 1 dp line reads. */
 fun accentLine(p: InkPalette, accent: Color): Color =
-    lerp(p.paper, accent, if (p.isDark) .42f else .30f)
+    lerp(p.paper, accent, .30f + .12f * p.darkAmount)
 
 /**
  * One gesture owner for both tap-to-seek and horizontal drag.
@@ -1619,7 +1628,7 @@ fun InkSlider(
                 .fillMaxWidth()
                 .height(5.dp)
                 .clip(CircleShape)
-                .background(if (ui.palette.isDark) Color(0xFF313532) else Color(0xFFDDD7CC))
+                .background(lerp(Color(0xFFDDD7CC), Color(0xFF313532), ui.palette.darkAmount))
         )
         Box(
             Modifier
@@ -1643,7 +1652,7 @@ fun InkSlider(
                     scaleY = knob
                 }
                 .clip(CircleShape)
-                .background(if (ui.palette.isDark) Color(0xFFF4F1E9) else Color.White)
+                .background(lerp(Color.White, Color(0xFFF4F1E9), ui.palette.darkAmount))
                 .border(.8.dp, Color.Black.copy(alpha = .06f), CircleShape)
         )
     }
@@ -1690,7 +1699,7 @@ fun HueSlider(hue: Float, modifier: Modifier = Modifier, onChange: (Float) -> Un
                 .size(22.dp)
                 .graphicsLayer { shadowElevation = 7f; shape = CircleShape; clip = true }
                 .clip(CircleShape)
-                .background(if (ui.palette.isDark) Color(0xFFF4F1E9) else Color.White)
+                .background(lerp(Color.White, Color(0xFFF4F1E9), ui.palette.darkAmount))
                 .border(1.dp, Color.Black.copy(alpha = .12f), CircleShape)
         )
     }
@@ -1791,7 +1800,7 @@ fun GlassDialog(
     // 3.26.26 的规矩沿用到这里：压暗随 closing 一起撤，退场结束时遮罩正好到 0，
     // 不会出现「面板已经没了、页面还灰着」的一段（窗口卸掉那一帧遮罩已经是 0）。
     val scrimAlpha by animateFloatAsState(
-        targetValue = if (closing) 0f else if (ui.palette.isDark) .34f else .18f,
+        targetValue = if (closing) 0f else .18f + .16f * ui.palette.darkAmount,
         animationSpec = tween(150, easing = FastOutSlowInEasing),
         label = "glassDialogScrim",
     )
@@ -2112,7 +2121,7 @@ fun InlineModalSheet(
     val scrim = remember { Animatable(0f) }
     LaunchedEffect(closing) {
         scrim.animateTo(
-            if (closing) 0f else if (ui.palette.isDark) .38f else .22f,
+            if (closing) 0f else .22f + .16f * ui.palette.darkAmount,
             tween(200),
         )
     }
@@ -2397,7 +2406,7 @@ fun ModalSheet(
     val scrim = remember { Animatable(0f) }
     LaunchedEffect(closing) {
         scrim.animateTo(
-            if (closing) 0f else if (ui.palette.isDark) .38f else .22f,
+            if (closing) 0f else .22f + .16f * ui.palette.darkAmount,
             tween(200),
         )
     }
@@ -2720,7 +2729,7 @@ fun ColorDot(color: Color, selected: Boolean, onClick: () -> Unit) {
             )
         } else {
             drawCircle(
-                if (ui.palette.isDark) Color.White.copy(alpha = .22f) else Color.Black.copy(alpha = .12f),
+                lerp(Color.Black.copy(alpha = .12f), Color.White.copy(alpha = .22f), ui.palette.darkAmount),
                 radius = size.minDimension / 2 - .4.dp.toPx(),
                 style = Stroke(.8.dp.toPx()),
             )

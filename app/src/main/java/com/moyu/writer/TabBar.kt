@@ -158,11 +158,8 @@ internal fun MoyuTabBar(
     var selectJob by remember { mutableStateOf<Job?>(null) }
 
     val lensAlpha = .08f * s.tabLensOpacity.coerceIn(0f, 1f)
-    val selectedTint = if (p.isDark) {
-        Color.White.copy(alpha = lensAlpha)
-    } else {
-        p.ink.copy(alpha = lensAlpha)
-    }
+    // 3.26.53：镜片内的选中薄涂随昼夜连续从墨色走到白色（原来 if (isDark) 中点硬翻）。
+    val selectedTint = lerp(p.ink, Color.White, p.darkAmount).copy(alpha = lensAlpha)
 
     // 镜片只在「切页」和「拖动」时抬起；按住不抬（2026-11-15 用户报：按住别的格也抬）。
     val liftTarget = if (dragging || clickLift) 1f else 0f
@@ -322,8 +319,12 @@ internal fun MoyuTabBar(
                             // 3.26.9：不再随 lift 变亮。点击切页时 clickLift 会在 260ms
                             // 里把边框、外阴影、内阴影一起推高再收回，用户读作「点一下
                             // 镜片边缘亮一下」。抬起感只留位置与 4% 缩放，材质三处恒定。
-                            if (p.isDark) Color.White.copy(alpha = .07f)
-                            else p.ink.copy(alpha = .06f),
+                            // 3.26.53：昼夜色改按 darkAmount 连续插值（墨 6% ↔ 白 7%）。
+                            lerp(
+                                p.ink.copy(alpha = .06f),
+                                Color.White.copy(alpha = .07f),
+                                p.darkAmount,
+                            ),
                             lensShape,
                         )
                         .then(
@@ -365,7 +366,9 @@ internal fun MoyuTabBar(
                             } else {
                                 Modifier
                                     .clip(lensShape)
-                                    .background(if (p.isDark) p.ink.copy(alpha = .18f) else p.ink.copy(alpha = .88f))
+                                    // 3.26.53：非玻璃回退底色：墨 88%（浅色）→ 墨 18%（深色），
+                                    // 透明度随 darkAmount 连续过渡，不再在中点硬翻。
+                                    .background(p.ink.copy(alpha = .88f - .70f * p.darkAmount))
                             }
                         )
                 )

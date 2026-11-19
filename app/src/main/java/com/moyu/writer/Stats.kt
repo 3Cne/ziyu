@@ -121,8 +121,13 @@ fun StatsScreen(store: AppStore) {
                                                 .clip(SmoothCorner(7.dp))
                                                 .background(
                                                     if (isToday) ui.accent
-                                                    else if (p.isDark) Color.White.copy(alpha = .28f)
-                                                    else p.ink.copy(alpha = .18f)
+                                                    // 3.26.53：非今日柱色随昼夜连续过渡
+                                                    // （墨 18% ↔ 白 28%），中点不再硬翻。
+                                                    else lerp(
+                                                        p.ink.copy(alpha = .18f),
+                                                        Color.White.copy(alpha = .28f),
+                                                        p.darkAmount,
+                                                    )
                                                 )
                                         )
                                     }
