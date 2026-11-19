@@ -526,7 +526,9 @@ fun ExportSheet(
     var synopsis by remember { mutableStateOf(true) }
     var busy by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<ExportResult?>(null) }
-    val body: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit = {
+    // 3.26.47：body 里的「完成」也走面板自己的 close()（先播退场、空闲后才回调 onDismiss），
+    // 以前直接调外层 onDismiss 会让宿主 if(flag) 当帧把面板收掉、退场被跳过。
+    val body: @Composable androidx.compose.foundation.layout.ColumnScope.(close: () -> Unit) -> Unit = { close ->
         Spacer(Modifier.height(16.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
             FormatCard(
@@ -616,7 +618,7 @@ fun ExportSheet(
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         GlassButton("打开", { openExport(context, r) }, Modifier.weight(1f), glyph = Glyph.Book)
                         GlassButton("分享", { shareExport(context, r) }, Modifier.weight(1f), glyph = Glyph.Share)
-                        GlassButton("完成", onDismiss, Modifier.weight(1f))
+                        GlassButton("完成", close, Modifier.weight(1f))
                     }
                 }
             }
@@ -626,13 +628,15 @@ fun ExportSheet(
     if (embedded) {
         Column(Modifier.fillMaxWidth()) {
             SheetPageHeader("导出书籍", "目录、章节名和封面都会写进文件。", onBack ?: onDismiss)
-            body()
+            // 3.26.47：embedded 时外层 InlineModalSheet 已有退场，它的 close() 就是 onDismiss。
+            body(onDismiss)
         }
     } else {
-        ModalSheet(onDismiss) {
-            DialogTitle("导出书籍", "目录、章节名和封面都会写进文件。", onClose = onDismiss)
-            body()
-        }
+        // 3.26.47：X 与「完成」都走 ModalSheet 的 close，不再直接调外层 onDismiss。
+        ModalSheet(onDismiss, closeableContent = { close ->
+            DialogTitle("导出书籍", "目录、章节名和封面都会写进文件。", onClose = close)
+            body(close)
+        })
     }
 }
 

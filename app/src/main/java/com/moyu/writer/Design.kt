@@ -14,6 +14,7 @@ import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.FiniteAnimationSpec
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
@@ -24,6 +25,11 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -137,6 +143,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
@@ -1703,8 +1710,28 @@ fun GlassDialog(
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val ui = LocalInk.current
+    // 3.26.47：补退场。宿主一律是 `if (flag) GlassDialog(...)`，onDismiss 一调宿主当帧就把整窗卸掉，
+    // 所以关闭必须先播完退场、等 AnimatedVisibility idle 再回调（与 ModalSheet/InlineModalSheet 同一写法）。
+    var closing by remember { mutableStateOf(false) }
+    val visibleState = remember { MutableTransitionState(false) }
+    LaunchedEffect(Unit) { visibleState.targetState = true }
+    fun close() {
+        if (closing) return
+        closing = true
+        visibleState.targetState = false
+    }
+    LaunchedEffect(closing, visibleState.isIdle, visibleState.currentState) {
+        if (closing && visibleState.isIdle && !visibleState.currentState) onDismiss()
+    }
+    // 3.26.26 的规矩沿用到这里：压暗随 closing 一起撤，退场结束时遮罩正好到 0，
+    // 不会出现「面板已经没了、页面还灰着」的一段（窗口卸掉那一帧遮罩已经是 0）。
+    val scrimAlpha by animateFloatAsState(
+        targetValue = if (closing) 0f else if (ui.palette.isDark) .34f else .18f,
+        animationSpec = tween(150, easing = FastOutSlowInEasing),
+        label = "glassDialogScrim",
+    )
     Dialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { close() },
         properties = DialogProperties(
             dismissOnBackPress = true,
             dismissOnClickOutside = dismissOnOutsideClick,
@@ -1721,9 +1748,9 @@ fun GlassDialog(
         Box(
             Modifier
                 .fillMaxSize()
-                .background(Color.Black.copy(alpha = if (ui.palette.isDark) .34f else .18f))
+                .background(Color.Black.copy(alpha = scrimAlpha))
                 .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {
-                    if (dismissOnOutsideClick) onDismiss()
+                    if (dismissOnOutsideClick && !closing) close()
                 },
         ) {
             BoxWithConstraints(
@@ -1735,10 +1762,14 @@ fun GlassDialog(
                 contentAlignment = Alignment.Center,
             ) {
                 val panelMax = maxHeight * .94f
+                // 3.26.47：`visible = true` 那版其实没有进场（初始即可见、enter 从未播放）；
+                // 换成 visibleState 后 enter 才真正跑起来，与 ModalSheet 的进出观感一致。
                 AnimatedVisibility(
-                    visible = true,
+                    visibleState = visibleState,
                     enter = fadeIn(spring(MOYU_DAMPING, 500f)) +
                         scaleIn(initialScale = .965f, animationSpec = spring(MOYU_DAMPING, 420f, PRESS_THRESHOLD)),
+                    exit = fadeOut(tween(150, easing = FastOutSlowInEasing)) +
+                        scaleOut(targetScale = .965f, animationSpec = tween(150, easing = FastOutSlowInEasing)),
                 ) {
                     CompositionLocalProvider(LocalGlassLite provides performanceMode) {
                         MoyuSurface(modifier
@@ -1790,6 +1821,43 @@ private fun DialogBlur(active: Boolean = true) {
             } catch (_: Throwable) {
             }
         }
+    }
+}
+
+/**
+ * 统一展开包装（3.26.47 新提供，本轮不批量套用）。
+ *
+ * 全项目此前零 `animateContentSize`：折叠/展开类区块（设置说明、列表详情、行内提示）
+ * 要么突然出现、要么直接 `if/else` 换内容，没有「长出来」的过程。以后统一走这里：
+ * 尺寸动画用 `expandVertically/shrinkVertically`（横向出现的内容传 `horizontal = true`），
+ * 同时叠一层 `fadeIn/fadeOut`——只做尺寸展开时先出现的是「一条被压扁的内容」，
+ * 带上淡入后观感是整块一起长出来。
+ *
+ * 曲线用空间类 spring `dampingRatio = .6f, stiffness = 380f`（项目内公认的柔曲线数值），
+ * `motion = none` 档退化成 `tween(0)`，与其它动效的降级方式一致。
+ *
+ * @param expand 目标展开状态；首次组合时即按该状态显示，不额外补一段进场。
+ * @param horizontal true = 横向展开（窄控件/行内元素），默认纵向（列表行、段落）。
+ */
+@Composable
+fun MoyuExpand(
+    modifier: Modifier = Modifier,
+    expand: Boolean = true,
+    horizontal: Boolean = false,
+    content: @Composable () -> Unit,
+) {
+    val motion = LocalInk.current.settings.motion != "none"
+    val spatial: FiniteAnimationSpec<IntSize> =
+        if (motion) spring(dampingRatio = .6f, stiffness = 380f) else tween(0)
+    val fade: FiniteAnimationSpec<Float> =
+        if (motion) spring(dampingRatio = .6f, stiffness = 380f) else tween(0)
+    AnimatedVisibility(
+        visible = expand,
+        modifier = modifier,
+        enter = (if (horizontal) expandHorizontally(spatial) else expandVertically(spatial)) + fadeIn(fade),
+        exit = (if (horizontal) shrinkHorizontally(spatial) else shrinkVertically(spatial)) + fadeOut(fade),
+    ) {
+        content()
     }
 }
 
@@ -2201,7 +2269,13 @@ val MorphKeyboard = listOf(
 fun ModalSheet(
     onDismiss: () -> Unit,
     imeAware: Boolean = false,
-    content: @Composable ColumnScope.() -> Unit,
+    /** 3.26.47：内容需要框架的 `close()`（先播退场、idle 后才回调 onDismiss）时用这个。
+     *  面板右上角 X 以前直接调外层 `onDismiss`，宿主 `if(flag)` 当帧就把面板卸掉、退场被跳过；
+     *  改成内容拿 close 后由面板自己关。
+     *  说明：这里没写成同名 `content` 的重载——两个重载都接受尾随 lambda 时 `ModalSheet(onDismiss) { }`
+     *  会因「零参 lambda 同时适配 (close)->Unit」解析歧义，会把现有 8 处调用点全部弄坏。 */
+    closeableContent: (@Composable ColumnScope.(close: () -> Unit) -> Unit)? = null,
+    content: (@Composable ColumnScope.() -> Unit)? = null,
 ) {    val ui = LocalInk.current
     val sheetCorner = GlassStyle.corner
     val panelShape = SmoothCorner(
@@ -2313,7 +2387,15 @@ fun ModalSheet(
                                 .align(Alignment.CenterHorizontally)
                         )
                         Spacer(Modifier.height(18.dp))
-                        content()
+                        // 3.26.47：带 close 的调用点走面板自己的 close()（退场完毕才回调 onDismiss）；
+                        // 其余调用点仍走原来的 content()，行为零变化。
+                        val withClose = closeableContent
+                        val plain = content
+                        if (withClose != null) {
+                            withClose(this, { close() })
+                        } else {
+                            plain?.invoke(this)
+                        }
                     }
                     }
                 }

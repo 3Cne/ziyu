@@ -354,10 +354,12 @@ private fun FolderEditSheet(
             body()
         }
     } else {
-        ModalSheet(onDismiss = onDismiss, imeAware = true) {
-            DialogTitle(title, subtitle, onClose = onDismiss)
+        // 3.26.47：面板右上角 X 走 ModalSheet 的 close()（先播退场、空闲后再回调 onDismiss），
+        // 不再直接调外层 onDismiss——宿主 if(flag) 会把还没退场的面板当帧卸掉。
+        ModalSheet(onDismiss = onDismiss, imeAware = true, closeableContent = { close ->
+            DialogTitle(title, subtitle, onClose = close)
             body()
-        }
+        })
     }
 }
 
