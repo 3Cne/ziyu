@@ -106,6 +106,9 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.SharedTransitionLayout
+import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -387,6 +390,7 @@ private fun SelectionOverlay(
 }
 
 @Composable
+@OptIn(ExperimentalSharedTransitionApi::class)
 fun WritingScreen(
     seedKey: String,
     heading: String,
@@ -663,8 +667,6 @@ fun WritingScreen(
     // 3.26.34 AI 竖排菜单：状态在页面层，菜单画在能力栏上方的页面层。
     // 不用 Popup 的独立窗口——那一层会把「第二次点 AI」的点击吃掉（用户实测关不掉）。
     var aiMenuOpen by remember { mutableStateOf(false) }
-    var aiMenuMounted by remember { mutableStateOf(false) }
-    LaunchedEffect(aiMenuOpen) { if (aiMenuOpen) aiMenuMounted = true }
     // 选区一消失菜单就没意义了；能力栏收起时也一样，不能留一块悬在栏上方。
     LaunchedEffect(body.selection, abilityT.value < .5f) {
         if (body.selection.start == body.selection.end || abilityT.value < .5f) {
@@ -1992,6 +1994,12 @@ fun WritingScreen(
                     // bitmap instead of freezing the dock on its first frame.
                     .onGloballyPositioned { dockHeightPx = it.size.height }
             ) {
+                // 3.26.35：AI 菜单改成官方共享元素。共享元素的两端（AI 图标格 ↔ 菜单）
+                // 必须同处一个 SharedTransitionLayout，所以把能力栏与菜单一起包进来；
+                // 内层再套一个 Box，让球与菜单继续用 BoxScope 的 align / matchParentSize。
+                SharedTransitionLayout(Modifier.fillMaxWidth()) {
+                val stScope: SharedTransitionScope = this
+                Box(Modifier.fillMaxWidth()) {
                 Box(
                     Modifier.fillMaxWidth()
                         // 收起后整块缩成左下角的球；原区域不保留吞触摸的层，
@@ -2171,33 +2179,52 @@ fun WritingScreen(
                         color = p.ink,
                     )
                 }
-                // 3.26.34：AI 竖排菜单画在能力栏上方，左边贴屏幕最左、底边压进栏顶 4dp
-                // （同色，看不出来）——读作栏体本身被挤出一截。
-                // matchParentSize：不参与能力栏的测量，不会把栏抬高。
-                if (aiMenuMounted) {
-                    Box(
-                        Modifier.matchParentSize(),
-                        contentAlignment = Alignment.BottomStart,
+                // 3.26.35：菜单是共享元素的「进入端」。始终挂载（matchParentSize 不参与测量，
+                // 不会抬高能力栏），显隐交给 AnimatedVisibility —— 退出动画能跑完再消失。
+                Box(
+                    Modifier.matchParentSize(),
+                    contentAlignment = Alignment.BottomStart,
+                ) {
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = aiMenuOpen,
+                        enter = fadeIn(tween(1)),
+                        exit = fadeOut(tween(1)),
                     ) {
                         AiDockMenu(
-                            open = aiMenuOpen,
                             tone = dockTone(ui),
                             ink = p.ink,
-                            modifier = Modifier.offset {
-                                IntOffset(
-                                    0,
-                                    -dockHeightPx + with(densityNow) { 4.dp.roundToPx() },
-                                )
+                            modifier = with(this@SharedTransitionLayout) {
+                                Modifier
+                                    .offset {
+                                        IntOffset(
+                                            0,
+                                            -dockHeightPx + with(densityNow) { 4.dp.roundToPx() },
+                                        )
+                                    }
+                                    .sharedBounds(
+                                        rememberSharedContentState("aiDockMenu"),
+                                        this@AnimatedVisibility,
+                                        boundsTransform = { _, _ -> spring(dampingRatio = .6f, stiffness = 380f) },
+                                        resizeMode = SharedTransitionScope.ResizeMode.RemeasureToBounds,
+                                        clipInOverlayDuringTransition = OverlayClip(aiMenuShape()),
+                                    )
                             },
-                            onProof = { startProof() },
-                            onPolish = { startPolish() },
-                            onAsk = { startAsk() },
-                            onExited = {
-                                aiMenuMounted = false
+                            onProof = {
                                 aiMenuOpen = false
+                                startProof()
+                            },
+                            onPolish = {
+                                aiMenuOpen = false
+                                startPolish()
+                            },
+                            onAsk = {
+                                aiMenuOpen = false
+                                startAsk()
                             },
                         )
                     }
+                }
+                }
                 }
             }
             }
@@ -5017,6 +5044,7 @@ private val DockRowHeight = 52.dp
 private val DockToolWidth = 36.dp
 
 @Composable
+@OptIn(ExperimentalSharedTransitionApi::class)
 private fun EditorDock(
     canUndo: Boolean,
     canRedo: Boolean,
@@ -5054,6 +5082,8 @@ private fun EditorDock(
     /** 3.26.34：AI 竖排菜单的开关状态（状态提到这里，菜单画在能力栏上方的页面层）。 */
     aiOpen: Boolean = false,
     onAiToggle: () -> Unit = {},
+    /** 3.26.35：共享元素作用域（AI 格 ↔ 菜单）。null 时退回普通图标格。 */
+    shared: SharedTransitionScope? = null,
     /** 3.26.34：能力栏已收起（整块缩回左下角的球）——竖排 AI 菜单要跟着收。 */
     dockCollapsed: Boolean = false,
     /** 1型玻璃 sampling source. Pass the body's software backdrop so the real
@@ -5141,31 +5171,34 @@ private fun EditorDock(
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             if (onProof != null || onPolish != null || onAsk != null) {
-                                // 3.26.34：AI 改成竖排菜单。横排 9 格（≈396dp）超过屏宽，
-                                // 「取消」被裁成「取」；竖排后操作条固定 7 格。
-                                // 图标本身在 ✦ ↔ ✕ 之间插值（MorphIcon）：点开/收起时
-                                // 同一个元素变成另一个图标，不是换一张图。
-                                val morph by animateFloatAsState(
-                                    targetValue = if (aiOpen) 1f else 0f,
-                                    animationSpec = spring(dampingRatio = .52f, stiffness = 320f),
-                                    label = "aiMorph",
-                                )
-                                Column(
-                                    Modifier
-                                        .width(DockToolWidth)
-                                        .bouncy(scale = .88f) { onAiToggle() }
-                                        .padding(vertical = 4.dp),
-                                    horizontalAlignment = Alignment.CenterHorizontally,
-                                ) {
-                                    MorphIcon(
-                                        progress = morph,
-                                        a = MorphAiStar,
-                                        b = MorphAiCross,
-                                        modifier = Modifier.size(16.dp),
-                                        color = onBar,
-                                    )
-                                    Spacer(Modifier.height(3.dp))
-                                    Txt("AI", size = 7.6f, color = onBarDim, maxLines = 1)
+                                // 3.26.35：AI 格与菜单是同一对共享元素的两端（key = aiDockMenu）。
+                                // 图标格是「退出端」：打开时把 bounds 交给菜单，图标在 ✦ ↔ ✕
+                                // 之间换形——同一个元素换形，不是换一张图。
+                                Box(Modifier.width(DockToolWidth)) {
+                                    val sh = shared
+                                    if (sh == null) {
+                                        AiDockCell(aiOpen, onBar, onBarDim, onAiToggle)
+                                    } else {
+                                        androidx.compose.animation.AnimatedVisibility(
+                                            visible = !aiOpen,
+                                        ) {
+                                            AiDockCell(
+                                                open = aiOpen,
+                                                onBar = onBar,
+                                                onBarDim = onBarDim,
+                                                onToggle = onAiToggle,
+                                                modifier = with(sh) {
+                                                    Modifier.sharedBounds(
+                                                        rememberSharedContentState("aiDockMenu"),
+                                                        this@AnimatedVisibility,
+                                                        boundsTransform = { _, _ -> spring(dampingRatio = .6f, stiffness = 380f) },
+                                                        resizeMode = SharedTransitionScope.ResizeMode.RemeasureToBounds,
+                                                        clipInOverlayDuringTransition = OverlayClip(aiMenuShape()),
+                                                    )
+                                                },
+                                            )
+                                        }
+                                    }
                                 }
                             }
                             DockTool(Glyph.Share, "复制", true, onCopy)
@@ -6265,6 +6298,7 @@ private fun reminderSlots(): List<Pair<Long?, String>> {
 
 @Preview(name = "写作 Dock", widthDp = 412, heightDp = 210, showBackground = true)
 @Composable
+@OptIn(ExperimentalSharedTransitionApi::class)
 private fun EditorDockPreview() {
     MoyuTheme(AppSettings(theme = "night", motion = "none")) {
         CompositionLocalProvider(LocalHazeHandle provides null) {
