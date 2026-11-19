@@ -87,7 +87,15 @@ private const val TAG = "MOYU_TUTORIAL"
 
 /** 组 id。页内教学组以后在这里补常量，不要散落字符串。 */
 object TutorialGroups {
-    const val LANDING = "tutorial.landing"
+    /**
+     * 首次启动的引导组。
+     *
+     * 3.26.53 起它的内容是自动播放的 PPT（全屏纸底、一页一个功能、自动翻页），
+     * 实现见 Onboarding.kt 的 [PptOnboarding]，不再走挖洞教练模式。
+     * 组 id 改成 `tutorial.ppt`（用户否掉了教练式，旧的 `tutorial.landing` 不再写回）；
+     * 写回 `AppSettings.tutorialDone` 与 `onboardingDone=true` 的语义不变（App.kt 的 finish 回调照旧）。
+     */
+    const val LANDING = "tutorial.ppt"
 }
 
 /**
@@ -281,6 +289,29 @@ private object TutorialTiming {
 private fun tutorialSpring(): SpringSpec<Float> = spring(dampingRatio = .6f, stiffness = 380f)
 
 /**
+ * 引导层唯一入口。
+ *
+ * 3.26.53：用户否掉了「真点教练式」，要的是「高级质感高级动效的 ppt 形式，尽量把所有功能都讲到，
+ * 一个一个来，滑动自动展示」——所以首次引导（[TutorialGroups.LANDING]）整层换成
+ * Onboarding.kt 里的 [PptOnboarding]（全屏纸底 + 一页一个功能 + 自动翻页 + 手动滑）。
+ *
+ * 挖洞教练层保留为 [CoachOverlay]：锚点与「真点才能过」的 API 不动，以后页内分步教学
+ * 仍然 `tutorial.start(某个别的组)` 走它；首次引导不再使用。
+ */
+@Composable
+fun TutorialOverlay(
+    group: TutorialGroup,
+    registry: TutorialRegistry,
+    onFinished: () -> Unit,
+) {
+    if (group.id == TutorialGroups.LANDING) {
+        PptOnboarding(onFinished = onFinished)
+        return
+    }
+    CoachOverlay(group = group, registry = registry, onFinished = onFinished)
+}
+
+/**
  * 教练式引导层：半透明蒙层 + 目标控件挖洞高亮 + 自动避让的气泡/居中大卡。
  *
  * 3.26.52 起的规则：
@@ -294,7 +325,7 @@ private fun tutorialSpring(): SpringSpec<Float> = spring(dampingRatio = .6f, sti
  *   新洞从旧位置 spring 滑到新目标（位置插值，不跳）、气泡从洞的最近边缘 `scaleIn(.94→1)`。
  */
 @Composable
-fun TutorialOverlay(
+private fun CoachOverlay(
     group: TutorialGroup,
     registry: TutorialRegistry,
     onFinished: () -> Unit,
