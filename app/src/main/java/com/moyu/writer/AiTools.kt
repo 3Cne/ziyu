@@ -119,6 +119,31 @@ object AiTools {
     )
 
     /**
+     * 3.26.56：`write_story_bible` 认识的 kind / action，与 [AiBible.mutate] 的分支一一对上。
+     * 不认识的在调用前就退回——以前 action 是自由文本，拼错（例如 delete 写成 remove）会被
+     * 当成 upsert 静默走「新增」，正是「写错的角色/事件清不掉」的一部分成因。
+     */
+    private val BIBLE_KINDS = setOf("character", "relation", "event", "outline")
+
+    private val BIBLE_ACTIONS = setOf(
+        "upsert", "delete",
+        "add_beat", "update_beat", "delete_beat", "clear_beats", "delete_node",
+    )
+
+    /** 3.26.56：只对 outline 有意义的动作；别的 kind 带上它们一律退回，别再静默走 upsert。 */
+    private val OUTLINE_BIBLE_ACTIONS = setOf(
+        "add_beat", "update_beat", "delete_beat", "clear_beats", "delete_node",
+    )
+
+    /**
+     * 3.26.56：删除（以及作者条目的改动）不落库，只进故事页「待同意」。
+     * 对模型来说这是「成功排队」而不是错误，回话必须让模型告诉作者去点同意，且不要重复提交。
+     */
+    private fun queuedBibleReply(reply: String): String =
+        reply + "。这次没有直接改或删任何东西：作者在故事页的待同意卡里点「同意」才生效" +
+            "（删除同意后也能用 undo_bible_change 撤回）。把这句话告诉作者即可，不要重复提交同一条"
+
+    /**
      * 3.26.45：工具表按组排（读正文 → 写正文 → 故事圣经 → 结构手术 → 搜索 → 其他），
      * 53 条并成 49 条：
      * · read_chapter_deep 并进 read_chapter(deep=true)
@@ -144,9 +169,9 @@ object AiTools {
       {"type":"function","function":{"name":"replace_in_chapter","description":"改某一章里已经写好的一小段：给出原文片段和改后片段，章节里必须能原样找到这段原文；要等作者确认","parameters":{"type":"object","properties":{"title":{"type":"string","description":"章节标题"},"find":{"type":"string","description":"要替换掉的原文，必须原样抄，标点和换行都不能改"},"replace":{"type":"string","description":"改后的文字"},"book":{"type":"string","description":"书名，不填=当前书"}},"required":["title","find","replace"]}}},
       {"type":"function","function":{"name":"restore_chapter_history","description":"把某一章恢复成某个历史版本；要等作者确认（询问档出确认卡，自动档直接恢复）。版本时间戳用 read_chapter_history 取","parameters":{"type":"object","properties":{"title":{"type":"string"},"at":{"type":"string","description":"时间戳"},"book":{"type":"string"}},"required":["title","at"]}}},
       {"type":"function","function":{"name":"read_story_bible","description":"读故事圣经（AI 的长期记忆）：角色/关系/事件/大纲；不传 section 给全貌","parameters":{"type":"object","properties":{"book":{"type":"string","description":"书名，不填=当前书"},"section":{"type":"string","enum":["characters","relations","events","outline"],"description":"只看一类"}}}}},
-      {"type":"function","function":{"name":"write_story_bible","description":"写故事圣经（立即写入并留一条可撤销记录）。kind=character/relation/event/outline；action=upsert/delete，outline 另支持 add_beat/update_beat/delete_beat/clear_beats/delete_node","parameters":{"type":"object","properties":{"book":{"type":"string"},"kind":{"type":"string","enum":["character","relation","event","outline"]},"action":{"type":"string","description":"默认 upsert"},"name":{"type":"string","description":"角色名"},"role":{"type":"string"},"note":{"type":"string"},"from":{"type":"string","description":"关系起点角色名"},"to":{"type":"string","description":"关系终点角色名"},"relation":{"type":"string","description":"关系类型：内置类型名（亲人/恋人/朋友/同盟/对手/仇敌/师徒/其他）或自定义名称；「亲近/对立」是档位不是类型名"},"kindTier":{"type":"integer","enum":[0,1,2],"description":"0 亲近 / 1 对立 / 2 其他，可选，不给则由类型派生"},"whenText":{"type":"string","description":"事件故事时间，自由文本"},"title":{"type":"string","description":"事件标题"},"chapters":{"type":"array","items":{"type":"string"},"description":"事件所属章节标题，可多个"},"characters":{"type":"array","items":{"type":"string"},"description":"事件涉及角色名"},"chapter":{"type":"string","description":"大纲所在章节标题"},"text":{"type":"string","description":"情节点文字 / update_beat 的原文字"},"to_text":{"type":"string","description":"update_beat 改后的文字"},"beats":{"type":"array","items":{"type":"string"},"description":"整章情节点（替换）"}},"required":["kind"]}}},
+      {"type":"function","function":{"name":"write_story_bible","description":"写故事圣经（留一条可撤销记录）。kind=character/relation/event/outline；action=upsert（默认，新增或改）/ delete（删一整条，按 id 或精确名称定位）。删除是危险操作：不会直接写进圣经，只提交到故事页的待同意卡，需要作者确认（点「同意」）后才删（删了也能用 undo_bible_change 撤回）；作者设定里的条目 AI 也不能自己删。outline 另支持 add_beat/update_beat/delete_beat/clear_beats/delete_node","parameters":{"type":"object","properties":{"book":{"type":"string"},"kind":{"type":"string","enum":["character","relation","event","outline"]},"action":{"type":"string","enum":["upsert","delete","add_beat","update_beat","delete_beat","clear_beats","delete_node"],"description":"默认 upsert。delete=删一整条（角色/关系/事件/大纲节点）；删除需要作者在故事页确认，工具本身不落库。add_beat/update_beat/delete_beat/clear_beats/delete_node 只用于 outline，delete_node 等于 delete"},"id":{"type":"string","description":"条目 id，可选；删除时一般给名称就够（角色名 / from+to / 事件标题 / 章名或大纲节点名）"},"name":{"type":"string","description":"角色名（删角色时按它精确匹配）"},"role":{"type":"string"},"note":{"type":"string"},"from":{"type":"string","description":"关系起点角色名"},"to":{"type":"string","description":"关系终点角色名"},"relation":{"type":"string","description":"关系类型：内置类型名（亲人/恋人/朋友/同盟/对手/仇敌/师徒/其他）或自定义名称；「亲近/对立」是档位不是类型名"},"kindTier":{"type":"integer","enum":[0,1,2],"description":"0 亲近 / 1 对立 / 2 其他，可选，不给则由类型派生"},"whenText":{"type":"string","description":"事件故事时间，自由文本；同名事件有多条时用它指定删哪一条"},"title":{"type":"string","description":"事件标题（删同名事件时配 whenText）/ 大纲节点标题"},"chapters":{"type":"array","items":{"type":"string"},"description":"事件所属章节标题，可多个"},"characters":{"type":"array","items":{"type":"string"},"description":"事件涉及角色名"},"chapter":{"type":"string","description":"大纲所在章节标题（删章级大纲节点可用；自由节点给 id 或 title）"},"text":{"type":"string","description":"情节点文字 / update_beat 的原文字"},"to_text":{"type":"string","description":"update_beat 改后的文字"},"beats":{"type":"array","items":{"type":"string"},"description":"整章情节点（替换）"}},"required":["kind"]}}},
       {"type":"function","function":{"name":"set_story_time","description":"把某一章的故事内时间规范化后写进故事圣经的时间线（写的是以章名为标题的那条事件）；只接受 YYYY-MM-DD、M月D日、N年前|后、第N天，其它说法会被拒","parameters":{"type":"object","properties":{"chapterId":{"type":"string","description":"章节标题或章节 id"},"timeText":{"type":"string","description":"故事内时间，例如 11月7日 / 三年前 / 第12天"},"book":{"type":"string","description":"书名，不填=当前书"}},"required":["chapterId","timeText"]}}},
-      {"type":"function","function":{"name":"undo_bible_change","description":"撤销最近一次 AI 对故事圣经的改动（含章节保存后的自动整理）","parameters":{"type":"object","properties":{"book":{"type":"string"}}}}},
+      {"type":"function","function":{"name":"undo_bible_change","description":"撤销最近一次对故事圣经的改动（含章节保存后的自动整理，也含作者在故事页同意过的删除）","parameters":{"type":"object","properties":{"book":{"type":"string"}}}}},
       {"type":"function","function":{"name":"create_chapter","description":"新建一章：不给 afterChapterId 就接在全书最后（要等作者确认）；给了就当场插在那一章后面并返回新章 id。标题对上还没落地的大纲节点会自动挂上","parameters":{"type":"object","properties":{"title":{"type":"string","description":"新章标题"},"book":{"type":"string","description":"书名，不填=当前书"},"afterChapterId":{"type":"string","description":"插到哪一章后面：章节标题或 id；不填=全书最后"}},"required":["title"]}}},
       {"type":"function","function":{"name":"rename_chapter","description":"改某一章的标题；要等作者确认","parameters":{"type":"object","properties":{"title":{"type":"string","description":"现在的标题"},"new_title":{"type":"string"},"book":{"type":"string","description":"书名，不填=当前书"}},"required":["title","new_title"]}}},
       {"type":"function","function":{"name":"move_chapter","description":"把一章挪到目录里的第 N 位（1 起）","parameters":{"type":"object","properties":{"title":{"type":"string"},"to":{"type":"integer","description":"目标位次，1 起"},"book":{"type":"string"}},"required":["title","to"]}}},
@@ -578,11 +603,20 @@ object AiTools {
                     val ctx = env?.context
                     val b = pickBook(store, args, book)
                     val kind = args.optString("kind").trim()
+                    val action = args.optString("action").trim().ifBlank { "upsert" }
                     when {
                         ctx == null -> bad(AiToolError.NO_RUNTIME, "当前没有运行环境，写不了故事圣经")
-                        kind !in setOf("character", "relation", "event", "outline") -> bad(
+                        kind !in BIBLE_KINDS -> bad(
                             AiToolError.INVALID_ARG,
                             "kind 只能是 character / relation / event / outline",
+                        )
+                        action !in BIBLE_ACTIONS -> bad(
+                            AiToolError.INVALID_ARG,
+                            "action 只能是 upsert / delete（outline 另支持 add_beat / update_beat / delete_beat / clear_beats / delete_node）",
+                        )
+                        action in OUTLINE_BIBLE_ACTIONS && kind != "outline" -> bad(
+                            AiToolError.INVALID_ARG,
+                            "action=$action 只能用于 outline；删角色 / 关系 / 事件用 action=delete",
                         )
                         else -> {
                             val reply = AiBible.mutate(
@@ -590,11 +624,16 @@ object AiTools {
                                 store = store,
                                 bookId = b.id,
                                 kind = kind,
-                                action = args.optString("action").ifBlank { "upsert" },
+                                action = action,
                                 args = args,
                                 source = "ai",
                             )
-                            if (reply.startsWith("已写入") || reply == "没有变化") ok(reply) else bad(AiToolError.BIBLE_REJECTED, reply)
+                            when {
+                                reply.startsWith("已写入") || reply == "没有变化" -> ok(reply)
+                                // 3.26.56：删除 / 作者条目改动只排队，等作者在故事页点同意。
+                                reply.startsWith("已提交待同意") -> ok(queuedBibleReply(reply))
+                                else -> bad(AiToolError.BIBLE_REJECTED, reply)
+                            }
                         }
                     }
                 }

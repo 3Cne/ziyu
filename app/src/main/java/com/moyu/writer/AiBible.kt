@@ -8,11 +8,13 @@ import java.io.File
 /**
  * 3.26.23：故事圣经是 AI 唯一的记忆层。
  *
- * 三条约定：
+ * 约定：
  * - 所有 AI 增删改都记进 `filesDir/ai/bible-journal.json`：每条存「改动前 / 改动后」的整份 bible，
  *   所以「撤销最近一次 AI 改动」不需要反推操作，直接把 before 写回去；
  * - `source` 区分发起方：`ai`（工具，作者让 AI 改）、`text`（章节保存后自动整理）、`author`（作者在故事页手改）；
- * - 自动整理（`text`）**不覆盖** `origin == "author"` 的条目，只记一条待看冲突。
+ * - 自动整理（`text`）**不覆盖** `origin == "author"` 的条目，只记一条待看冲突；
+ * - 3.26.56：**删除是危险操作**——AI / 自动整理删角色 / 关系 / 事件 / 大纲节点一律先提交「待同意」，
+ *   作者在故事页点「同意」才落库（同意同样进 journal，可用 `undo_bible_change` 撤回）。
  */
 object AiBible {
     private const val MAX_JOURNAL = 100
@@ -136,6 +138,12 @@ object AiBible {
      * 应用一条圣经改动。`kind`：character / relation / event / outline。
      * `action`：upsert（新增或改）/ delete；outline 另支持 add_beat / update_beat / delete_beat / clear_beats / delete_node。
      * relation 的 upsert 另认 `args.kindTier`（0 亲近 / 1 对立 / 2 其他，可选；不给 / 非法由类型派生）。
+     *
+     * 3.26.56：`delete` 是危险操作——**AI / 自动整理一律不直接落库**，只往「待同意」侧车提交一条
+     * 删除草稿（故事页差异卡，「我的」页点「同意」才真删）。同意走 [acceptRecord] → [apply]，
+     * journal 里有改动前的整份 bible，所以 `undo_bible_change` 能一步撤回。
+     * 定位：`id` 优先，否则精确名称（角色名 / from+to / 事件标题(+whenText) / 章名或大纲节点名）；
+     * 同名事件有多条时不猜着删，要求再给 whenText 或 id。
      */
     fun mutate(
         ctx: Context,
@@ -155,20 +163,27 @@ object AiBible {
         var label = ""
         when (kind) {
             "character" -> {
+                val rawId = args.optString("id").trim()
                 val name = args.optString("name").trim()
-                if (name.isBlank()) return "角色名不能为空"
-                val old = before.characters.firstOrNull { it.id == args.optString("id") }
-                    ?: before.characters.firstOrNull { it.name == name }
+                val old = before.characters.firstOrNull { rawId.isNotBlank() && it.id == rawId }
+                    ?: before.characters.firstOrNull { name.isNotBlank() && it.name == name }
                 if (action == "delete") {
-                    if (old == null) return "圣经里没有角色「$name」"
-                    if ((old.origin == "author" || old.id in synced) && source != "author") {
-                        // 3.26.45：AI 不直接删作者条目，记成待同意差异。
-                        propose(ctx, bookId, source, listOf(deleteDraft("character", old.id, old.name)))
-                        return "已提交待同意：删除角色「${old.name}」"
+                    if (rawId.isBlank() && name.isBlank()) return "要删角色的话给 name（角色名）或 id"
+                    if (old == null) {
+                        return if (name.isNotBlank()) "圣经里没有角色「$name」" else "圣经里没有 id=$rawId 这个角色"
                     }
-                    after = before.copy(characters = before.characters.filterNot { it.id == old.id })
-                    label = "删角色 $name"
+                    // 3.26.56：删除是危险操作，AI / 自动整理一律先提交待同意，不直接落库。
+                    if (source != "author") {
+                        return proposeDelete(
+                            ctx, bookId, source, "character", old.id, old.name,
+                            effect = "（删除角色，和 TA 的关系一起移除）",
+                        )
+                    }
+                    // 与故事页手删同一口径：挂在 TA 身上的关系、事件里的出场角色一起摘掉。
+                    after = before.withoutCharacter(old.id)
+                    label = "删角色 ${old.name}"
                 } else {
+                    if (name.isBlank()) return "角色名不能为空"
                     val next = (old ?: StoryCharacter(id = uuid(), name = name)).copy(
                         name = name,
                         role = args.optString("role", old?.role ?: "").ifBlank { old?.role ?: "" },
@@ -190,25 +205,41 @@ object AiBible {
             "relation" -> {
                 val fromName = args.optString("from").trim()
                 val toName = args.optString("to").trim()
-                val from = before.characters.firstOrNull { it.name == fromName }
-                    ?: return "没有角色「$fromName」"
-                val to = before.characters.firstOrNull { it.name == toName }
-                    ?: return "没有角色「$toName」"
-                val old = before.relations.firstOrNull {
-                    (it.from == from.id && it.to == to.id) || (it.from == to.id && it.to == from.id)
-                }
+                val rawId = args.optString("id").trim()
+                val from = before.characters.firstOrNull { fromName.isNotBlank() && it.name == fromName }
+                val to = before.characters.firstOrNull { toName.isNotBlank() && it.name == toName }
+                val old = before.relations.firstOrNull { rawId.isNotBlank() && it.id == rawId }
+                    ?: if (from != null && to != null) {
+                        before.relations.firstOrNull {
+                            (it.from == from.id && it.to == to.id) || (it.from == to.id && it.to == from.id)
+                        }
+                    } else {
+                        null
+                    }
                 if (action == "delete") {
-                    if (old == null) return "没有「$fromName—$toName」这条关系"
-                    if ((old.origin == "author" || old.id in synced) && source != "author") {
-                        propose(
-                            ctx, bookId, source,
-                            listOf(deleteDraft("relation", old.id, "${charName(before, old.from)}—${charName(before, old.to)}")),
+                    if (rawId.isBlank() && fromName.isBlank() && toName.isBlank()) {
+                        return "要删关系的话给 from + to（两端角色名）或 id"
+                    }
+                    if (old == null) {
+                        return when {
+                            rawId.isNotBlank() -> "圣经里没有 id=$rawId 这条关系"
+                            fromName.isBlank() || toName.isBlank() -> "删关系要给 from + to（两端角色名）或 id"
+                            else -> "没有「$fromName—$toName」这条关系"
+                        }
+                    }
+                    val shown = "${charName(before, old.from)}—${charName(before, old.to)}"
+                    // 3.26.56：删除是危险操作，AI / 自动整理一律先提交待同意，不直接落库。
+                    if (source != "author") {
+                        return proposeDelete(
+                            ctx, bookId, source, "relation", old.id, shown,
+                            effect = "（删除这条关系，两个角色都保留）",
                         )
-                        return "已提交待同意：删除关系「$fromName—$toName」"
                     }
                     after = before.copy(relations = before.relations.filterNot { it.id == old.id })
-                    label = "删关系 $fromName—$toName"
+                    label = "删关系 $shown"
                 } else {
+                    if (from == null) return "没有角色「$fromName」"
+                    if (to == null) return "没有角色「$toName」"
                     // 3.26.49：relation 既认内置枚举名 / 中文名，也认作者自定义的名字。
                     // 3.26.50：自定义类型再认「这本书里已有的同名自定义类型」——同一显示名取同一底档与
                     // 档位，AI / 自动整理写出「宿敌」时不会在两条关系上落成两个不同档位。
@@ -243,16 +274,30 @@ object AiBible {
             "event" -> {
                 val title = args.optString("title").trim()
                 val whenText = args.optString("whenText").trim()
-                val old = before.events.firstOrNull { it.id == args.optString("id") }
-                    ?: before.events.firstOrNull { it.title == title && it.whenText == whenText }
+                val rawId = args.optString("id").trim()
+                val byId = before.events.firstOrNull { rawId.isNotBlank() && it.id == rawId }
+                val old = byId ?: before.events.firstOrNull { it.title == title && it.whenText == whenText }
                 if (action == "delete") {
-                    if (old == null) return "没有这个事件"
-                    if ((old.origin == "author" || old.id in synced) && source != "author") {
-                        propose(ctx, bookId, source, listOf(deleteDraft("event", old.id, old.title.ifBlank { old.whenText })))
-                        return "已提交待同意：删除事件「${old.title}」"
+                    if (rawId.isBlank() && title.isBlank()) return "要删事件的话给 title（事件标题）或 id"
+                    // 3.26.56：只给标题时按精确标题找；同名多条不猜着删，让模型再给 whenText / id。
+                    val sameTitle = before.events.filter { title.isNotBlank() && it.title == title }
+                    val victim = byId
+                        ?: if (whenText.isNotBlank()) sameTitle.firstOrNull { it.whenText == whenText }
+                        else sameTitle.singleOrNull()
+                    if (victim == null) {
+                        if (byId == null && sameTitle.size > 1) {
+                            return "同名事件有 ${sameTitle.size} 条，给 whenText（故事时间）或 id 指定删哪一条：" +
+                                sameTitle.joinToString("；") { "「${it.whenText.ifBlank { "时间不详" }}」" }
+                        }
+                        return "没有这个事件"
                     }
-                    after = before.copy(events = before.events.filterNot { it.id == old.id })
-                    label = "删事件 ${old.title}"
+                    val shown = victim.title.ifBlank { victim.whenText.ifBlank { "未命名事件" } }
+                    // 3.26.56：删除是危险操作，AI / 自动整理一律先提交待同意，不直接落库。
+                    if (source != "author") {
+                        return proposeDelete(ctx, bookId, source, "event", victim.id, shown)
+                    }
+                    after = before.copy(events = before.events.filterNot { it.id == victim.id })
+                    label = "删事件 $shown"
                 } else {
                     val chapterIds = args.optJSONArray("chapterIds")?.let { arr ->
                         (0 until arr.length()).mapNotNull { i -> arr.optString(i).ifBlank { null } }
@@ -286,18 +331,40 @@ object AiBible {
             }
             "outline" -> {
                 val chapterTitle = args.optString("chapter").trim()
-                val chapter = book.chapters.firstOrNull { it.title == chapterTitle }
-                    ?: return "没有这一章：$chapterTitle"
-                val old = before.outline.firstOrNull { it.chapterId == chapter.id }
-                if (action == "delete_node") {
-                    if (old == null) return "${chapter.title} 还没有大纲"
-                    if ((old.origin == "author" || old.id in synced) && source != "author") {
-                        propose(ctx, bookId, source, listOf(deleteDraft("outline", old.id, chapter.title)))
-                        return "已提交待同意：删除大纲「${chapter.title}」"
+                val rawId = args.optString("id").trim()
+                val nodeTitle = args.optString("title").trim()
+                val chapter = if (chapterTitle.isBlank()) {
+                    null
+                } else {
+                    book.chapters.firstOrNull { it.title == chapterTitle }
+                }
+                // 3.26.56：action=delete 与旧的 delete_node 同义；定位按 id → 章名 → 精确节点名。
+                // 自由节点（不绑章、id 前缀 free_）只能靠 id 或节点标题定位。
+                if (action == "delete" || action == "delete_node") {
+                    val old = before.outline.firstOrNull { rawId.isNotBlank() && it.id == rawId }
+                        ?: chapter?.let { ch -> before.outline.firstOrNull { it.chapterId == ch.id } }
+                        ?: before.outline.firstOrNull { nodeTitle.isNotBlank() && it.title == nodeTitle }
+                    if (old == null) {
+                        return when {
+                            rawId.isNotBlank() -> "圣经里没有 id=$rawId 这个大纲节点"
+                            chapterTitle.isNotBlank() && chapter == null -> "没有这一章：$chapterTitle"
+                            chapterTitle.isNotBlank() -> "${chapterTitle} 还没有大纲"
+                            else -> "圣经里没有「$nodeTitle」这个大纲节点"
+                        }
+                    }
+                    val shown = book.chapters.firstOrNull { it.id == old.chapterId }?.title
+                        ?: old.title.ifBlank { "未命名大纲" }
+                    // 3.26.56：删除是危险操作，AI / 自动整理一律先提交待同意，不直接落库。
+                    if (source != "author") {
+                        return proposeDelete(ctx, bookId, source, "outline", old.id, shown)
                     }
                     after = before.copy(outline = before.outline.filterNot { it.id == old.id })
-                    label = "删大纲 ${chapter.title}"
+                    label = "删大纲 $shown"
                 } else {
+                    if (chapter == null) {
+                        return if (chapterTitle.isBlank()) "大纲按章定位：给 chapter（章节标题）" else "没有这一章：$chapterTitle"
+                    }
+                    val old = before.outline.firstOrNull { it.chapterId == chapter.id }
                     val current = old ?: OutlineNode(id = uuid(), chapterId = chapter.id, title = chapter.title)
                     val beats = when (action) {
                         "add_beat" -> current.beats + OutlineBeat(
@@ -695,7 +762,8 @@ object AiBible {
             "character" -> {
                 val old = before.characters.firstOrNull { it.id == targetId } ?: return false
                 if (op == "delete") {
-                    after = before.copy(characters = before.characters.filterNot { it.id == targetId })
+                    // 3.26.56：与故事页手删同一口径——挂在 TA 身上的关系 / 事件引用一起摘掉。
+                    after = before.withoutCharacter(targetId)
                 } else {
                     val next = when (key) {
                         "name" -> old.copy(name = value)
@@ -766,8 +834,11 @@ object AiBible {
             else -> return false
         }
         if (after == before) return false
+        // 3.26.56：删除在 journal 里单独记 action=delete（通用的「原文 → 改动后」快照不变，
+        // undoLast 只认 before，所以对 undo_bible_change 透明：同意删了也能一步撤回）。
+        val journalAction = if (op == "delete") "delete" else "consent"
         apply(
-            ctx, store, book.id, before, after, "author", kind, "consent",
+            ctx, store, book.id, before, after, "author", kind, journalAction,
             "同意 AI 改动：${kindLabel(kind)}「${r.optString("title")}」${r.optString("field")}",
         )
         return true
@@ -803,9 +874,38 @@ object AiBible {
         val payload: JSONObject = JSONObject(),
     )
 
-    private fun deleteDraft(kind: String, id: String, title: String): PendingDraft {
+    private fun deleteDraft(
+        kind: String,
+        id: String,
+        title: String,
+        effect: String = "（删除）",
+    ): PendingDraft {
         val shown = title.ifBlank { "未命名" }
-        return PendingDraft(kind, "delete", id, shown, "", "删除", shown, "（删除）")
+        return PendingDraft(kind, "delete", id, shown, "", "删除", shown, effect)
+    }
+
+    /**
+     * 3.26.56：提交一条删除待同意，并返回给模型的回话。
+     *
+     * 删除是危险操作，AI / 自动整理**不直接落库**：草稿只写进 `bible-pending.json`，
+     * 作者在故事页的差异卡上点「同意」才真的删（同意走 [acceptRecord] → [apply]，
+     * journal 里存着改动前的整份 bible，`undo_bible_change` 一步撤回；拒绝只留一条 conflict journal）。
+     * `effect` 是差异卡「新」那一行的人话（角色会连带删关系，关系不删角色）。
+     * 作者自己的编辑路径（`source == "author"`）不经过这里。
+     */
+    private fun proposeDelete(
+        ctx: Context,
+        bookId: String,
+        source: String,
+        kind: String,
+        id: String,
+        title: String,
+        effect: String = "（删除）",
+    ): String {
+        propose(ctx, bookId, source, listOf(deleteDraft(kind, id, title, effect)))
+        val shown = title.ifBlank { "未命名" }
+        return "已提交待同意：删除${kindLabel(kind)}「$shown」——删除是危险操作，没有直接写进故事圣经；" +
+            "作者在故事页点「同意」后才删，删错了用 undo_bible_change 可以撤回"
     }
 
     private fun characterDrafts(old: StoryCharacter, next: StoryCharacter): List<PendingDraft> {
