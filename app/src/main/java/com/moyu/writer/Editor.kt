@@ -2192,18 +2192,14 @@ fun WritingScreen(
                         enter = fadeIn(tween(240)),
                         exit = fadeOut(tween(240)),
                     ) {
+                        // 用布局内 padding 抬高，不用 offset：offset 不影响 lookahead 的 bounds，
+                        // 共享元素会以为菜单还在原处，插值起点错误 → 看起来一帧跳过去。
+                        Box(Modifier.padding(bottom = with(densityNow) { dockHeightPx.toDp() } - 14.dp)) {
                         AiDockMenu(
                             tone = dockTone(ui),
                             ink = p.ink,
                             modifier = with(this@SharedTransitionLayout) {
-                                Modifier
-                                    .offset {
-                                        IntOffset(
-                                            0,
-                                            -dockHeightPx + with(densityNow) { 14.dp.roundToPx() },
-                                        )
-                                    }
-                                    .sharedBounds(
+                                Modifier.sharedBounds(
                                         rememberSharedContentState("aiDockMenu"),
                                         this@AnimatedVisibility,
                                         boundsTransform = { _, _ -> spring(dampingRatio = .6f, stiffness = 380f) },
@@ -2224,6 +2220,7 @@ fun WritingScreen(
                                 startAsk()
                             },
                         )
+                        }
                     }
                 }
                 }
