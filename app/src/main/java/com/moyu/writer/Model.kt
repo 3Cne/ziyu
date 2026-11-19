@@ -428,9 +428,12 @@ data class AppSettings(
  *
  * 不能直接拿 `AppSettings()` 整对象替换——那会把 AI 开关/写入方式、每日目标、笔记浮窗、
  * 引导进度、dock 展开状态这些功能类设置一起重置。这里只换外观类字段：
- * 主题、点缀色、字体与排版、分节、纸面、书架/笔记列表形态、标签栏（含标签名与镜头玻璃）、
+ * 主题、点缀色、字体与排版、分节、纸面、书架/笔记列表形态、标签栏（含标签名、页签显示与镜头玻璃）、
  * 三组玻璃、动效、glow/grain。
- * `hiddenTabs`（哪些页签显示）属于导航选择，刻意不在外观重置里。
+ * 3.26.55：`hiddenTabs`（哪些页签显示）也一起恢复默认（`["stats"]`，默认隐藏数据页）——
+ * 与 `decodeSettings` 缺字段时落到 [AppSettings] 默认同一口径，所以「新手默认 = 现在这套」
+ * 在两条入口上一致；即恢复默认外观会连带恢复默认页签显示。
+ * `tutorialDone` / `onboardingDone` 仍保留，不在这里清（引导进度不归外观重置管）。
  */
 fun AppSettings.withDefaultAppearance(): AppSettings {
     val d = AppSettings()
@@ -453,6 +456,8 @@ fun AppSettings.withDefaultAppearance(): AppSettings {
         coverRadius = d.coverRadius,
         showTabLabels = d.showTabLabels,
         tabNames = d.tabNames,
+        // 3.26.55：页签显示与「新手默认」同口径——默认隐藏数据页；恢复默认外观连带恢复页签。
+        hiddenTabs = d.hiddenTabs,
         tabBlur = d.tabBlur,
         tabRefraction = d.tabRefraction,
         tabDispersion = d.tabDispersion,

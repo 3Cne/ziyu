@@ -135,6 +135,7 @@ object AiBible {
     /**
      * 应用一条圣经改动。`kind`：character / relation / event / outline。
      * `action`：upsert（新增或改）/ delete；outline 另支持 add_beat / update_beat / delete_beat / clear_beats / delete_node。
+     * relation 的 upsert 另认 `args.kindTier`（0 亲近 / 1 对立 / 2 其他，可选；不给 / 非法由类型派生）。
      */
     fun mutate(
         ctx: Context,
@@ -212,16 +213,20 @@ object AiBible {
                     // 3.26.50：自定义类型再认「这本书里已有的同名自定义类型」——同一显示名取同一底档与
                     // 档位，AI / 自动整理写出「宿敌」时不会在两条关系上落成两个不同档位。
                     // 认不出来就保留这条关系原来的底档 / 档位（新关系 = OTHER / 派生）。
+                    // 3.26.55：kindTier 变成真入参——显式带档位时优先（内置类型也认，与
+                    // StoryRelation.tier 的「显式优先」同一口径）；缺省 / 越界 / 非数字才按类型派生。
                     val rawKind = args.optString("relation").trim()
                     val spec = relationTypeSpec(rawKind, old, before)
+                    val explicitTier = decodeRelationTier(args.opt("kindTier"))
                     val base = old ?: StoryRelation(id = uuid(), from = from.id, to = to.id)
                     val next = base.copy(
                         kind = spec.kind,
                         kindLabel = spec.label,
                         // 换回内置类型 = 丢掉自定义色（按档位取色）；自定义改自定义保留原色。
                         kindColor = if (spec.builtIn) null else base.kindColor,
-                        // 换回内置类型 = 档位回到枚举派生（null）；自定义改自定义保留原档位。
-                        kindTier = if (spec.builtIn) null else spec.kindTier,
+                        // 显式档位优先；没给才走派生：内置类型 = 枚举派生（null），自定义类型 =
+                        // 保留原档位 / 认同名自定义类型的档位。
+                        kindTier = explicitTier ?: if (spec.builtIn) null else spec.kindTier,
                         origin = source,
                         updatedAt = now(),
                     )
@@ -1432,7 +1437,8 @@ object AiBible {
 /**
  * 3.26.50：AI / 自动整理给的 `relation` 文本 → 落库后的类型三件套（底档 + 显示名 + 档位）。
  *
- * 与 [AiBible.mutate] 的关系 upsert 是**同一口径**（那边直接调这个函数），自动整理判断
+ * 与 [AiBible.mutate] 的关系 upsert 是**同一口径**（那边直接调这个函数，3.26.55 起再把工具
+ * 显式传的 `kindTier` 覆盖到 `kindTier` 一项上），自动整理判断
  * 「无变化」时也复用它，避免「判据说没变、落库却改了一处」这种两处漂移。
  *
  * - 内置枚举名 / 中文名（[RelationKind]）→ 内置类型，档位回到枚举派生（null）；
