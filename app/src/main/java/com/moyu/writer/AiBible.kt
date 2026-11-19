@@ -147,6 +147,8 @@ object AiBible {
         rememberCtx(ctx, store)
         val book = store.book(bookId) ?: return "没找到这本书"
         val before = book.bible
+        // 3.26.46：已同步到「我的」的 AI 条目按作者条目对待——AI 不能直接改，只能记待同意。
+        val synced = syncedIds(bookId)
         var after = before
         var label = ""
         when (kind) {
@@ -157,7 +159,7 @@ object AiBible {
                     ?: before.characters.firstOrNull { it.name == name }
                 if (action == "delete") {
                     if (old == null) return "圣经里没有角色「$name」"
-                    if (old.origin == "author" && source != "author") {
+                    if ((old.origin == "author" || old.id in synced) && source != "author") {
                         // 3.26.45：AI 不直接删作者条目，记成待同意差异。
                         propose(ctx, bookId, source, listOf(deleteDraft("character", old.id, old.name)))
                         return "已提交待同意：删除角色「${old.name}」"
@@ -173,7 +175,7 @@ object AiBible {
                         origin = source,
                         updatedAt = now(),
                     )
-                    if (old != null && old.origin == "author" && source != "author") {
+                    if (old != null && (old.origin == "author" || old.id in synced) && source != "author") {
                         // 3.26.45：作者条目只记字段级差异，同意后才写 bible。
                         val n = propose(ctx, bookId, source, characterDrafts(old, next))
                         return if (n > 0) "已提交待同意：角色「${old.name}」$n 处差异" else "没有变化"
@@ -195,7 +197,7 @@ object AiBible {
                 }
                 if (action == "delete") {
                     if (old == null) return "没有「$fromName—$toName」这条关系"
-                    if (old.origin == "author" && source != "author") {
+                    if ((old.origin == "author" || old.id in synced) && source != "author") {
                         propose(
                             ctx, bookId, source,
                             listOf(deleteDraft("relation", old.id, "${charName(before, old.from)}—${charName(before, old.to)}")),
@@ -213,7 +215,7 @@ object AiBible {
                         origin = source,
                         updatedAt = now(),
                     )
-                    if (old != null && old.origin == "author" && source != "author") {
+                    if (old != null && (old.origin == "author" || old.id in synced) && source != "author") {
                         val reversed = old.from == to.id && old.to == from.id
                         val n = propose(ctx, bookId, source, relationDrafts(before, old, next, reversed, fromName, toName))
                         return if (n > 0) "已提交待同意：关系「$fromName—$toName」$n 处差异" else "没有变化"
@@ -230,7 +232,7 @@ object AiBible {
                     ?: before.events.firstOrNull { it.title == title && it.whenText == whenText }
                 if (action == "delete") {
                     if (old == null) return "没有这个事件"
-                    if (old.origin == "author" && source != "author") {
+                    if ((old.origin == "author" || old.id in synced) && source != "author") {
                         propose(ctx, bookId, source, listOf(deleteDraft("event", old.id, old.title.ifBlank { old.whenText })))
                         return "已提交待同意：删除事件「${old.title}」"
                     }
@@ -258,7 +260,7 @@ object AiBible {
                         origin = source,
                         updatedAt = now(),
                     )
-                    if (old != null && old.origin == "author" && source != "author") {
+                    if (old != null && (old.origin == "author" || old.id in synced) && source != "author") {
                         val n = propose(ctx, bookId, source, eventDrafts(book, old, next))
                         return if (n > 0) "已提交待同意：事件「${old.title}」$n 处差异" else "没有变化"
                     }
@@ -274,7 +276,7 @@ object AiBible {
                 val old = before.outline.firstOrNull { it.chapterId == chapter.id }
                 if (action == "delete_node") {
                     if (old == null) return "${chapter.title} 还没有大纲"
-                    if (old.origin == "author" && source != "author") {
+                    if ((old.origin == "author" || old.id in synced) && source != "author") {
                         propose(ctx, bookId, source, listOf(deleteDraft("outline", old.id, chapter.title)))
                         return "已提交待同意：删除大纲「${chapter.title}」"
                     }
@@ -307,7 +309,7 @@ object AiBible {
                         } ?: current.beats
                     }.filter { it.text.isNotBlank() }
                     val next = current.copy(beats = beats, origin = source, updatedAt = now())
-                    if (old != null && old.origin == "author" && source != "author") {
+                    if (old != null && (old.origin == "author" || old.id in synced) && source != "author") {
                         val n = propose(ctx, bookId, source, outlineDrafts(old, next))
                         return if (n > 0) "已提交待同意：大纲「${chapter.title}」$n 处差异" else "没有变化"
                     }
@@ -334,6 +336,7 @@ object AiBible {
         action: String,
         label: String,
         merge: Boolean = false,
+        extra: JSONObject? = null,
     ) {
         store.mutate { d ->
             d.copy(books = d.books.map { b -> if (b.id == bookId) b.copy(bible = after) else b })
@@ -351,6 +354,15 @@ object AiBible {
                 put("before", encodeBible(before))
                 put("after", encodeBible(after))
                 if (merge) put("merge", true)
+                // 3.26.46：同步记录里带上这一批的标记（syncBatch / syncedIds），
+                // undoLastMerge 要按它把侧车标记一起清掉。
+                extra?.let { e ->
+                    val keys = e.keys()
+                    while (keys.hasNext()) {
+                        val key = keys.next()
+                        put(key, e.get(key))
+                    }
+                }
             },
         )
     }
@@ -415,8 +427,12 @@ object AiBible {
      *   差异写进 `filesDir/ai/bible-pending.json`（侧车、原子写、进程被杀不丢），bible
      *   一个字都不动；用户在故事页逐条同意后才落库，拒绝只在 journal 留一条，不进数据。
      *   AI 自己的新条目照旧直接写（origin=ai / text），不进待同意列表。
-     * - 「同步 AI 内容到我的」：作者选中的 AI 条目按 id 升级成 author，或并进同名作者
-     *   条目；写前同样留整份 bible 的 journal（merge 标记），[undoLastMerge] 一步退回。
+     * - 「同步 AI 内容到我的」：**不删 AI 条目、也不改 origin**，只做两件事——
+     *   ① 把字段并进同名的作者条目（有同名才并）；② 把条目 id 记进
+     *   `filesDir/ai/bible-synced.json`（侧车、原子写）当「已同步」标记。AI 页继续显示
+     *   这些条目（淡一档 + 「已同步」角标），「我的」页按标记把它们铺出来；重复同步按
+     *   标记跳过。写前留整份 bible 的 journal（merge 标记 + syncBatch），
+     *   [undoLastMerge] 一步退回并清掉这一批标记。
      *
      * 这五个入口给故事页直接调（签名里没有 Context / AppStore），上下文从任意带 ctx 的
      * AiBible 调用里缓存；缓存没热时退回 `ActivityThread.currentApplication()`；都拿不到
@@ -424,6 +440,10 @@ object AiBible {
      */
     private const val MAX_PENDING = 200
     private const val PENDING_FILE = "bible-pending.json"
+
+    /** 3.26.46：「已同步」标记侧车——同步不再删 AI 条目，只在这里记一笔。 */
+    private const val MAX_SYNCED = 600
+    private const val SYNCED_FILE = "bible-synced.json"
 
     private var cachedCtx: Context? = null
     private var cachedStore: AppStore? = null
@@ -490,6 +510,95 @@ object AiBible {
                 tmp.delete()
             }
         }
+    }
+
+    // ── 已同步标记（3.26.46） ──
+
+    private fun syncedFile(ctx: Context): File = File(dir(ctx), SYNCED_FILE)
+
+    @Synchronized
+    private fun loadSynced(ctx: Context): JSONArray = runCatching {
+        val file = syncedFile(ctx)
+        if (!file.exists()) JSONArray() else JSONArray(file.readText())
+    }.getOrElse { JSONArray() }
+
+    @Synchronized
+    private fun writeSynced(ctx: Context, arr: JSONArray) {
+        runCatching {
+            // 与 pending / journal 同一套原子写：临时文件 + rename。
+            val target = syncedFile(ctx)
+            val tmp = File(target.parentFile, "bible-synced.tmp")
+            tmp.writeText(arr.toString())
+            if (!tmp.renameTo(target)) {
+                target.writeText(arr.toString())
+                tmp.delete()
+            }
+        }
+    }
+
+    /**
+     * 这本书里「已经同步到我的」的 AI 条目 id（侧车）。
+     *
+     * 3.26.46：同步不再把 AI 条目升级成 author、也不再删条目——那样同步完 AI 页就空了
+     * （用户：「同步完 AI 内容消失」）。现在同步只做两件事：字段并进同名作者条目、
+     * id 记进这份侧车。AI 页按标记淡一档并显示「已同步」，「我的」页按同一份标记
+     * 把条目铺出来。
+     */
+    fun syncedIds(bookId: String): Set<String> {
+        val ctx = appContextOrNull() ?: return emptySet()
+        val arr = loadSynced(ctx)
+        val out = HashSet<String>()
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            if (o.optString("bookId") != bookId) continue
+            out += o.optString("id")
+        }
+        return out
+    }
+
+    @Synchronized
+    private fun markSynced(ctx: Context, bookId: String, ids: List<String>, batch: String) {
+        if (ids.isEmpty()) return
+        val old = loadSynced(ctx)
+        val set = ids.toHashSet()
+        val out = JSONArray()
+        for (i in 0 until old.length()) {
+            val o = old.optJSONObject(i) ?: continue
+            // 同一本书同一个条目只留一条标记（重复同步时换成新批次）。
+            if (o.optString("bookId") == bookId && o.optString("id") in set) continue
+            out.put(o)
+        }
+        ids.forEach { id ->
+            out.put(
+                JSONObject().apply {
+                    put("bookId", bookId)
+                    put("id", id)
+                    put("batch", batch)
+                    put("time", now())
+                },
+            )
+        }
+        val finalArr = if (out.length() <= MAX_SYNCED) out else {
+            val trimmed = JSONArray()
+            for (i in (out.length() - MAX_SYNCED) until out.length()) out.opt(i)?.let { trimmed.put(it) }
+            trimmed
+        }
+        writeSynced(ctx, finalArr)
+    }
+
+    /** 撤销一次同步：把这批打上的标记清掉（按批次号，顺带兜底按 id）。 */
+    @Synchronized
+    private fun clearSynced(ctx: Context, bookId: String, batch: String, ids: List<String>) {
+        val arr = loadSynced(ctx)
+        val idSet = ids.toHashSet()
+        val out = JSONArray()
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val drop = o.optString("bookId") == bookId &&
+                (o.optString("batch") == batch || o.optString("id") in idSet)
+            if (!drop) out.put(o)
+        }
+        writeSynced(ctx, out)
     }
 
     // ── 待同意 ──
@@ -843,8 +952,10 @@ object AiBible {
         val book = store.book(bookId) ?: return emptyList()
         val bible = book.bible
         val out = ArrayList<BibleChange>()
+        // 3.26.46：已经同步过的条目按侧车标记跳过，不再重复列出来。
+        val alreadySynced = syncedIds(bookId)
         val mineChars = bible.characters.filter { it.origin == "author" }
-        val aiChars = bible.characters.filter { it.origin != "author" }
+        val aiChars = bible.characters.filter { it.origin != "author" && it.id !in alreadySynced }
         // AI 角色 → 我的同名角色：并掉之后关系两端要换 id，否则留下悬空引用。
         val charMap = HashMap<String, String>()
         aiChars.forEach { c ->
@@ -873,7 +984,7 @@ object AiBible {
                 add("character", c.id, "merge", title, "并入", "AI 角色", "并进我的同名角色")
             }
         }
-        bible.relations.filter { it.origin != "author" }.forEach { r ->
+        bible.relations.filter { it.origin != "author" && it.id !in alreadySynced }.forEach { r ->
             val rawFrom = charName(bible, r.from)
             val rawTo = charName(bible, r.to)
             val mf = charMap[r.from] ?: r.from
@@ -897,7 +1008,7 @@ object AiBible {
                 add("relation", r.id, "merge", title, "并入", "AI 关系", "并进我的同名关系")
             }
         }
-        bible.events.filter { it.origin != "author" }.forEach { e ->
+        bible.events.filter { it.origin != "author" && it.id !in alreadySynced }.forEach { e ->
             val title = e.title.ifBlank { e.whenText.ifBlank { "未命名事件" } }
             val mine = bible.events.firstOrNull {
                 it.origin == "author" && it.id != e.id && it.title == e.title && it.title.isNotBlank()
@@ -914,7 +1025,7 @@ object AiBible {
                 add("event", e.id, "merge", title, "并入", "AI 事件", "并进我的同名事件")
             }
         }
-        bible.outline.filter { it.origin != "author" }.forEach { n ->
+        bible.outline.filter { it.origin != "author" && it.id !in alreadySynced }.forEach { n ->
             val title = book.chapters.firstOrNull { it.id == n.chapterId }?.title ?: n.title.ifBlank { "未命名大纲" }
             val mine = bible.outline.firstOrNull {
                 it.origin == "author" && it.id != n.id &&
@@ -936,7 +1047,7 @@ object AiBible {
         return out
     }
 
-    /** 执行选中的合并项，返回实际落地的条数。 */
+    /** 执行选中的合并项，返回打上「已同步」标记的条目数（0 = 没有可同步的条目）。 */
     fun applyMerge(bookId: String, ids: List<String>): Int {
         if (ids.isEmpty()) return 0
         val ctx = appContextOrNull() ?: return 0
@@ -978,30 +1089,25 @@ object AiBible {
         fun keysOf(kind: String, entryId: String): Set<String> =
             byEntry[kind + "\u0000" + entryId] ?: emptySet()
 
-        // AI 角色 id → 我的同名角色 id：并掉的角色要在关系和事件里换引用。
+        // AI 角色 id → 我的同名角色 id：并字段时关系要换引用。
         val charMap = HashMap<String, String>()
         b.characters.filter { it.origin != "author" }.forEach { c ->
             if (c.name.isNotBlank()) {
                 b.characters.firstOrNull { it.origin == "author" && it.name == c.name }?.let { charMap[c.id] = it.id }
             }
         }
+        // 3.26.46：这一批真正打上「已同步」标记的 AI 条目 id。
+        val marked = LinkedHashSet<String>()
 
-        // 1) 角色：没有同名作者条目的按 id 升级；有的按字段并、或整条并入。
+        // 1) 角色：只把字段并进同名作者角色；AI 条目原样保留（AI 页继续显示「已同步」）。
         val aiCharacters = b.characters.filter { it.origin != "author" }
         for (snapshot in aiCharacters) {
             val keys = keysOf("character", snapshot.id)
             if (keys.isEmpty()) continue
             val current = b.characters.firstOrNull { it.id == snapshot.id && it.origin != "author" } ?: continue
-            val mine = b.characters.firstOrNull { it.origin == "author" && it.name == current.name }
-            if (mine == null) {
-                if ("origin" in keys) {
-                    b = b.copy(characters = b.characters.map {
-                        if (it.id == current.id) it.copy(origin = "author", updatedAt = now()) else it
-                    })
-                    applied++
-                }
-                continue
-            }
+            marked += current.id
+            // 不升级 origin、不删 AI 条目：只在有同名作者角色时把字段并过去。
+            val mine = b.characters.firstOrNull { it.origin == "author" && it.name == current.name } ?: continue
             var target = mine
             if ("role" in keys && current.role.isNotBlank()) {
                 target = target.copy(role = current.role, updatedAt = now())
@@ -1015,7 +1121,6 @@ object AiBible {
                 target = target.copy(color = current.color, updatedAt = now())
                 applied++
             }
-            var removeAi = false
             if ("merge" in keys) {
                 target = target.copy(
                     role = current.role.ifBlank { target.role },
@@ -1023,73 +1128,48 @@ object AiBible {
                     color = current.color ?: target.color,
                     updatedAt = now(),
                 )
-                removeAi = true
                 applied++
             }
-            val targetId = target.id
-            var characters = b.characters.map { if (it.id == targetId) target else it }
-            if (removeAi) characters = characters.filterNot { it.id == current.id }
-            b = b.copy(characters = characters)
+            b = b.copy(
+                characters = b.characters.map { if (it.id == target.id) target else it },
+            )
         }
 
-        // 2) 关系：两端先按角色映射换 id，再找我的同两人关系。
+        // 2) 关系：两端先按角色映射换 id，再找我的同两人关系并类型；AI 关系保留。
         val aiRelations = b.relations.filter { it.origin != "author" }
         for (snapshot in aiRelations) {
             val keys = keysOf("relation", snapshot.id)
             if (keys.isEmpty()) continue
             val current = b.relations.firstOrNull { it.id == snapshot.id } ?: continue
+            marked += current.id
             val mf = charMap[current.from] ?: current.from
             val mt = charMap[current.to] ?: current.to
             val counterpart = b.relations.firstOrNull { it.origin == "author" && samePair(it, mf, mt) }
-            if (counterpart == null) {
-                if ("origin" in keys) {
-                    b = b.copy(relations = b.relations.map {
-                        if (it.id == current.id) it.copy(from = mf, to = mt, origin = "author", updatedAt = now()) else it
-                    })
-                    applied++
-                } else if ("ends" in keys) {
-                    b = b.copy(relations = b.relations.map {
-                        if (it.id == current.id) it.copy(from = mf, to = mt, updatedAt = now()) else it
-                    })
-                    applied++
-                }
-            } else {
-                var target = counterpart
-                if ("kind" in keys) {
-                    target = target.copy(kind = current.kind, updatedAt = now())
-                    applied++
-                }
-                var removeAi = false
-                if ("merge" in keys) {
-                    target = target.copy(from = mf, to = mt, updatedAt = now())
-                    removeAi = true
-                    applied++
-                }
-                val targetId = target.id
-                var relations = b.relations.map { if (it.id == targetId) target else it }
-                if (removeAi) relations = relations.filterNot { it.id == current.id }
-                b = b.copy(relations = relations)
+                ?: continue
+            var target = counterpart
+            if ("kind" in keys) {
+                target = target.copy(kind = current.kind, updatedAt = now())
+                applied++
             }
+            if ("merge" in keys || "ends" in keys) {
+                target = target.copy(from = mf, to = mt, updatedAt = now())
+                applied++
+            }
+            b = b.copy(
+                relations = b.relations.map { if (it.id == target.id) target else it },
+            )
         }
 
-        // 3) 事件：没有同名作者事件就升级，有的并字段或整条并入（章节 / 出场角色取并集）。
+        // 3) 事件：有同名作者事件就并字段（章节 / 出场角色取并集）；AI 事件保留。
         val aiEvents = b.events.filter { it.origin != "author" }
         for (snapshot in aiEvents) {
             val keys = keysOf("event", snapshot.id)
             if (keys.isEmpty()) continue
             val current = b.events.firstOrNull { it.id == snapshot.id } ?: continue
+            marked += current.id
             val mine = b.events.firstOrNull {
                 it.origin == "author" && it.id != current.id && it.title == current.title && it.title.isNotBlank()
-            }
-            if (mine == null) {
-                if ("origin" in keys) {
-                    b = b.copy(events = b.events.map {
-                        if (it.id == current.id) it.copy(origin = "author", updatedAt = now()) else it
-                    })
-                    applied++
-                }
-                continue
-            }
+            } ?: continue
             var target = mine
             if ("whenText" in keys && current.whenText.isNotBlank()) {
                 target = target.copy(whenText = current.whenText, updatedAt = now())
@@ -1099,7 +1179,6 @@ object AiBible {
                 target = target.copy(note = current.note, updatedAt = now())
                 applied++
             }
-            var removeAi = false
             if ("merge" in keys) {
                 target = target.copy(
                     whenText = current.whenText.ifBlank { target.whenText },
@@ -1108,34 +1187,24 @@ object AiBible {
                     characterIds = (target.characterIds + current.characterIds.map { charMap[it] ?: it }).distinct(),
                     updatedAt = now(),
                 )
-                removeAi = true
                 applied++
             }
-            val targetId = target.id
-            var events = b.events.map { if (it.id == targetId) target else it }
-            if (removeAi) events = events.filterNot { it.id == current.id }
-            b = b.copy(events = events)
+            b = b.copy(
+                events = b.events.map { if (it.id == target.id) target else it },
+            )
         }
 
-        // 4) 大纲：同章（或同名未落地节点）并情节点，否则按 id 升级。
+        // 4) 大纲：同章（或同名未落地节点）并情节点；AI 节点保留。
         val aiOutline = b.outline.filter { it.origin != "author" }
         for (snapshot in aiOutline) {
             val keys = keysOf("outline", snapshot.id)
             if (keys.isEmpty()) continue
             val current = b.outline.firstOrNull { it.id == snapshot.id } ?: continue
+            marked += current.id
             val mine = b.outline.firstOrNull {
                 it.origin == "author" && it.id != current.id &&
                     (if (current.chapterId != null) it.chapterId == current.chapterId else it.title == current.title)
-            }
-            if (mine == null) {
-                if ("origin" in keys) {
-                    b = b.copy(outline = b.outline.map {
-                        if (it.id == current.id) it.copy(origin = "author", updatedAt = now()) else it
-                    })
-                    applied++
-                }
-                continue
-            }
+            } ?: continue
             var target = mine
             if ("title" in keys && current.title.isNotBlank()) {
                 target = target.copy(title = current.title, updatedAt = now())
@@ -1145,28 +1214,34 @@ object AiBible {
                 target = target.copy(beats = mergeBeats(target.beats, current.beats), updatedAt = now())
                 applied++
             }
-            var removeAi = false
             if ("merge" in keys) {
                 target = target.copy(
                     beats = mergeBeats(target.beats, current.beats),
                     title = target.title.ifBlank { current.title },
                     updatedAt = now(),
                 )
-                removeAi = true
                 applied++
             }
-            val targetId = target.id
-            var outline = b.outline.map { if (it.id == targetId) target else it }
-            if (removeAi) outline = outline.filterNot { it.id == current.id }
-            b = b.copy(outline = outline)
+            b = b.copy(
+                outline = b.outline.map { if (it.id == target.id) target else it },
+            )
         }
 
-        if (applied <= 0 || b == before) return 0
+        if (marked.isEmpty()) return 0
+        // 3.26.46：先写 bible + journal（记下这一批的批次号），再打「已同步」标记；
+        // 万一两步之间被杀，只是标记没打上（可以再同步一次），不会留下撤不掉的孤儿标记。
+        val batch = "sync_" + uuid()
+        val ids = marked.toList()
         apply(
             ctx, store, bookId, before, b, "author", "merge", "merge",
-            "同步 AI 内容到我的（$applied 条）", merge = true,
+            "同步 AI 内容到我的（${ids.size} 条，$applied 处字段）", merge = true,
+            extra = JSONObject().apply {
+                put("syncBatch", batch)
+                put("syncedIds", JSONArray(ids))
+            },
         )
-        return applied
+        markSynced(ctx, bookId, ids, batch)
+        return ids.size
     }
 
     private fun undoLastMergeOnMain(ctx: Context, bookId: String): Boolean {
@@ -1185,6 +1260,12 @@ object AiBible {
         val before = entry.optJSONObject("before")?.let { decodeBible(it) } ?: return false
         store.mutate { d ->
             d.copy(books = d.books.map { b -> if (b.id == bookId) b.copy(bible = before) else b })
+        }
+        // 3.26.46：连这一批「已同步」标记一起清掉（旧版 journal 没有批次号，按 id 兜底）。
+        val batch = entry.optString("syncBatch")
+        val markedIds = entry.optJSONArray("syncedIds")?.toStringList() ?: emptyList()
+        if (batch.isNotBlank() || markedIds.isNotEmpty()) {
+            clearSynced(ctx, bookId, batch, markedIds)
         }
         val rest = JSONArray()
         for (i in 0 until arr.length()) if (i != index) rest.put(arr.opt(i))
@@ -1335,6 +1416,9 @@ fun previewMerge(bookId: String): List<BibleChange> = AiBible.previewMerge(bookI
 /** 执行选中的合并项（id 来自 [previewMerge]），返回实际落地的条数。 */
 fun applyMerge(bookId: String, ids: List<String>): Int = AiBible.applyMerge(bookId, ids)
 
-/** 一步撤销最近一次「同步 AI 内容到我的」。 */
+/** 一步撤销最近一次「同步 AI 内容到我的」（同时清掉那一批「已同步」标记）。 */
 fun undoLastMerge(bookId: String): Boolean = AiBible.undoLastMerge(bookId)
+
+/** 3.26.46：这本书里已经同步到「我的」的 AI 条目 id（侧车标记，AI 页据此淡一档）。 */
+fun bibleSyncedIds(bookId: String): Set<String> = AiBible.syncedIds(bookId)
 
