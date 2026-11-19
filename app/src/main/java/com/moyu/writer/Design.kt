@@ -402,6 +402,46 @@ fun Txt(
 }
 
 /**
+ * 富文本版 [Txt]：样式与字符串版完全一致，只换承载。
+ *
+ * 3.26.33：AI 回答要画粗体/列表，需要 AnnotatedString；样式（字体族按设置、
+ * 字号、行高、字色）必须和普通文字同源，否则气泡里会出现两种字距。
+ */
+@Composable
+fun Txt(
+    text: AnnotatedString,
+    modifier: Modifier = Modifier,
+    size: Float = 14f,
+    color: Color = LocalInk.current.palette.ink,
+    weight: FontWeight = FontWeight.Normal,
+    lineHeight: Float = size * 1.45f,
+    letterSpacing: Float = 0f,
+    align: TextAlign = TextAlign.Start,
+    maxLines: Int = Int.MAX_VALUE,
+    overflow: TextOverflow = TextOverflow.Clip,
+    fontFamily: FontFamily? = null,
+    decoration: TextDecoration = TextDecoration.None,
+) {
+    val ui = LocalInk.current
+    BasicText(
+        text = text,
+        modifier = modifier,
+        style = TextStyle(
+            color = color,
+            fontSize = size.sp,
+            fontWeight = weight,
+            lineHeight = lineHeight.sp,
+            letterSpacing = letterSpacing.sp,
+            textAlign = align,
+            fontFamily = fontFamily ?: fontFamilyFor(ui.settings.font),
+            textDecoration = decoration,
+        ),
+        maxLines = maxLines,
+        overflow = overflow,
+    )
+}
+
+/**
  * One continuous liquid-glass layer.
  *
  * The important part here is what is *not* drawn: no flat backing layer, no inner

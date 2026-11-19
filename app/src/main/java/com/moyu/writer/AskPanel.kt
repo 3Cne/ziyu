@@ -139,7 +139,7 @@ fun ColumnScope.AskChat(
                 }
             } else {
                 Column(Modifier.fillMaxWidth()) {
-                    Txt(t.text, size = 11.5f, color = p.ink, lineHeight = 17f)
+                    AiMarkdown(t.text, size = 11.5f, lineHeight = 17f)
                     Spacer(Modifier.height(6.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         when {

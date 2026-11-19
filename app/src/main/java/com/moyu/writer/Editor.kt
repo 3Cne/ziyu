@@ -105,6 +105,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -168,6 +169,9 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.input.pointer.pointerInput
@@ -656,6 +660,18 @@ fun WritingScreen(
     var askExpanded by remember { mutableStateOf(false) }
     var askSeq by remember { mutableIntStateOf(0) }
 
+    // 3.26.34 AI 竖排菜单：状态在页面层，菜单画在能力栏上方的页面层。
+    // 不用 Popup 的独立窗口——那一层会把「第二次点 AI」的点击吃掉（用户实测关不掉）。
+    var aiMenuOpen by remember { mutableStateOf(false) }
+    var aiMenuMounted by remember { mutableStateOf(false) }
+    LaunchedEffect(aiMenuOpen) { if (aiMenuOpen) aiMenuMounted = true }
+    // 选区一消失菜单就没意义了；能力栏收起时也一样，不能留一块悬在栏上方。
+    LaunchedEffect(body.selection, abilityT.value < .5f) {
+        if (body.selection.start == body.selection.end || abilityT.value < .5f) {
+            aiMenuOpen = false
+        }
+    }
+
     fun startProof() {
         val a = min(body.selection.start, body.selection.end).coerceIn(0, body.text.length)
         val b = max(body.selection.start, body.selection.end).coerceIn(0, body.text.length)
@@ -1022,16 +1038,18 @@ fun WritingScreen(
             return
         }
         val ed = bodyEditor
+        // 写进正文的是纯文字：回答里的 **粗体** / 列表标记不能留在稿子里。
+        val paste = mdPlain(turn.text).ifBlank { turn.text }
         if (ed != null) {
-            ed.replaceKeepingViewport(a, b, turn.text)
+            ed.replaceKeepingViewport(a, b, paste)
         } else {
             pushUndo()
-            body = body.copy(text = src.replaceRange(a, b, turn.text))
+            body = body.copy(text = src.replaceRange(a, b, paste))
         }
-        askPreview = turn.text
-        askRange = a to (a + turn.text.length)
+        askPreview = paste
+        askRange = a to (a + paste.length)
         askTurns = askTurns.map { if (it.id == turn.id) it.copy(applied = true) else it }
-        ToastBus.show("已替换选中 ${turn.text.length} 字，可以撤销")
+        ToastBus.show("已替换选中 ${paste.length} 字，可以撤销")
     }
 
     /** 3.26.23：修饰模式下一键采纳本章所有卡片（逐条走 acceptProof，位置判定与撤销都沿用）。 */
@@ -2107,6 +2125,9 @@ fun WritingScreen(
                     onProof = { startProof() },
                     onPolish = { startPolish() },
                     onAsk = { startAsk() },
+                    aiOpen = aiMenuOpen,
+                    onAiToggle = { aiMenuOpen = !aiMenuOpen },
+                    dockCollapsed = abilityT.value < .5f,
                     backdrop = editorBodyBackdrop,
                     epoch = bodyScrollTick.intValue,
                     scrollTick = bodyScrollTick,
@@ -2149,6 +2170,34 @@ fun WritingScreen(
                         modifier = Modifier.size(18.dp),
                         color = p.ink,
                     )
+                }
+                // 3.26.34：AI 竖排菜单画在能力栏上方，左边贴屏幕最左、底边压进栏顶 4dp
+                // （同色，看不出来）——读作栏体本身被挤出一截。
+                // matchParentSize：不参与能力栏的测量，不会把栏抬高。
+                if (aiMenuMounted) {
+                    Box(
+                        Modifier.matchParentSize(),
+                        contentAlignment = Alignment.BottomStart,
+                    ) {
+                        AiDockMenu(
+                            open = aiMenuOpen,
+                            tone = dockTone(ui),
+                            ink = p.ink,
+                            modifier = Modifier.offset {
+                                IntOffset(
+                                    0,
+                                    -dockHeightPx + with(densityNow) { 4.dp.roundToPx() },
+                                )
+                            },
+                            onProof = { startProof() },
+                            onPolish = { startPolish() },
+                            onAsk = { startAsk() },
+                            onExited = {
+                                aiMenuMounted = false
+                                aiMenuOpen = false
+                            },
+                        )
+                    }
                 }
             }
             }
@@ -5002,6 +5051,11 @@ private fun EditorDock(
     onPolish: (() -> Unit)? = null,
     /** 3.26.32：AI 入口里的「问」：就选中的这一段对话，回答可一键替换回选区。 */
     onAsk: (() -> Unit)? = null,
+    /** 3.26.34：AI 竖排菜单的开关状态（状态提到这里，菜单画在能力栏上方的页面层）。 */
+    aiOpen: Boolean = false,
+    onAiToggle: () -> Unit = {},
+    /** 3.26.34：能力栏已收起（整块缩回左下角的球）——竖排 AI 菜单要跟着收。 */
+    dockCollapsed: Boolean = false,
     /** 1型玻璃 sampling source. Pass the body's software backdrop so the real
      *  EditText text shows through the dock; null falls back to a paper bar. */
     backdrop: Backdrop? = null,
@@ -5081,46 +5135,37 @@ private fun EditorDock(
                     label = "dockSelection",
                 ) { selecting ->
                     if (selecting) {
-                        // AI 入口：点开横向展开成「校核 | 修饰」两格。这份 state
-                        // 随选框行一起销毁——选择结束时自然收起，不用手动复位。
-                        var aiOpen by remember { mutableStateOf(false) }
                         Row(
                             Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             if (onProof != null || onPolish != null || onAsk != null) {
-                                AnimatedContent(
-                                    targetState = aiOpen,
-                                    transitionSpec = {
-                                        (fadeIn(tween(150)) + slideInHorizontally(tween(180)) { -it / 5 }) togetherWith
-                                            (fadeOut(tween(110))) using
-                                            SizeTransform(clip = true) { _, _ ->
-                                                spring(dampingRatio = .84f, stiffness = 380f)
-                                            }
-                                    },
-                                    label = "aiTool",
-                                ) { open ->
-                                    if (!open) {
-                                        DockTool(Glyph.Sparkles, "AI", true, onClick = { aiOpen = true })
-                                    } else {
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
-                                            DockTool(Glyph.Check, "校核", true, onClick = {
-                                                aiOpen = false
-                                                onProof?.invoke()
-                                            })
-                                            DockTool(Glyph.Edit, "修饰", true, onClick = {
-                                                aiOpen = false
-                                                onPolish?.invoke()
-                                            })
-                                            if (onAsk != null) {
-                                                DockTool(Glyph.Sparkles, "问", true, onClick = {
-                                                    aiOpen = false
-                                                    onAsk?.invoke()
-                                                })
-                                            }
-                                        }
-                                    }
+                                // 3.26.34：AI 改成竖排菜单。横排 9 格（≈396dp）超过屏宽，
+                                // 「取消」被裁成「取」；竖排后操作条固定 7 格。
+                                // 图标本身在 ✦ ↔ ✕ 之间插值（MorphIcon）：点开/收起时
+                                // 同一个元素变成另一个图标，不是换一张图。
+                                val morph by animateFloatAsState(
+                                    targetValue = if (aiOpen) 1f else 0f,
+                                    animationSpec = spring(dampingRatio = .52f, stiffness = 320f),
+                                    label = "aiMorph",
+                                )
+                                Column(
+                                    Modifier
+                                        .width(DockToolWidth)
+                                        .bouncy(scale = .88f) { onAiToggle() }
+                                        .padding(vertical = 4.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                ) {
+                                    MorphIcon(
+                                        progress = morph,
+                                        a = MorphAiStar,
+                                        b = MorphAiCross,
+                                        modifier = Modifier.size(16.dp),
+                                        color = onBar,
+                                    )
+                                    Spacer(Modifier.height(3.dp))
+                                    Txt("AI", size = 7.6f, color = onBarDim, maxLines = 1)
                                 }
                             }
                             DockTool(Glyph.Share, "复制", true, onCopy)
@@ -5134,8 +5179,40 @@ private fun EditorDock(
                         // 工具行：8 格固定 36dp，整行 SpaceEvenly 均分。
                         // 8×36=288dp，360dp 屏去掉两边 12dp 还剩 336dp，一屏
                         // 放得下就不再横滑翻页；窄屏只收紧格间空隙，格宽不变。
+                        // 3.26.34：在这一行上横向拖动 = 移动正文光标（每 8dp 一个字）。
+                        // 位移不到 slop 时手势器根本不启动，工具的点按不受影响。
+                        val charStepPx = with(LocalDensity.current) { 8.dp.toPx() }
+                        var scrub by remember { mutableStateOf(0f) }
                         Row(
-                            Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 4.dp)
+                                .pointerInput(charStepPx) {
+                                    detectHorizontalDragGestures(
+                                        onDragStart = { scrub = 0f },
+                                        onDragEnd = { scrub = 0f },
+                                        onDragCancel = { scrub = 0f },
+                                    ) { change, dx ->
+                                        val ed = bodyEditor
+                                        if (ed != null) {
+                                            scrub += dx
+                                            val n = (scrub / charStepPx).toInt()
+                                            if (n != 0) {
+                                                scrub -= n * charStepPx
+                                                val txt = ed.text
+                                                if (txt != null) {
+                                                    val from = ed.selectionEnd.coerceIn(0, txt.length)
+                                                    val to = (from + n).coerceIn(0, txt.length)
+                                                    if (to != from) {
+                                                        ed.setSelection(to)
+                                                        runCatching { ed.bringPointIntoView(to) }
+                                                    }
+                                                    change.consume()
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
                             horizontalArrangement = Arrangement.SpaceEvenly,
                             verticalAlignment = Alignment.CenterVertically,
                         ) {

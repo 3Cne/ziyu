@@ -2604,7 +2604,7 @@ private fun ChatPane(
                                     if (!mine && msg.reasoning.isNotBlank()) {
                                         ThoughtBlock(msg.id, msg.reasoning)
                                     }
-                                    Txt(
+                                    AiMarkdown(
                                         msg.text,
                                         modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp),
                                         size = 13.5f,
