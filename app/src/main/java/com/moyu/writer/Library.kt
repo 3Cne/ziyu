@@ -84,6 +84,7 @@ import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
@@ -456,7 +457,7 @@ fun LibraryScreen(
                         }
                     } else {
                         items(visibleBooks, key = { it.id }) { book ->
-                            Box(Modifier.animateItem()) {
+                            Box(Modifier.animateItem().testTag("shelf.bookCard")) {
                                 BookListRow(
                                     book,
                                     groupName = store.bookGroups.firstOrNull { it.id == book.groupId }?.name,
@@ -505,7 +506,7 @@ fun LibraryScreen(
                         }
                     } else {
                         items(visibleBooks, key = { it.id }) { book ->
-                            Box(Modifier.animateItem()) {
+                            Box(Modifier.animateItem().testTag("shelf.bookCard")) {
                                 BookGridCard(
                                     book,
                                     compact = mode == "compact",
@@ -612,7 +613,7 @@ private fun LibraryHeader(store: AppStore, onAdd: () -> Unit) {
             GlassIconButton(
                 Glyph.Plus,
                 onClick = onAdd,
-                modifier = Modifier.tutorialAnchor("shelf.addBook", onActivate = onAdd),
+                modifier = Modifier.tutorialAnchor("shelf.addBook", onActivate = onAdd).testTag("shelf.add"),
             )
         }
         Spacer(Modifier.height(14.dp))
@@ -721,7 +722,7 @@ private fun ShelfHeader(
         Row(verticalAlignment = Alignment.CenterVertically) {
             // GlassChip 没有 modifier 形参：用无尺寸 Box 包一层挂锚点，
             // 只多一个测量包装节点，chip 的尺寸/位置与直接放在 Row 里完全一致。
-            Box(Modifier.tutorialAnchor("shelf.filter", onActivate = onFilters)) {
+            Box(Modifier.tutorialAnchor("shelf.filter", onActivate = onFilters).testTag("shelf.filter")) {
                 GlassChip("筛选", false) { onFilters() }
             }
             Spacer(Modifier.width(9.dp))
@@ -921,6 +922,7 @@ fun BookEditorDialog(
             if (book != null) onSubmit(book) else onDismiss()
         },
         dismissOnOutsideClick = false,
+        modifier = Modifier.testTag("book.dialog.editor"),
         closeableContent = { close ->
         // 按钮统一走 close()：先播面板退场，等 idle 后 GlassDialog 才回调上面的 onDismiss。
         val closeAndHide = {
@@ -962,7 +964,7 @@ fun BookEditorDialog(
             // 对话框会先硬缩、硬长 50dp 再播高度动画（读作「跳高」）。收进 level 0 这一层，
             // 整块高度交给 AnimatedContent 自己的尺寸过渡。
             Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-                GlassButton("取消", closeAndHide, Modifier.weight(1f))
+                GlassButton("取消", closeAndHide, Modifier.weight(1f).testTag("book.dialog.editor.cancel"))
                 PrimaryButton(
                     if (existing == null) "创建" else "保存",
                     {
@@ -997,7 +999,7 @@ fun BookEditorDialog(
                             closeAndHide()
                         }
                     },
-                    Modifier.weight(1f),
+                    Modifier.weight(1f).testTag("book.dialog.editor.save"),
                     enabled = !savingCover,
                 )
             }
@@ -1289,7 +1291,7 @@ fun BookDetailScreen(
                         Modifier.weight(1f).tutorialAnchor(
                             "book.continue",
                             onActivate = openChapter,
-                        ),
+                        ).testTag("book.detail.continue"),
                         glyph = Glyph.Edit,
                     )
                     GlassButton("导出", { exportOpen = true }, Modifier.width(104.dp), glyph = Glyph.Export)
@@ -1309,7 +1311,7 @@ fun BookDetailScreen(
                     Modifier.fillMaxWidth().tutorialAnchor(
                         "book.story",
                         onActivate = openStory,
-                    ),
+                    ).testTag("book.detail.story"),
                     radius = 20f,
                     flat = true,
                 ) {
@@ -1343,7 +1345,8 @@ fun BookDetailScreen(
                         GlassIconButton(
                             Glyph.Plus,
                             { addChapter = true },
-                            modifier = Modifier.tutorialAnchor("book.toc.add", onActivate = { addChapter = true }),
+                            modifier = Modifier.tutorialAnchor("book.toc.add", onActivate = { addChapter = true })
+                                .testTag("book.detail.toc.add"),
                         )
                     }
                 )
@@ -1356,7 +1359,7 @@ fun BookDetailScreen(
                         fadeInSpec = tween(160),
                         fadeOutSpec = tween(120),
                         placementSpec = spring(dampingRatio = .78f, stiffness = 380f),
-                    )
+                    ).testTag("book.detail.toc.row")
                 ) {
                     ChapterRow(
                         index = book.chapters.indexOf(chapter) + 1,
