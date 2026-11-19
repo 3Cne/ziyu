@@ -4992,15 +4992,17 @@ private fun EditorTopBar(
         // 3.26.48：章节 chip 行随「关联章节」出现/消失整行展开、收起。
         // 退出动画期间上层已经把 chips 传成 null；这里留住最后一次非空内容，
         // 否则内容先空掉、没有东西可收，看起来还是硬切。
+        // 3.26.49：动效档 none 时直接落终态（tween(0)），与项目其它 spring 的降级写法一致。
         val lastChips = remember { mutableStateOf<(@Composable () -> Unit)?>(null) }
         SideEffect { if (chips != null && lastChips.value !== chips) lastChips.value = chips }
+        val chipsMotion = ui.settings.motion != "none"
         AnimatedVisibility(
             visible = chips != null,
             enter = expandVertically(
-                animationSpec = spring(dampingRatio = .6f, stiffness = 380f),
+                animationSpec = if (chipsMotion) spring(dampingRatio = .6f, stiffness = 380f) else tween(0),
             ),
             exit = shrinkVertically(
-                animationSpec = spring(dampingRatio = .6f, stiffness = 380f),
+                animationSpec = if (chipsMotion) spring(dampingRatio = .6f, stiffness = 380f) else tween(0),
             ),
             label = "chapterChips",
         ) {

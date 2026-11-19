@@ -95,6 +95,16 @@ object AiTools {
 
     private const val READ_NOTE_MAX = 2400
 
+    /** 自由大纲节点的 id 前缀（与 StoryBible 的 FREE_OUTLINE_PREFIX 同一约定）：不绑章，也不能建章。 */
+    private const val FREE_OUTLINE_PREFIX = "free_"
+
+    /**
+     * 3.26.49：`chapters_from_outline` 碰上「大纲里只有自由节点」时的错误码。
+     * 自由节点不绑章，一个都不能建，所以不是「都落地了」。
+     * 错误码的集中登记处是 `AiToolError`（AiToolResult.kt），这里沿用同一套小写下划线。
+     */
+    private const val NO_CHAPTER_NODES = "no_chapter_nodes"
+
     /**
      * 3.26.29：会改东西的工具。只读档下这些一律不执行——
      * 作者选「只读」就是只要回答，不要任何写盘动作（含圣经、导出、备份）。
@@ -142,7 +152,7 @@ object AiTools {
       {"type":"function","function":{"name":"move_chapter","description":"把一章挪到目录里的第 N 位（1 起）","parameters":{"type":"object","properties":{"title":{"type":"string"},"to":{"type":"integer","description":"目标位次，1 起"},"book":{"type":"string"}},"required":["title","to"]}}},
       {"type":"function","function":{"name":"split_chapter","description":"把一章从断点拆成两章：前半保留原章，后半新建一章。断点给 before（一段原文）或 at（第几段，1 起）","parameters":{"type":"object","properties":{"title":{"type":"string"},"before":{"type":"string","description":"在这一句原文前面断开"},"at":{"type":"integer","description":"在第几段前面断开，1 起"},"new_title":{"type":"string","description":"后半的新章名，不填=原名（下）"},"book":{"type":"string","description":"书名，不填=当前书"}},"required":["title"]}}},
       {"type":"function","function":{"name":"merge_chapters","description":"把相邻的两章合成一章，保留前一章的章名与 id；笔记、事件、大纲会跟着指到前一章","parameters":{"type":"object","properties":{"first":{"type":"string"},"second":{"type":"string"},"book":{"type":"string"}},"required":["first","second"]}}},
-      {"type":"function","function":{"name":"chapters_from_outline","description":"按故事圣经的大纲，把还没落地的节点各建一章（标题用节点标题，正文空）","parameters":{"type":"object","properties":{"book":{"type":"string"}}}}},
+      {"type":"function","function":{"name":"chapters_from_outline","description":"按故事圣经的大纲，把还没落地的章级节点各建一章（标题用节点标题，正文空）。只处理章级节点，free_ 开头的自由节点不建章","parameters":{"type":"object","properties":{"book":{"type":"string"}}}}},
       {"type":"function","function":{"name":"delete_chapter","description":"删除一章及其正文；不可恢复，要等作者二次确认","parameters":{"type":"object","properties":{"title":{"type":"string","description":"章节标题，必须写全"},"book":{"type":"string","description":"书名，不填=当前书"}},"required":["title"]}}},
       {"type":"function","function":{"name":"search_book","description":"搜一个关键词（人名、物件、伏笔、地点），返回命中的章节和前后文；scope=all 连所有书和笔记一起搜，跨书找伏笔用这个","parameters":{"type":"object","properties":{"keyword":{"type":"string","description":"要搜的词，两到六个字最好"},"book":{"type":"string","description":"书名，不填=当前书（scope=book 时生效）"},"scope":{"type":"string","enum":["book","all"],"description":"book=只搜当前这本书；all=所有书和笔记"},"limit":{"type":"integer","description":"最多几处，默认 12"}},"required":["keyword"]}}},
       {"type":"function","function":{"name":"create_book","description":"新建一本书；要等作者确认才写入","parameters":{"type":"object","properties":{"title":{"type":"string"},"author":{"type":"string"},"genre":{"type":"string"},"synopsis":{"type":"string"}},"required":["title"]}}},
@@ -347,7 +357,7 @@ object AiTools {
                     when {
                         b.chapters.isEmpty() -> ok("《" + b.title + "》还没有章节")
                         else -> {
-                            val loose = b.bible.outline.count { n -> b.chapters.none { it.id == n.chapterId } }
+                            val loose = looseChapterNodes(b).size
                             val hint = if (loose > 0) {
                                 "\n（大纲里还有 " + loose + " 个节点没落地；要一次建完用 chapters_from_outline，" +
                                     "单建一章用 create_chapter）"
@@ -687,7 +697,7 @@ object AiTools {
                             }
                         }
                         else -> {
-                            val loose = b.bible.outline.count { n -> b.chapters.none { it.id == n.chapterId } }
+                            val loose = looseChapterNodes(b).size
                             pending += AiPending(
                                 label = "在《" + b.title + "》新建「" + title + "」",
                                 kind = AiPendingKind.Chapter,
@@ -813,9 +823,16 @@ object AiTools {
 
                 "chapters_from_outline" -> {
                     val b = pickBook(store, args, book)
-                    val loose = b.bible.outline.count { n -> b.chapters.none { it.id == n.chapterId } }
+                    // 3.26.49：只处理章级节点。free_ 自由节点不绑章，拿去建章会让它变成章节、
+                    // 从自由分组里消失，所以这里先按 id 前缀滤掉。
+                    val chapterNodes = outlineChapterNodes(b)
+                    val loose = looseChapterNodes(b).size
                     when {
                         b.bible.outline.isEmpty() -> ok("《" + b.title + "》的故事圣经还没有大纲，没有东西可建。先用 write_story_bible（kind=outline）写大纲")
+                        chapterNodes.isEmpty() -> bad(
+                            NO_CHAPTER_NODES,
+                            "《" + b.title + "》的大纲只有自由节点（id 以 free_ 开头、不绑章），没有可建章的章级节点。自由节点不会建章，要建章先用 write_story_bible（kind=outline）写章级大纲",
+                        )
                         loose == 0 -> ok("大纲里的章节都已经落地了")
                         else -> {
                             pending += AiPending(
@@ -1714,6 +1731,17 @@ object AiTools {
         return true
     }
 
+
+    /**
+     * 3.26.49：能拿去建章的**章级**大纲节点——排除 `free_` 自由节点。
+     * 自由节点（3.26.46 起）不绑章、单独分组，只有 id 前缀可区分（OutlineNode 没有类型字段）。
+     */
+    private fun outlineChapterNodes(b: Book): List<OutlineNode> =
+        b.bible.outline.filterNot { it.id.startsWith(FREE_OUTLINE_PREFIX) }
+
+    /** 还没落地的章级节点；自由节点不算「待建章」，免得提示让模型去建它们。 */
+    private fun looseChapterNodes(b: Book): List<OutlineNode> =
+        outlineChapterNodes(b).filter { n -> b.chapters.none { it.id == n.chapterId } }
 
     fun lineStartAt(content: String, n: Int): Int {
         if (n <= 0) return -1
