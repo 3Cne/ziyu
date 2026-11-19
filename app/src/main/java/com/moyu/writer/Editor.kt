@@ -5706,8 +5706,15 @@ private fun TypographySheet(store: AppStore, onDismiss: () -> Unit) {
         )
         Spacer(Modifier.height(16.dp))
         GlassButton("恢复默认排版", {
+            // 3.26.53：值改从 AppSettings 的默认取，别再把旧外观写死在这里。
+            val d = AppSettings()
             store.updateSettings {
-                it.copy(font = "serif", fontScale = 1f, lineHeight = 1.82f, pageMargin = 22f)
+                it.copy(
+                    font = d.font,
+                    fontScale = d.fontScale,
+                    lineHeight = d.lineHeight,
+                    pageMargin = d.pageMargin,
+                )
             }
             ToastBus.show("已恢复默认排版")
         }, Modifier.fillMaxWidth(), glyph = Glyph.Undo)
