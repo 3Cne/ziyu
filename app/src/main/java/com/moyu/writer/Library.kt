@@ -609,7 +609,11 @@ private fun LibraryHeader(store: AppStore, onAdd: () -> Unit) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Txt("书架", size = 34f, weight = FontWeight.SemiBold, letterSpacing = .4f)
             Spacer(Modifier.weight(1f))
-            GlassIconButton(Glyph.Plus, onClick = onAdd)
+            GlassIconButton(
+                Glyph.Plus,
+                onClick = onAdd,
+                modifier = Modifier.tutorialAnchor("shelf.addBook"),
+            )
         }
         Spacer(Modifier.height(14.dp))
     }
@@ -715,7 +719,11 @@ private fun ShelfHeader(
     // removed along with that count.
     Column(Modifier.fillMaxWidth()) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            GlassChip("筛选", false) { onFilters() }
+            // GlassChip 没有 modifier 形参：用无尺寸 Box 包一层挂锚点，
+            // 只多一个测量包装节点，chip 的尺寸/位置与直接放在 Row 里完全一致。
+            Box(Modifier.tutorialAnchor("shelf.filter")) {
+                GlassChip("筛选", false) { onFilters() }
+            }
             Spacer(Modifier.width(9.dp))
             Txt(summary, size = 10.5f, color = LocalInk.current.palette.muted)
         }
@@ -1275,7 +1283,7 @@ fun BookDetailScreen(
                             val chapter = book.lastChapter() ?: book.chapters.firstOrNull()
                             if (chapter != null) onOpenChapter(book.id, chapter.id)
                         },
-                        Modifier.weight(1f),
+                        Modifier.weight(1f).tutorialAnchor("book.continue"),
                         glyph = Glyph.Edit,
                     )
                     GlassButton("导出", { exportOpen = true }, Modifier.width(104.dp), glyph = Glyph.Export)
@@ -1286,7 +1294,11 @@ fun BookDetailScreen(
                 // 所以挂在书籍详情而不是新开一个 tab；空着也常驻，点进去是带引导的空态。
                 val bible = book.bible
                 val haptic = LocalHaptic.current
-                MoyuSurface(Modifier.fillMaxWidth(), radius = 20f, flat = true) {
+                MoyuSurface(
+                    Modifier.fillMaxWidth().tutorialAnchor("book.story"),
+                    radius = 20f,
+                    flat = true,
+                ) {
                     Row(
                         Modifier
                             .fillMaxWidth()
@@ -1317,7 +1329,11 @@ fun BookDetailScreen(
                     "目录",
                     "${book.chapters.size} 章 · 每章都会自动成为电子书目录",
                     trailing = {
-                        GlassIconButton(Glyph.Plus, { addChapter = true })
+                        GlassIconButton(
+                            Glyph.Plus,
+                            { addChapter = true },
+                            modifier = Modifier.tutorialAnchor("book.toc.add"),
+                        )
                     }
                 )
             }
