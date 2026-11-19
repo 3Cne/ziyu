@@ -2,6 +2,7 @@ package com.moyu.writer
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FiniteAnimationSpec
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -49,6 +50,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -62,6 +64,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
@@ -236,6 +239,20 @@ fun OnboardingOverlay(onDone: () -> Unit) {
     val pages = ONBOARD_PAGES
     var page by remember { mutableIntStateOf(0) }
     val motion = ui.settings.motion != "none"
+    // 3.26.49：结束不再硬切——整层 200ms 淡出，退场跑完才真正置 onboardingDone；
+    // 数据写入时序不变（仍是 App 层那一次 updateSettings）。
+    var closing by remember { mutableStateOf(false) }
+    LaunchedEffect(closing) {
+        if (!closing || !motion) return@LaunchedEffect
+        delay(200)
+        onDone()
+    }
+    val finish: () -> Unit = {
+        if (!closing) {
+            closing = true
+            if (!motion) onDone()
+        }
+    }
     val progress by animateFloatAsState(
         targetValue = if (pages.isEmpty()) 0f else (page + 1f) / pages.size,
         animationSpec = if (motion) spring(dampingRatio = .9f, stiffness = 420f, visibilityThreshold = PROGRESS_THRESHOLD)
@@ -246,181 +263,190 @@ fun OnboardingOverlay(onDone: () -> Unit) {
 
     // 首页按返回等于跳过：刚打开就卡在一页上没有意义。
     BackHandler {
-        if (page > 0) page -= 1 else onDone()
+        if (page > 0) page -= 1 else finish()
     }
 
-    Box(
-        Modifier
-            .fillMaxSize()
-            .background(p.paper)
-            .statusBarsPadding()
-            .navigationBarsPadding(),
+    // 3.26.49：引导层结束不再硬切——整层 200ms 淡出，退场跑完才真正写 onboardingDone。
+    // AnimatedVisibility 要包住整层（含纸底），否则退场时会先露白再切页。
+    AnimatedVisibility(
+        visible = !closing,
+        enter = fadeIn(tween(0)),
+        exit = fadeOut(tween(if (motion) 200 else 0)),
+        label = "onboardingExit",
     ) {
-        // 触摸兜底（3.26.25 修「跳过」点到新建书籍）：这层只吃手势不画东西，
-        // 子元素在它上面时仍先拿到点击；落在空处的手势被它吃掉，不会漏到下层书架。
         Box(
             Modifier
                 .fillMaxSize()
-                .pointerInput(Unit) { detectTapGestures { } },
-        )
-
-        // 背景完全静止：不随页数换位置、不做明暗呼吸。亮度只由页面内容决定。
-        Canvas(Modifier.fillMaxSize()) {
-            val w = size.width
-            val h = size.height
-            drawCircle(
-                brush = Brush.radialGradient(
-                    listOf(ui.accent.copy(alpha = if (p.isDark) .26f else .16f), Color.Transparent),
-                    center = Offset(w * .80f, h * .16f),
-                    radius = w * .95f,
-                ),
-                radius = w * .95f,
-                center = Offset(w * .80f, h * .16f),
-            )
-            drawCircle(
-                brush = Brush.radialGradient(
-                    listOf(Color.White.copy(alpha = if (p.isDark) .05f else .55f), Color.Transparent),
-                    center = Offset(w * .10f, h * .86f),
-                    radius = w * .80f,
-                ),
-                radius = w * .80f,
-                center = Offset(w * .10f, h * .86f),
-            )
-            val ringR = w * .52f
-            drawCircle(
-                ui.accent.copy(alpha = .07f),
-                radius = ringR,
-                center = Offset(w * .86f, h * .22f),
-                style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.dp.toPx()),
-            )
-            drawCircle(
-                ui.accent.copy(alpha = .05f),
-                radius = ringR * 1.22f,
-                center = Offset(w * .86f, h * .22f),
-                style = androidx.compose.ui.graphics.drawscope.Stroke(width = .8.dp.toPx()),
-            )
-        }
-
-        Column(
-            Modifier
-                .fillMaxSize()
-                .padding(horizontal = 24.dp, vertical = 10.dp),
+                .background(p.paper)
+                .statusBarsPadding()
+                .navigationBarsPadding(),
         ) {
-            Row(
-                Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Box(
-                    Modifier
-                        .size(28.dp)
-                        .clip(CircleShape)
-                        .background(p.ink),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Txt("字", size = 10.5f, color = p.paper, weight = FontWeight.SemiBold)
-                }
-                Spacer(Modifier.width(10.dp))
-                Txt("素纸", size = 11.5f, color = p.ink, weight = FontWeight.Medium, letterSpacing = .8f)
-                Spacer(Modifier.weight(1f))
-                Txt(
-                    "${page + 1} / ${pages.size}",
-                    size = 9.5f,
-                    color = p.muted,
-                )
-                Spacer(Modifier.width(6.dp))
-                // 热区 ≥48dp；之前只有 8×6dp 内边距，点偏一点就落到下层「新建书籍」上。
-                Box(
-                    Modifier
-                        .sizeIn(minWidth = 48.dp, minHeight = 48.dp)
-                        .clip(CircleShape)
-                        .bouncy(scale = .94f) { onDone() },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Txt("跳过", size = 10.5f, color = p.muted)
-                }
-            }
-
+            // 触摸兜底（3.26.25 修「跳过」点到新建书籍）：这层只吃手势不画东西，
+            // 子元素在它上面时仍先拿到点击；落在空处的手势被它吃掉，不会漏到下层书架。
             Box(
                 Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-                    .clipToBounds(),
-            ) {
-                // 3.26.25（用户 2026-11-19 反馈：「下一步亮度来回闪」+「后面全是空页」）：
-                // 不用交叉淡化 / 缩放（会让两页半透明叠出亮度坑），也不用超宽 Row（子页会被
-                // 父约束压成 0 宽、叠在一起）。这里就是「两页并排、整幅横移」：旧页向左滑出、
-                // 新页从右滑入，两者都不透明，中途没有纸底空档，亮度保持不变。
-                AnimatedContent(
-                    targetState = page,
-                    transitionSpec = {
-                        val forward = targetState > initialState
-                        val spec: FiniteAnimationSpec<IntOffset> =
-                            if (motion) spring(dampingRatio = .86f, stiffness = 380f) else tween(0)
-                        (slideInHorizontally(spec) { if (forward) it else -it }) togetherWith
-                            (slideOutHorizontally(spec) { if (forward) -it else it })
-                    },
-                    label = "onboardingPage",
-                ) { index ->
-                    OnboardPageBody(pages[index], index)
-                }
-            }
+                    .fillMaxSize()
+                    .pointerInput(Unit) { detectTapGestures { } },
+            )
 
-            Spacer(Modifier.height(16.dp))
-
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .height(4.dp)
-                    .clip(CircleShape)
-                    .background(p.line),
-            ) {
-                Box(
-                    Modifier
-                        .fillMaxWidth(progress.coerceIn(0f, 1f))
-                        .height(4.dp)
-                        .clip(CircleShape)
-                        .background(
-                            Brush.horizontalGradient(
-                                listOf(ui.accent.copy(alpha = .55f), ui.accent),
-                            ),
-                        ),
+            // 背景完全静止：不随页数换位置、不做明暗呼吸。亮度只由页面内容决定。
+            Canvas(Modifier.fillMaxSize()) {
+                val w = size.width
+                val h = size.height
+                drawCircle(
+                    brush = Brush.radialGradient(
+                        listOf(ui.accent.copy(alpha = if (p.isDark) .26f else .16f), Color.Transparent),
+                        center = Offset(w * .80f, h * .16f),
+                        radius = w * .95f,
+                    ),
+                    radius = w * .95f,
+                    center = Offset(w * .80f, h * .16f),
+                )
+                drawCircle(
+                    brush = Brush.radialGradient(
+                        listOf(Color.White.copy(alpha = if (p.isDark) .05f else .55f), Color.Transparent),
+                        center = Offset(w * .10f, h * .86f),
+                        radius = w * .80f,
+                    ),
+                    radius = w * .80f,
+                    center = Offset(w * .10f, h * .86f),
+                )
+                val ringR = w * .52f
+                drawCircle(
+                    ui.accent.copy(alpha = .07f),
+                    radius = ringR,
+                    center = Offset(w * .86f, h * .22f),
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.dp.toPx()),
+                )
+                drawCircle(
+                    ui.accent.copy(alpha = .05f),
+                    radius = ringR * 1.22f,
+                    center = Offset(w * .86f, h * .22f),
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = .8.dp.toPx()),
                 )
             }
-            Spacer(Modifier.height(14.dp))
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalAlignment = Alignment.CenterVertically,
+
+            Column(
+                Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 24.dp, vertical = 10.dp),
             ) {
-                if (page > 0) {
-                    // 不用 GlassButton：它内部的 Row 是 fillMaxSize，在 Row 里会连宽度一起
-                    // 吃到满行，把「下一步」挤没。这里按同一个 dockTone 药丸自己画。
-                    Row(
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(
                         Modifier
-                            .height(50.dp)
+                            .size(28.dp)
                             .clip(CircleShape)
-                            .background(dockTone(ui))
-                            .bouncy { page -= 1 }
-                            .padding(horizontal = 18.dp),
-                        verticalAlignment = Alignment.CenterVertically,
+                            .background(p.ink),
+                        contentAlignment = Alignment.Center,
                     ) {
-                        LineIcon(
-                            Glyph.Back,
-                            p.ink,
-                            18.dp,
-                            modifier = Modifier.padding(end = 8.dp),
-                        )
-                        Txt("上一步", size = 14f, color = p.ink, weight = FontWeight.Medium)
+                        Txt("字", size = 10.5f, color = p.paper, weight = FontWeight.SemiBold)
+                    }
+                    Spacer(Modifier.width(10.dp))
+                    Txt("素纸", size = 11.5f, color = p.ink, weight = FontWeight.Medium, letterSpacing = .8f)
+                    Spacer(Modifier.weight(1f))
+                    Txt(
+                        "${page + 1} / ${pages.size}",
+                        size = 9.5f,
+                        color = p.muted,
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    // 热区 ≥48dp；之前只有 8×6dp 内边距，点偏一点就落到下层「新建书籍」上。
+                    Box(
+                        Modifier
+                            .sizeIn(minWidth = 48.dp, minHeight = 48.dp)
+                            .clip(CircleShape)
+                            .bouncy(scale = .94f) { finish() },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Txt("跳过", size = 10.5f, color = p.muted)
                     }
                 }
-                PrimaryButton(
-                    if (page == pages.lastIndex) "开始写" else "下一步",
-                    {
-                        if (page == pages.lastIndex) onDone() else page += 1
-                    },
-                    Modifier.weight(1f),
-                    glyph = if (page == pages.lastIndex) Glyph.Check else Glyph.Chevron,
-                )
+
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .clipToBounds(),
+                ) {
+                    // 3.26.25（用户 2026-11-19 反馈：「下一步亮度来回闪」+「后面全是空页」）：
+                    // 不用交叉淡化 / 缩放（会让两页半透明叠出亮度坑），也不用超宽 Row（子页会被
+                    // 父约束压成 0 宽、叠在一起）。这里就是「两页并排、整幅横移」：旧页向左滑出、
+                    // 新页从右滑入，两者都不透明，中途没有纸底空档，亮度保持不变。
+                    AnimatedContent(
+                        targetState = page,
+                        transitionSpec = {
+                            val forward = targetState > initialState
+                            val spec: FiniteAnimationSpec<IntOffset> =
+                                if (motion) spring(dampingRatio = .86f, stiffness = 380f) else tween(0)
+                            (slideInHorizontally(spec) { if (forward) it else -it }) togetherWith
+                                (slideOutHorizontally(spec) { if (forward) -it else it })
+                        },
+                        label = "onboardingPage",
+                    ) { index ->
+                        OnboardPageBody(pages[index], index)
+                    }
+                }
+
+                Spacer(Modifier.height(16.dp))
+
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(4.dp)
+                        .clip(CircleShape)
+                        .background(p.line),
+                ) {
+                    Box(
+                        Modifier
+                            .fillMaxWidth(progress.coerceIn(0f, 1f))
+                            .height(4.dp)
+                            .clip(CircleShape)
+                            .background(
+                                Brush.horizontalGradient(
+                                    listOf(ui.accent.copy(alpha = .55f), ui.accent),
+                                ),
+                            ),
+                    )
+                }
+                Spacer(Modifier.height(14.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (page > 0) {
+                        // 不用 GlassButton：它内部的 Row 是 fillMaxSize，在 Row 里会连宽度一起
+                        // 吃到满行，把「下一步」挤没。这里按同一个 dockTone 药丸自己画。
+                        Row(
+                            Modifier
+                                .height(50.dp)
+                                .clip(CircleShape)
+                                .background(dockTone(ui))
+                                .bouncy { page -= 1 }
+                                .padding(horizontal = 18.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            LineIcon(
+                                Glyph.Back,
+                                p.ink,
+                                18.dp,
+                                modifier = Modifier.padding(end = 8.dp),
+                            )
+                            Txt("上一步", size = 14f, color = p.ink, weight = FontWeight.Medium)
+                        }
+                    }
+                    PrimaryButton(
+                        if (page == pages.lastIndex) "开始写" else "下一步",
+                        {
+                            if (page == pages.lastIndex) finish() else page += 1
+                        },
+                        Modifier.weight(1f),
+                        glyph = if (page == pages.lastIndex) Glyph.Check else Glyph.Chevron,
+                    )
+                }
             }
         }
     }

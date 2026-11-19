@@ -1,5 +1,6 @@
 package com.moyu.writer
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.spring
@@ -9,6 +10,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -61,6 +63,10 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
+
+/** 3.26.49：内容区四态（结果列表 / 正在读 / 错误 / 空态）。
+ *  以前是 `when` 直接换内容，状态一变就硬切；现在交给 AnimatedContent 做 160ms 淡入淡出。 */
+private enum class ProofContent { Results, Busy, Error, Empty }
 
 /**
  * 校核浮窗。和「本章笔记」共用同一套右侧浮窗形态：平卡、20 圆角、标题行、
@@ -282,9 +288,24 @@ fun ProofSidePanel(
                     if (content != null) {
                         content()
                     } else {
-                    Box(Modifier.weight(1f).fillMaxWidth()) {
-                        when {
-                            issues.isNotEmpty() -> LazyColumn(
+                    // 3.26.49：内容区四态之间淡入淡出 160ms，不再硬切（motion=none 直接切终态）。
+                    val proofContent = when {
+                        issues.isNotEmpty() -> ProofContent.Results
+                        busy -> ProofContent.Busy
+                        error != null -> ProofContent.Error
+                        else -> ProofContent.Empty
+                    }
+                    AnimatedContent(
+                        targetState = proofContent,
+                        modifier = Modifier.weight(1f).fillMaxWidth(),
+                        transitionSpec = {
+                            val fade = tween<Float>(if (motion) 160 else 0)
+                            fadeIn(fade) togetherWith fadeOut(fade)
+                        },
+                        label = "proofContent",
+                    ) { contentState ->
+                        when (contentState) {
+                            ProofContent.Results -> LazyColumn(
                                 Modifier.fillMaxSize(),
                                 state = proofList,
                                 contentPadding = PaddingValues(horizontal = 11.dp, vertical = 9.dp),
@@ -315,12 +336,12 @@ fun ProofSidePanel(
                                     }
                                 }
                             }
-                            busy -> ProofStatusText(
+                            ProofContent.Busy -> ProofStatusText(
                                 text = status ?: "正在读这一段…",
                                 top = 14.dp,
                             )
-                            error != null -> ProofStatusText(text = error, top = 14.dp)
-                            else -> ProofStatusText(
+                            ProofContent.Error -> ProofStatusText(text = error.orEmpty(), top = 14.dp)
+                            ProofContent.Empty -> ProofStatusText(
                                 text = emptyText ?: if (asked) "没挑出问题。" else "本地没挑出问题。",
                                 top = 14.dp,
                             )

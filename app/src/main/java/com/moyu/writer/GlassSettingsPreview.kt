@@ -1,5 +1,12 @@
 package com.moyu.writer
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -32,6 +39,7 @@ import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 internal fun GlassLivePreview(group: Int, s: AppSettings) {
     val ui = LocalInk.current
     val p = ui.palette
+    val motion = ui.settings.motion != "none"
     val backdrop = rememberLayerBackdrop()
     Box(
         Modifier
@@ -61,133 +69,147 @@ internal fun GlassLivePreview(group: Int, s: AppSettings) {
                 Spacer(Modifier.height(9.dp))
             }
         }
-        when (group) {
-            0 -> Row(
-                Modifier
-                    .padding(horizontal = 18.dp)
-                    .fillMaxWidth()
-                    .height(52.dp)
-                    .liquidGlassBar(
-                        backdrop = backdrop,
-                        shape = SmoothCorner(26.dp),
-                        palette = p,
-                        blurDp = s.tabBlur,
-                        refractionDp = s.tabRefraction,
-                        dispersion = s.tabDispersion,
-                        shadowAlpha = s.tabShadow,
-                        veil = s.tabBarOpacity,
-                        edgeStrength = s.tabEdge,
-                    ),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                listOf(Glyph.Book, Glyph.Note, Glyph.Chart, Glyph.Sparkles, Glyph.Gear).forEach {
-                    LineIcon(it, p.ink, 15.dp)
+        // 3.26.49：五档（标签栏 / 镜片 / 输入框 / 按钮 / 通知）切换不再硬切：
+        // 淡入 + 从 97% 轻微放大 180ms；过渡中两块玻璃采样同一层静态纸面，模糊不会闪。
+        AnimatedContent(
+            targetState = group,
+            transitionSpec = {
+                val enter = tween<Float>(if (motion) 180 else 0)
+                (fadeIn(enter) + scaleIn(initialScale = .97f, animationSpec = enter))
+                    .togetherWith(fadeOut(tween(if (motion) 140 else 0)))
+                    .using(SizeTransform(clip = false) { _, _ -> tween(0) })
+            },
+            contentAlignment = Alignment.Center,
+            label = "glassPreview",
+        ) { g ->
+            when (g) {
+                0 -> Row(
+                    Modifier
+                        .padding(horizontal = 18.dp)
+                        .fillMaxWidth()
+                        .height(52.dp)
+                        .liquidGlassBar(
+                            backdrop = backdrop,
+                            shape = SmoothCorner(26.dp),
+                            palette = p,
+                            blurDp = s.tabBlur,
+                            refractionDp = s.tabRefraction,
+                            dispersion = s.tabDispersion,
+                            shadowAlpha = s.tabShadow,
+                            veil = s.tabBarOpacity,
+                            edgeStrength = s.tabEdge,
+                        ),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    listOf(Glyph.Book, Glyph.Note, Glyph.Chart, Glyph.Sparkles, Glyph.Gear).forEach {
+                        LineIcon(it, p.ink, 15.dp)
+                    }
                 }
-            }
 
-            1 -> Box(
-                Modifier.width(230.dp).height(52.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Box(
+                1 -> Box(
+                    Modifier.width(230.dp).height(52.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Box(
+                        Modifier
+                            .fillMaxSize()
+                            .clip(SmoothCorner(26.dp))
+                            .background(p.faint)
+                    )
+                    Box(
+                        Modifier
+                            .width(84.dp)
+                            .height(44.dp)
+                            .liquidGlassBar(
+                                backdrop = backdrop,
+                                shape = SmoothCorner(22.dp),
+                                palette = p,
+                                blurDp = s.lensBlur,
+                                refractionDp = s.lensRefraction,
+                                dispersion = s.lensDispersion,
+                                shadowAlpha = s.lensShadow,
+                                veil = s.tabLensOpacity,
+                                edgeStrength = s.lensEdge,
+                            ),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        LineIcon(Glyph.Book, p.ink, 16.dp)
+                    }
+                }
+
+                2 -> Box(
                     Modifier
-                        .fillMaxSize()
-                        .clip(SmoothCorner(26.dp))
-                        .background(p.faint)
-                )
-                Box(
-                    Modifier
-                        .width(84.dp)
-                        .height(44.dp)
+                        .padding(horizontal = 24.dp)
+                        .fillMaxWidth()
+                        .height(48.dp)
                         .liquidGlassBar(
                             backdrop = backdrop,
                             shape = SmoothCorner(22.dp),
                             palette = p,
-                            blurDp = s.lensBlur,
-                            refractionDp = s.lensRefraction,
-                            dispersion = s.lensDispersion,
-                            shadowAlpha = s.lensShadow,
-                            veil = s.tabLensOpacity,
-                            edgeStrength = s.lensEdge,
+                            blurDp = s.fieldGlassBlur,
+                            refractionDp = s.fieldGlassRefraction,
+                            dispersion = s.fieldGlassDispersion,
+                            shadowAlpha = s.fieldGlassShadow,
+                            veil = s.fieldGlassOpacity,
+                            edgeStrength = s.fieldGlassEdge,
                         ),
-                    contentAlignment = Alignment.Center,
+                    contentAlignment = Alignment.CenterStart,
                 ) {
-                    LineIcon(Glyph.Book, p.ink, 16.dp)
-                }
-            }
-
-            2 -> Box(
-                Modifier
-                    .padding(horizontal = 24.dp)
-                    .fillMaxWidth()
-                    .height(48.dp)
-                    .liquidGlassBar(
-                        backdrop = backdrop,
-                        shape = SmoothCorner(22.dp),
-                        palette = p,
-                        blurDp = s.fieldGlassBlur,
-                        refractionDp = s.fieldGlassRefraction,
-                        dispersion = s.fieldGlassDispersion,
-                        shadowAlpha = s.fieldGlassShadow,
-                        veil = s.fieldGlassOpacity,
-                        edgeStrength = s.fieldGlassEdge,
-                    ),
-                contentAlignment = Alignment.CenterStart,
-            ) {
-                Box(Modifier.padding(horizontal = 14.dp)) {
-                    Txt("问这本书的任何事", size = 12.5f, color = p.muted)
-                }
-            }
-
-            3 -> Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                listOf(Glyph.Link, Glyph.ArrowUp).forEach { glyph ->
-                    Box(
-                        Modifier
-                            .size(46.dp)
-                            .liquidGlassBar(
-                                backdrop = backdrop,
-                                shape = CircleShape,
-                                palette = p,
-                                blurDp = s.btnGlassBlur,
-                                refractionDp = s.btnGlassRefraction,
-                                dispersion = s.btnGlassDispersion,
-                                shadowAlpha = s.btnGlassShadow,
-                                veil = s.btnGlassOpacity,
-                                edgeStrength = s.btnGlassEdge,
-                            ),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        LineIcon(glyph, p.ink, 18.dp)
+                    Box(Modifier.padding(horizontal = 14.dp)) {
+                        Txt("问这本书的任何事", size = 12.5f, color = p.muted)
                     }
                 }
-            }
 
-            else -> Row(
-                Modifier
-                    .height(36.dp)
-                    .liquidGlassBar(
-                        backdrop = backdrop,
-                        shape = SmoothCorner(18.dp),
-                        palette = p,
-                        blurDp = s.bubbleGlassBlur,
-                        refractionDp = s.bubbleGlassRefraction,
-                        dispersion = s.bubbleGlassDispersion,
-                        shadowAlpha = s.bubbleGlassShadow,
-                        veil = s.bubbleGlassOpacity,
-                        edgeStrength = s.bubbleGlassEdge,
-                    )
-                    .padding(horizontal = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Box(
+                3 -> Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    listOf(Glyph.Link, Glyph.ArrowUp).forEach { glyph ->
+                        Box(
+                            Modifier
+                                .size(46.dp)
+                                .liquidGlassBar(
+                                    backdrop = backdrop,
+                                    shape = CircleShape,
+                                    palette = p,
+                                    blurDp = s.btnGlassBlur,
+                                    refractionDp = s.btnGlassRefraction,
+                                    dispersion = s.btnGlassDispersion,
+                                    shadowAlpha = s.btnGlassShadow,
+                                    veil = s.btnGlassOpacity,
+                                    edgeStrength = s.btnGlassEdge,
+                                ),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            LineIcon(glyph, p.ink, 18.dp)
+                        }
+                    }
+                }
+
+                else -> Row(
                     Modifier
-                        .size(16.dp)
-                        .clip(CircleShape)
-                        .background(accentTint(p, ui.accent))
-                )
-                Spacer(Modifier.width(8.dp))
-                Txt("已保存", size = 11f, color = p.ink)
+                        .height(36.dp)
+                        .liquidGlassBar(
+                            backdrop = backdrop,
+                            shape = SmoothCorner(18.dp),
+                            palette = p,
+                            blurDp = s.bubbleGlassBlur,
+                            refractionDp = s.bubbleGlassRefraction,
+                            dispersion = s.bubbleGlassDispersion,
+                            shadowAlpha = s.bubbleGlassShadow,
+                            veil = s.bubbleGlassOpacity,
+                            edgeStrength = s.bubbleGlassEdge,
+                        )
+                        .padding(horizontal = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(
+                        Modifier
+                            .size(16.dp)
+                            .clip(CircleShape)
+                            .background(accentTint(p, ui.accent))
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Txt("已保存", size = 11f, color = p.ink)
+                }
             }
         }
     }
