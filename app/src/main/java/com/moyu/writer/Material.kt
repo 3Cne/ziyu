@@ -38,8 +38,12 @@ import androidx.compose.ui.unit.dp
 object GlassStyle {
     const val fill = .62f
     const val blur = .34f
-    const val edge = 1.0f
-    const val rim = .34f
+    /** 卡片 / 弹窗边缘：外圈亮环的可见宽度（dp）。3.26.53 起不再为 0。 */
+    const val edge = .8f
+    /** 紧贴亮环内侧的次高光宽度（dp）：给纸面一点收边厚度，不是暗斜面。 */
+    const val innerEdge = .6f
+    /** 0..1 的边缘强度倍率；亮环 alpha 本身已经是克制值（顶 .35 级别，1 型玻璃一半）。 */
+    const val rim = 1f
     const val specular = .10f
     const val refraction = .20f
     const val shadow = .14f
@@ -142,11 +146,13 @@ fun MoyuSurface(
         fillOverride = GlassStyle.fill,
         blurOverride = GlassStyle.blur,
         grainOverride = GlassStyle.grain,
-        edgeWidth = 0f,
+        edgeWidth = GlassStyle.edge,
+        innerEdgeWidth = GlassStyle.innerEdge,
         rimStrength = GlassStyle.rim,
         specularStrength = GlassStyle.specular,
         refractionStrength = if (lite) 0f else GlassStyle.refraction,
-        // No outer frame: cards keep their shape from the fill/shadow only.
+        // 没有调用点显式要求的描边：边缘来自上面那圈「亮环 + 次高光」内缩轮廓，
+        // 不是画在裁切边界上的 borderColor 描边。
         borderColor = null,
         content = content,
     )

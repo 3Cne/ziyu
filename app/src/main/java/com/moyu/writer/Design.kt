@@ -73,6 +73,9 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.CornerBasedShape
+import androidx.compose.foundation.shape.CornerSize
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -120,6 +123,7 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.addOutline
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
@@ -143,8 +147,10 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
@@ -525,6 +531,7 @@ fun Modifier.liquidGlass(
     blurOverride: Float? = null,
     grainOverride: Boolean? = null,
     edgeWidth: Float = 1.1f,
+    innerEdgeWidth: Float = .6f,
     rimStrength: Float = 1f,
     specularStrength: Float = 1f,
     refractionStrength: Float = 1f,
@@ -631,19 +638,42 @@ fun Modifier.liquidGlass(
             center = Offset(w * .86f, h * .94f),
             radius = w * .72f,
         )
-        val edgeTone = lerp(p.ink, Color.White, d)
-        val rim = Brush.linearGradient(
-            colors = listOf(
-                edgeTone.copy(alpha = rimAlpha(mix(.22f, .24f))),
-                Color.White.copy(alpha = rimAlpha(mix(.78f, .06f))),
-                if (iridescent) accentColor.copy(
-                    alpha = rimAlpha(mix(.42f, .24f) * refractionStrength),
-                ) else Color.Transparent,
-                edgeTone.copy(alpha = rimAlpha(.16f)),
-            ),
-            start = Offset(0f, 0f),
-            end = Offset(w, h),
+        // 3.26.53：卡片 / 弹窗的边缘厚度。旧 rim 是「墨色 → 白高光 → 缀色」的斜向
+        // 渐变，而 MoyuSurface 传的 edgeWidth = 0f 让整条描边宽度为 0 —— 卡片边缘
+        // 实际只剩 .95dp 的 specular，看不出厚度。现在改成贴轮廓的「外圈亮环 +
+        // 内圈次高光」两道纯白竖渐变：顶亮、侧中、底暗，没有暗斜面、没有外发光。
+        // 亮度只有 1 型玻璃条的一半（顶 .35 / 侧 .18 / 底 .08 级别）；昼夜按
+        // darkAmount 连续插值（3.26.50 约定），过渡时不会硬翻。
+        val rim = Brush.verticalGradient(
+            0f to Color.White.copy(alpha = rimAlpha(mix(.35f, .30f))),
+            .45f to Color.White.copy(alpha = rimAlpha(mix(.18f, .15f))),
+            1f to Color.White.copy(alpha = rimAlpha(mix(.08f, .065f))),
         )
+        // 次高光比亮环再弱一档（约一半），两张主题都保持同一层「纸面收边」的观感。
+        val innerRim = Brush.verticalGradient(
+            0f to Color.White.copy(alpha = rimAlpha(mix(.16f, .13f))),
+            .45f to Color.White.copy(alpha = rimAlpha(mix(.09f, .07f))),
+            1f to Color.White.copy(alpha = rimAlpha(mix(.04f, .03f))),
+        )
+        // 亮环沿「内缩轮廓」画：整条线都落在表面内部，不依赖外层圆角裁掉一半，
+        // 也避免 0.8dp 细线被硬裁出锯齿。外圈可见宽度 = edgeWidth，内圈紧接其内。
+        val ringPx = edgeWidth.dp.toPx()
+        val innerRingPx = innerEdgeWidth.dp.toPx()
+        val rimShape: Shape? = if (rimStrength > 0f && ringPx > 0f) {
+            shape ?: SmoothCorner(radius.dp)
+        } else null
+        val outerRingPath = rimShape?.let {
+            insetOutlinePath(it, size, ringPx / 2f, layoutDirection, this)
+        }
+        val innerRingPath = if (rimShape != null && innerRingPx > 0f) {
+            insetOutlinePath(
+                rimShape,
+                size,
+                ringPx + innerRingPx / 2f,
+                layoutDirection,
+                this,
+            )
+        } else null
         onDrawWithContent {
             fun fillLayer(brush: Brush) {
                 if (outlinePath != null) drawPath(outlinePath, brush)
@@ -654,10 +684,9 @@ fun Modifier.liquidGlass(
             fillLayer(lowerCaustic)
             val frameWidth = edgeWidth.dp.toPx()
             if (outlinePath != null) {
+                // borderColor 是调用点显式要求的边框，语义不变，整条保留。
                 if (borderColor != null) {
                     drawPath(outlinePath, borderColor, style = Stroke(width = frameWidth))
-                } else if (rimStrength > 0f) {
-                    drawPath(outlinePath, rim, style = Stroke(width = frameWidth))
                 }
             } else if (borderColor != null) {
                 // A centred stroke loses its outer half to GlassSurface's
@@ -675,12 +704,26 @@ fun Modifier.liquidGlass(
                     cornerRadius = CornerRadius((r - inset).coerceAtLeast(0f)),
                     style = Stroke(width = frameWidth),
                 )
-            } else if (rimStrength > 0f) {
-                drawRoundRect(
-                    rim,
-                    cornerRadius = corner,
-                    style = Stroke(width = frameWidth),
-                )
+            }
+            if (borderColor == null && rimStrength > 0f) {
+                if (outerRingPath != null) {
+                    // 外圈亮环 + 内圈次高光各画在一条内缩轮廓上，两条相邻，
+                    // 合计约 1.4dp 的收边，但没有任何暗色斜面。
+                    translate(ringPx / 2f, ringPx / 2f) {
+                        drawPath(outerRingPath, rim, style = Stroke(width = ringPx))
+                    }
+                    if (innerRingPath != null) {
+                        translate(ringPx + innerRingPx / 2f, ringPx + innerRingPx / 2f) {
+                            drawPath(innerRingPath, innerRim, style = Stroke(width = innerRingPx))
+                        }
+                    }
+                } else if (outlinePath != null && frameWidth > 0f) {
+                    // 任意 Shape（无法精确内缩）退回「双倍线宽 + 裁掉外侧一半」，
+                    // 可见宽度仍等于 edgeWidth。
+                    clipPath(outlinePath) {
+                        drawPath(outlinePath, rim, style = Stroke(width = 2f * frameWidth))
+                    }
+                }
             }
             if (specular && specularStrength > 0f) {
                 drawLine(
@@ -729,6 +772,48 @@ fun Modifier.liquidGlass(
     }
 }
 
+/**
+ * 把 [shape] 的轮廓沿四边往里缩 [inset] px 后的路径。
+ *
+ * 不采样 / 腐蚀任意 Path：Shape 本身能在小一圈的尺寸上重新生成轮廓，只要把四个
+ * 圆角半径同步减掉 [inset]——胶囊、圆、固定 dp 圆角、连续曲率圆角（SmoothCornerShape）
+ * 都适用。只支持 [CornerBasedShape]；其它 Shape 返回 null，调用方退回「裁掉外侧
+ * 一半」的画法。3.26.53 的卡片 / 弹窗边缘亮环沿这条内缩轮廓画，整条线都落在表面
+ * 内部，不会被外层圆角硬裁；内圈次高光再往里缩一档，两圈相邻就是一条收边。
+ */
+private fun insetOutlinePath(
+    shape: Shape,
+    size: Size,
+    inset: Float,
+    layoutDirection: LayoutDirection,
+    density: Density,
+): Path? {
+    if (inset <= 0f) return null
+    val w = size.width - inset * 2f
+    val h = size.height - inset * 2f
+    if (w <= 2f || h <= 2f) return null
+    fun radiusOf(corner: CornerSize): Dp =
+        ((corner.toPx(size, density) - inset).coerceAtLeast(0f) / density.density).dp
+    val shrunk: Shape = when (shape) {
+        is SmoothCornerShape -> SmoothCornerShape(
+            CornerSize(radiusOf(shape.topStart)),
+            CornerSize(radiusOf(shape.topEnd)),
+            CornerSize(radiusOf(shape.bottomEnd)),
+            CornerSize(radiusOf(shape.bottomStart)),
+        )
+        is CornerBasedShape -> RoundedCornerShape(
+            topStart = radiusOf(shape.topStart),
+            topEnd = radiusOf(shape.topEnd),
+            bottomEnd = radiusOf(shape.bottomEnd),
+            bottomStart = radiusOf(shape.bottomStart),
+        )
+        else -> return null
+    }
+    return Path().apply {
+        addOutline(shrunk.createOutline(Size(w, h), layoutDirection, density))
+    }
+}
+
 @Composable
 fun GlassSurface(
     modifier: Modifier = Modifier,
@@ -745,6 +830,7 @@ fun GlassSurface(
     blurOverride: Float? = null,
     grainOverride: Boolean? = null,
     edgeWidth: Float = 1.1f,
+    innerEdgeWidth: Float = .6f,
     rimStrength: Float = 1f,
     specularStrength: Float = 1f,
     refractionStrength: Float = 1f,
@@ -782,6 +868,7 @@ fun GlassSurface(
             blurOverride = blurOverride,
             grainOverride = grainOverride,
             edgeWidth = edgeWidth,
+            innerEdgeWidth = innerEdgeWidth,
             rimStrength = rimStrength,
             specularStrength = specularStrength,
             refractionStrength = refractionStrength,
