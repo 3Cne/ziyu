@@ -872,22 +872,27 @@ private fun LibrarySettingsPage(store: AppStore, onBack: () -> Unit) {
         item { SectionCaption("尺寸") }
         item {
             SettingGroup {
-                Column {
-                    SettingRow("分栏", "${s.columns} 栏", Glyph.Grid)
-                    Row(
-                        androidx.compose.ui.Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
-                        horizontalArrangement = Arrangement.End,
-                    ) {
-                        Stepper(
-                            "${s.columns}",
-                            { store.updateSettings { it.copy(columns = (it.columns - 1).coerceAtLeast(2)) } },
-                            { store.updateSettings { it.copy(columns = (it.columns + 1).coerceAtMost(4)) } },
-                            minusEnabled = s.columns > 2,
-                            plusEnabled = s.columns < 4,
-                        )
+                // 3.26.52：分栏只在「网格」排布有意义（Library 的陈列面板同理，那边 3.26.48 已改），
+                // 设置页这行以前常驻显示；改走 MoyuExpand 按排布方式长出来 / 收回去。
+                // 连分隔线一起收，收起时组首不再留一条贴在顶边上的线。
+                MoyuExpand(expand = s.libraryMode == "grid") {
+                    Column(androidx.compose.ui.Modifier.fillMaxWidth()) {
+                        SettingRow("分栏", "${s.columns} 栏", Glyph.Grid)
+                        Row(
+                            androidx.compose.ui.Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.End,
+                        ) {
+                            Stepper(
+                                "${s.columns}",
+                                { store.updateSettings { it.copy(columns = (it.columns - 1).coerceAtLeast(2)) } },
+                                { store.updateSettings { it.copy(columns = (it.columns + 1).coerceAtMost(4)) } },
+                                minusEnabled = s.columns > 2,
+                                plusEnabled = s.columns < 4,
+                            )
+                        }
+                        RowDivider()
                     }
                 }
-                RowDivider()
                 Column {
                     SettingRow("卡片占比", "${(s.cardScale * 100).roundToInt()}%", Glyph.Layers)
                     InkSlider(
@@ -1023,17 +1028,21 @@ private fun WritingSettingsPage(store: AppStore, onBack: () -> Unit) {
                         )
                     }
                 }
-                if (s.sectionStyle == "custom") {
-                    Spacer(androidx.compose.ui.Modifier.height(10.dp))
-                    InkField(
-                        s.sectionSymbol,
-                        { value -> store.updateSettings { it.copy(sectionSymbol = value.take(24)) } },
-                        "输入分节符号，例如 ❋　❋　❋",
-                        minHeight = 48.dp,
-                        textSize = 14f,
-                    )
-                    Spacer(androidx.compose.ui.Modifier.height(5.dp))
-                    Txt("分节时会把这段符号单独放在空行里。", size = 8.5f, color = ui.palette.muted)
+                // 3.26.52：自定义符号输入行以前是 if 同帧出现/消失，所在列表高度硬跳；
+                // 改走统一展开包装 MoyuExpand（高度 + 淡入一起长出来，motion=none 降 tween(0)）。
+                MoyuExpand(expand = s.sectionStyle == "custom") {
+                    Column(androidx.compose.ui.Modifier.fillMaxWidth()) {
+                        Spacer(androidx.compose.ui.Modifier.height(10.dp))
+                        InkField(
+                            s.sectionSymbol,
+                            { value -> store.updateSettings { it.copy(sectionSymbol = value.take(24)) } },
+                            "输入分节符号，例如 ❋　❋　❋",
+                            minHeight = 48.dp,
+                            textSize = 14f,
+                        )
+                        Spacer(androidx.compose.ui.Modifier.height(5.dp))
+                        Txt("分节时会把这段符号单独放在空行里。", size = 8.5f, color = ui.palette.muted)
+                    }
                 }
             }
         }
@@ -1517,7 +1526,14 @@ private fun AboutPage(store: AppStore, onBack: () -> Unit) {
                     "重看功能引导",
                     "重新介绍书架、待办、提醒、纸张和外观",
                     Glyph.Sparkles,
-                    onClick = { store.updateSettings { it.copy(onboardingDone = false) } },
+                    // 3.26.52：3.26.51 起「是否播放」看的是 tutorialDone（已教过的组 id 列表），
+                    // 只置 onboardingDone=false 对 tutorialDone 里已含 tutorial.landing 的新用户无效。
+                    // 两个一起清：重启后 App.kt 的启动判断（!onboardingDone && 未教过 landing）会重放。
+                    onClick = {
+                        store.updateSettings {
+                            it.copy(tutorialDone = emptyList(), onboardingDone = false)
+                        }
+                    },
                 )
                 RowDivider()
                 SettingRow("重新设置全部偏好", "恢复默认主题、排版、动效和标签", Glyph.Undo, onClick = { resetSettings = true })
@@ -1608,7 +1624,14 @@ private fun AboutPage(store: AppStore, onBack: () -> Unit) {
             "主题、字体、书架排列、动效和标签名称会恢复默认。书籍、笔记和正文不会受影响。",
             "恢复",
             {
-                store.updateSettings { AppSettings() }
+                // 3.26.52：整体换成 AppSettings() 会把引导进度一起抹掉（tutorialDone / onboardingDone），
+                // 老用户重启后被当新手重播。这两个标记保留当前值，其余偏好照旧重置。
+                store.updateSettings { cur ->
+                    AppSettings().copy(
+                        tutorialDone = cur.tutorialDone,
+                        onboardingDone = cur.onboardingDone,
+                    )
+                }
                 resetSettings = false
                 ToastBus.show("偏好已恢复默认")
             },
