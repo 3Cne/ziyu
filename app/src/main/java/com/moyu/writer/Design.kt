@@ -1872,6 +1872,14 @@ fun ConfirmDialog(
 }
 
 /**
+ * 同窗口面板内容槽的默认横向留白（20dp）。
+ *
+ * `InlineModalSheet(bleedContent = true)` 会把这段留白从内容槽去掉，改由内容
+ * 自己用本常量补回：这样整幅横移的面板能滑到面板本体边缘，静止态内边距不变。
+ */
+val SHEET_CONTENT_INSET: Dp = 20.dp
+
+/**
  * A sheet that lives in the current window instead of a Dialog.
  *
  * Opening a Dialog moves window focus, which makes the IME disappear in one
@@ -1896,6 +1904,11 @@ fun InlineModalSheet(
     /** true = 面板铺满可用高度，内容自己滚（工作台类面板用；3.26.19 故事）。
      *  默认 false，其它面板保持「包内容高度 + 整块滚」的老行为。 */
     fillHeight: Boolean = false,
+    /** true = 内容槽不加横向留白（默认见 `SHEET_CONTENT_INSET`），由内容自己补回。
+     *  为什么存在这个开关：内容槽的横向 padding 相当于一层「内窗口」，整幅横移的
+     *  面板（故事、菜单等逐页横滑）滑到页边时会被它切出两道纸色竖边，用户读作
+     *  「边框把内容限制在窗口里」。默认 false = 老调用零变化。 */
+    bleedContent: Boolean = false,
     /** 固定在内容上方、不随内容滚的头；只在 fillHeight 时生效。 */
     pinnedContent: (@Composable ColumnScope.(close: () -> Unit) -> Unit)? = null,
     content: @Composable ColumnScope.(close: () -> Unit) -> Unit,
@@ -2036,7 +2049,10 @@ fun InlineModalSheet(
                                 Modifier
                                     .fillMaxWidth()
                                     .weight(1f)
-                                    .padding(horizontal = 20.dp)
+                                    .then(
+                                        if (bleedContent) Modifier
+                                        else Modifier.padding(horizontal = SHEET_CONTENT_INSET),
+                                    )
                                     .padding(top = 10.dp, bottom = 12.dp),
                             ) {
                                 content { close() }
@@ -2055,7 +2071,10 @@ fun InlineModalSheet(
                                 // bound notes could never be tapped to unbind.
                                 .navigationBarsPadding()
                                 .verticalScroll(rememberScrollState())
-                                .padding(horizontal = 20.dp)
+                                .then(
+                                    if (bleedContent) Modifier
+                                    else Modifier.padding(horizontal = SHEET_CONTENT_INSET),
+                                )
                                 .padding(top = 10.dp, bottom = 24.dp),
                         ) {
                             content { close() }
