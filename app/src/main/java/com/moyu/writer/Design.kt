@@ -6,12 +6,8 @@ import android.os.Handler
 import android.os.Looper
 import android.view.HapticFeedbackConstants
 import android.view.WindowManager
-import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideOutHorizontally
-import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.FiniteAnimationSpec
@@ -204,20 +200,17 @@ data class InkUi(
 )
 
 val LocalInk = staticCompositionLocalOf {
+    // 3.26.55：静态兜底只在没有 MoyuTheme 时生效（@Preview、以后可能的新入口），
+    // 所以要和 AppSettings() 的默认外观一致（3.26.52 起：theme=system / accent=茶褐
+    // 0xFF9A4B43 / font=sans / .93）。palette 与 accent 走和 MoyuTheme 相同的映射，
+    // 不在这里另抄一份颜色；静态兜底不是 @Composable、读不到 isSystemInDarkTheme，
+    // 因此固定浅色分支（与原本的浅色纸底一致）。
+    val defaults = AppSettings()
     InkUi(
-        palette = InkPalette(
-            bgTop = Color(0xFFF8F6F1),
-            bgBottom = Color(0xFFEFEAE0),
-            paper = Color(0xFFF7F3EA),
-            ink = Color(0xFF191813),
-            muted = Color(0xFF8A857B),
-            faint = Color(0x0F1B1710),
-            line = Color(0x1A1B1710),
-            darkAmount = 0f,
-        ),
-        settings = AppSettings(),
-        accent = Color(0xFF22221E),
-        serif = true,
+        palette = paletteFor(defaults.theme, dark = false),
+        settings = defaults,
+        accent = accentFor(defaults.accent, dark = false),
+        serif = defaults.font != "sans",
     )
 }
 
@@ -1824,37 +1817,6 @@ fun SectionTitle(title: String, subtitle: String? = null, trailing: @Composable 
             }
         }
         Row(verticalAlignment = Alignment.CenterVertically, content = trailing)
-    }
-}
-
-@Composable
-fun <T> AnimatedPane(
-    targetState: T,
-    label: String = "pane",
-    modifier: Modifier = Modifier,
-    content: @Composable (T) -> Unit,
-) {
-    AnimatedContent(
-        targetState = targetState,
-        modifier = modifier,
-        transitionSpec = {
-            (
-                fadeIn(spring(MOYU_DAMPING, 500f)) +
-                    slideInHorizontally(spring(MOYU_DAMPING, 420f)) { full ->
-                        if (targetState != null) full / 4 else -full / 4
-                    }
-                ) togetherWith (
-                fadeOut(spring(MOYU_DAMPING, 520f)) +
-                    slideOutHorizontally(spring(MOYU_DAMPING, 460f)) { full ->
-                        if (targetState != null) -full / 5 else full / 5
-                    }
-                )
-        },
-        label = label,
-    ) { state ->
-        Column(Modifier.fillMaxWidth()) {
-            content(state)
-        }
     }
 }
 
