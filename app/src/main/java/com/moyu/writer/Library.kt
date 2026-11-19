@@ -816,57 +816,6 @@ private fun BookListRow(book: Book, groupName: String?, onClick: () -> Unit) {
 }
 
 @Composable
-private fun AddBookTile(onClick: () -> Unit) {
-    val ui = LocalInk.current
-    Column(Modifier.fillMaxWidth().bouncy(scale = .96f) { onClick() }) {
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .aspectRatio(.68f)
-                .clip(SmoothCorner(ui.settings.coverRadius.dp))
-                .background(ui.palette.faint)
-                .border(1.dp, ui.palette.line, SmoothCorner(ui.settings.coverRadius.dp)),
-            contentAlignment = Alignment.Center,
-        ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Box(
-                    Modifier
-                        .size(43.dp)
-                        .clip(CircleShape)
-                        .background(ui.palette.ink.copy(alpha = .08f)),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    LineIcon(Glyph.Plus, ui.palette.ink, 20.dp)
-                }
-                Spacer(Modifier.height(10.dp))
-                Txt("新建", size = 12f, color = ui.palette.ink, weight = FontWeight.Medium)
-            }
-        }
-        Spacer(Modifier.height(10.dp))
-        Txt("新的故事", size = 14.5f, color = ui.palette.ink, weight = FontWeight.Medium)
-    }
-}
-
-@Composable
-private fun AddBookRow(onClick: () -> Unit) {
-    val ui = LocalInk.current
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .clip(SmoothCorner(22.dp))
-            .background(ui.palette.faint)
-            .border(.8.dp, ui.palette.line, SmoothCorner(22.dp))
-            .bouncy(scale = .985f) { onClick() }
-            .padding(horizontal = 16.dp, vertical = 15.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        LineIcon(Glyph.Plus, ui.palette.ink, 18.dp)
-        Spacer(Modifier.width(10.dp))
-        Txt("新建一本书", size = 13.5f, weight = FontWeight.Medium)
-    }
-}
-
-@Composable
 fun BookEditorDialog(
     existing: Book?,
     groups: List<Group> = emptyList(),
