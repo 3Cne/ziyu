@@ -15,6 +15,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.security.MessageDigest
+import kotlin.math.abs
 
 /**
  * 3.26.43：故事圣经「全书补齐」。
@@ -33,6 +34,11 @@ import java.security.MessageDigest
  * 其余边界沿用 3.26.23：模型输出解析不了重试一次再静默放弃；落库切主线程，避免与正文保存
  * 互相覆盖；`origin == "author"` 的作者手改条目由 [AiBible.mutate] 保护，自动整理只记冲突不覆盖。
  *
+ * 3.26.56：一章不再只读前 6000 字。正文按约 2000–2500 字切块（相邻 200 字重叠、优先段落 /
+ * 句末切），每块各跑一次同一套 prompt + 解析，结果按名字 / 事件标题 / 人名对 / 情节点文本
+ * 去重合并；冲突时**先写入的块优先**，后块只补空字段。每章最多 6 块（≈1.4 万字），超出的
+ * 正文不读，但日志会写清「还有 N 字未读」。节流 / 失败冷却 / 无新信息不写 / journal 不变。
+ *
  * `aiBibleSync` 开关只拦「自动触发」；手动补齐是作者明确点的，只要 AI 开着、有 Key 就允许。
  */
 object AiBibleSync {
@@ -44,8 +50,22 @@ object AiBibleSync {
     /** 一章整理失败后，这段时间内不再自动重试（防止坏输出无限烧请求）。 */
     private const val RETRY_COOLDOWN_MS = 10 * 60 * 1000L
 
-    /** 送进 prompt 的正文上限；超了截断并注明。 */
-    private const val MAX_CHAPTER_CHARS = 6000
+    /** 3.26.56：长章按块读，不再只读前 6000 字。目标块大小 / 切点搜索下界 / 硬上限（字）。 */
+    private const val CHUNK_TARGET_CHARS = 2400
+    private const val CHUNK_MIN_CHARS = 2000
+    private const val CHUNK_MAX_CHARS = 2500
+
+    /** 相邻块重叠字数：横跨两块的一句话（人物第一次出场、事件的因果）不会被整齐切断。 */
+    private const val CHUNK_OVERLAP_CHARS = 200
+
+    /**
+     * 每章最多读几块。6 块 ≈ 1.3–1.4 万字（总送进 prompt 的正文量 ≈ 1.4 万）；
+     * 超出的正文不读，但日志会写清「跳过 N 字未读」，不静默丢。
+     */
+    private const val MAX_CHUNKS_PER_CHAPTER = 6
+
+    /** 一条事件最多带几个牵涉人名（块间取并集时按这个上限截）。 */
+    private const val MAX_EVENT_NAMES = 6
 
     /** 一次整理返回四类 JSON；思考关掉，免得预算全花在 reasoning 上。 */
     private const val MAX_TOKENS = 3000
@@ -307,40 +327,94 @@ object AiBibleSync {
             Log.d(TAG, "开始整理《${book.title}》${fresh.title}（${countWords(fresh.content)} 字）")
             // 3.26.50：提示词按这本书实例化（内置 8 种 + 本书已有的自定义关系类型）。
             val system = systemFor(freshBook)
-            when (val outcome = askPlan(settings, key, system, buildUser(freshBook, fresh))) {
-                is AskOutcome.Down -> {
+            // 3.26.56：长章按块读，不再只取前 6000 字——每块各跑一次同一套抽取，结果合并后一次落库。
+            val content = fresh.content.trim()
+            val chunks = splitChunks(content)
+            val readChars = chunks.lastOrNull()?.end ?: content.length
+            val unreadChars = (content.length - readChars).coerceAtLeast(0)
+            Log.d(
+                TAG,
+                "分块《${fresh.title}》：${chunks.size} 块（每块约 $CHUNK_TARGET_CHARS 字、重叠 " +
+                    "$CHUNK_OVERLAP_CHARS 字、上限 $MAX_CHUNKS_PER_CHAPTER 块），已读 $readChars 字，" +
+                    (if (unreadChars > 0) "跳过 $unreadChars 字未读（超出块数上限）" else "跳过 0 字"),
+            )
+            val merger = PlanMerger()
+            var skippedChunks = 0
+            var failure: AskOutcome? = null
+            var failureChunk = 0
+            for ((chunkIndex, chunk) in chunks.withIndex()) {
+                when (
+                    val outcome = askPlan(
+                        settings,
+                        key,
+                        system,
+                        buildUser(freshBook, fresh, chunk, chunkIndex, chunks.size),
+                    )
+                ) {
+                    is AskOutcome.Down -> {
+                        failure = outcome
+                        failureChunk = chunkIndex + 1
+                        break
+                    }
+                    is AskOutcome.Bad -> {
+                        failure = outcome
+                        failureChunk = chunkIndex + 1
+                        break
+                    }
+                    is AskOutcome.Ok -> {
+                        if (outcome.plan.skip) {
+                            skippedChunks++
+                        } else {
+                            merger.add(outcome.plan)
+                        }
+                    }
+                }
+            }
+            val merged = merger.build()
+            // 失败前已经读出来的块也落库，别白烧前面几块的请求；但这一章不算整理完（不记 hash），
+            // 下一轮会整章重过一遍——前几块此时已「无新信息」，不会重复写 journal。
+            if (!merged.isEmpty) apply(ctx, store, bookId, fresh.id, merged)
+            // 失败时把「已经读出来的那几块到底写没写」说清楚，别让日志撒谎。
+            val partialNote =
+                if (merged.isEmpty) "前 ${failureChunk - 1} 块没有可写数据"
+                else "前 ${failureChunk - 1} 块已落库（本章不算整理完，仍会重试）"
+            val failed = failure
+            if (failed != null) {
+                if (failed is AskOutcome.Down) {
                     // 网络 / 服务挂了：后面的章节多半也一样，停掉这一轮，等下次触发。
-                    Log.d(TAG, "请求失败，停止本轮：${outcome.reason}")
+                    Log.d(
+                        TAG,
+                        "第 $failureChunk/${chunks.size} 块请求失败，停止本轮（$partialNote）：${failed.reason}",
+                    )
                     markCooldown(bookId, fresh.id)
                     break
                 }
-                is AskOutcome.Bad -> {
-                    // 模型输出两次都解析不了：记冷却、跳过这一章，别拖累其它章节。
-                    Log.d(TAG, "输出不是合法 JSON，跳过这一章：${fresh.title}")
-                    markCooldown(bookId, fresh.id)
-                    continue
-                }
-                is AskOutcome.Ok -> {
-                    val plan = outcome.plan
-                    if (plan.skip) {
-                        Log.d(TAG, "本章没有可整理的内容（skip）：${fresh.title}")
-                    } else if (plan.isEmpty) {
-                        Log.d(TAG, "解析结果为空，不写数据：${fresh.title}")
-                    } else {
-                        apply(ctx, store, bookId, fresh.id, plan)
-                    }
-                    // 只有正文在请求期间没被改过，才把送出去的那份 hash 记成已整理；
-                    // 改过就留空，下一轮按新正文重整理。
-                    val latest = store.book(bookId)?.chapters?.firstOrNull { it.id == fresh.id }?.content
-                    if (latest != null && contentHash(latest) == sentHash) {
-                        recordHash(ctx, bookId, fresh.id, sentHash)
-                        stored[fresh.id] = sentHash
-                        clearCooldown(bookId, fresh.id)
-                    }
-                    done++
-                    publish(bookId, done, chapters.size, fresh.title, running = true)
+                // 模型输出两次都解析不了：记冷却、跳过这一章，别拖累其它章节。
+                Log.d(
+                    TAG,
+                    "第 $failureChunk/${chunks.size} 块输出不是合法 JSON，跳过这一章" +
+                        "（$partialNote）：${fresh.title}",
+                )
+                markCooldown(bookId, fresh.id)
+                continue
+            }
+            if (merged.isEmpty) {
+                if (skippedChunks == chunks.size) {
+                    Log.d(TAG, "本章没有可整理的内容（skip）：${fresh.title}")
+                } else {
+                    Log.d(TAG, "解析结果为空，不写数据：${fresh.title}")
                 }
             }
+            // 只有正文在请求期间没被改过，才把送出去的那份 hash 记成已整理；
+            // 改过就留空，下一轮按新正文重整理。
+            val latest = store.book(bookId)?.chapters?.firstOrNull { it.id == fresh.id }?.content
+            if (latest != null && contentHash(latest) == sentHash) {
+                recordHash(ctx, bookId, fresh.id, sentHash)
+                stored[fresh.id] = sentHash
+                clearCooldown(bookId, fresh.id)
+            }
+            done++
+            publish(bookId, done, chapters.size, fresh.title, running = true)
         }
         publish(bookId, done, chapters.size, "", running = false)
         Log.d(TAG, "本轮整理结束《${book.title}》：已整理 $done/${chapters.size} 章")
@@ -412,7 +486,17 @@ object AiBibleSync {
         disableThinking = true,
     )
 
-    private fun buildUser(book: Book, chapter: Chapter): String = buildString {
+    /**
+     * 3.26.56：一章切块后，每块单独送一次 prompt。系统提示词（[SYSTEM]）一个字没动，
+     * 只在用户消息里说明「这是整章的第几段、只整理这一段」。
+     */
+    private fun buildUser(
+        book: Book,
+        chapter: Chapter,
+        chunk: ChapterChunk,
+        chunkIndex: Int,
+        chunkCount: Int,
+    ): String = buildString {
         append("已有故事圣经：\n")
         append(AiBible.summary(book))
         append("\n\n这一章：")
@@ -427,18 +511,99 @@ object AiBibleSync {
         append(chapter.title)
         append("（")
         append(countWords(chapter.content))
-        append(" 字）\n正文：\n")
-        val content = chapter.content.trim()
-        val clipped = content.length > MAX_CHAPTER_CHARS
-        append(if (clipped) content.take(MAX_CHAPTER_CHARS) else content)
-        if (clipped) {
-            append("\n\n（正文共 ")
-            append(content.length)
-            append(" 字，这里只截取前 ")
-            append(MAX_CHAPTER_CHARS)
-            append(" 字，结尾部分没读）")
+        append(" 字）")
+        if (chunkCount > 1) {
+            append("\n注意：这一章较长，正文分 ")
+            append(chunkCount)
+            append(" 段依次整理；这是第 ")
+            append(chunkIndex + 1)
+            append(" 段（相邻两段有少量重叠）。只整理这一段里已经写明的信息。")
         }
+        append("\n正文：\n")
+        append(chunk.text)
     }
+
+    // ───────────────────────── 3.26.56 长章分块 ─────────────────────────
+
+    /** 一章正文里的一块：`start` / `end` 是相对「trim 过的整章正文」的下标，用来算跳过了多少字。 */
+    private class ChapterChunk(val text: String, val start: Int, val end: Int)
+
+    /**
+     * 把一章正文切成约 [CHUNK_MIN_CHARS]–[CHUNK_MAX_CHARS] 字的块，相邻块重叠
+     * [CHUNK_OVERLAP_CHARS] 字；切点优先段落边界，其次句末标点，都没有才硬切。
+     *
+     * 最多切 [MAX_CHUNKS_PER_CHAPTER] 块（≈1.4 万字）。上限之外的正文不读，调用方按最后一块的
+     * [ChapterChunk.end] 把「还有多少字未读」写进日志，不静默丢。
+     */
+    private fun splitChunks(content: String): List<ChapterChunk> {
+        if (content.isEmpty()) return emptyList()
+        if (content.length <= CHUNK_MAX_CHARS) {
+            return listOf(ChapterChunk(content, 0, content.length))
+        }
+        val chunks = ArrayList<ChapterChunk>(MAX_CHUNKS_PER_CHAPTER)
+        var start = 0
+        while (start < content.length && chunks.size < MAX_CHUNKS_PER_CHAPTER) {
+            val end = if (content.length - start <= CHUNK_MAX_CHARS) {
+                content.length
+            } else {
+                cutEnd(content, start)
+            }
+            if (end <= start) break
+            chunks += ChapterChunk(content.substring(start, end), start, end)
+            if (end >= content.length) break
+            val next = end - CHUNK_OVERLAP_CHARS
+            // 至少往前走：切点再偏也不会原地打转。
+            start = if (next > start) next else end
+        }
+        return chunks
+    }
+
+    /**
+     * 从 [start] 找本块的结尾（不含）：在「下界 start+2000」到「硬上限 start+2500」之间，
+     * 取离目标点（start+2250）最近的段落边界 → 句末标点 → 都不行就硬切在目标点。
+     */
+    private fun cutEnd(text: String, start: Int): Int {
+        val minEnd = (start + CHUNK_MIN_CHARS).coerceAtMost(text.length)
+        val maxEnd = (start + CHUNK_MAX_CHARS).coerceAtMost(text.length)
+        if (maxEnd <= minEnd) return maxEnd
+        val target = (start + CHUNK_TARGET_CHARS).coerceIn(minEnd, maxEnd)
+
+        // 1) 段落边界：中文小说里换行就是分段，切在连续换行之后。
+        var best = -1
+        var i = minEnd
+        while (i < maxEnd) {
+            if (text[i] == '\n') {
+                var j = i
+                while (j < maxEnd && text[j] == '\n') j++
+                if (j > minEnd && (best < 0 || abs(j - target) < abs(best - target))) best = j
+                i = j
+            } else {
+                i++
+            }
+        }
+        if (best > 0) return best
+
+        // 2) 句末标点（连同紧跟的收尾引号 / 括号）：切在标点之后。
+        best = -1
+        i = minEnd
+        while (i < maxEnd) {
+            if (SENTENCE_ENDS.indexOf(text[i]) >= 0) {
+                var j = i + 1
+                while (j < maxEnd && CLOSERS.indexOf(text[j]) >= 0) j++
+                if (j > minEnd && (best < 0 || abs(j - target) < abs(best - target))) best = j
+                i = j
+            } else {
+                i++
+            }
+        }
+        if (best > 0) return best
+
+        // 3) 实在找不到边界，硬切在目标点。
+        return target
+    }
+
+    private const val SENTENCE_ENDS = "。！？；…!?;."
+    private const val CLOSERS = "”’」』）》】\"'"
 
     // ───────────────────────── 落库 ─────────────────────────
 
@@ -492,14 +657,22 @@ object AiBibleSync {
                 skipped++
             }
         }
+        // 3.26.56：旧写法只在开头取一次 book，而 AppStore.mutate 每次都会换掉 data。
+        // 一章合并多块之后，同一章里新出现的角色 / 关系 / 事件必须能被下一类看到，
+        // 所以每类之前重新取一次最新 book（否则「本章新角色之间的关系」会整条被跳过）。
+        val afterCharacters = store.book(bookId)
+        if (afterCharacters == null) {
+            Log.d(TAG, "整理结果没处可写：书已经不在了")
+            return
+        }
         for (args in plan.relations) {
             val fromName = args.optString("from").trim()
             val toName = args.optString("to").trim()
             if (fromName.isNotBlank() && toName.isNotBlank()) {
-                val from = book.bible.characters.firstOrNull { it.name == fromName }
-                val to = book.bible.characters.firstOrNull { it.name == toName }
+                val from = afterCharacters.bible.characters.firstOrNull { it.name == fromName }
+                val to = afterCharacters.bible.characters.firstOrNull { it.name == toName }
                 if (from != null && to != null) {
-                    val old = book.bible.relations.firstOrNull {
+                    val old = afterCharacters.bible.relations.firstOrNull {
                         (it.from == from.id && it.to == to.id) || (it.from == to.id && it.to == from.id)
                     }
                     val rawKind = args.optString("relation").trim()
@@ -507,7 +680,7 @@ object AiBibleSync {
                         // 3.26.50：无变化判据同时比 kind / kindLabel / kindTier（任一不同就算有变化），
                         // 换算口径与 AiBible.mutate 的落库逻辑是同一个函数，不会「判据说没变、落库却改了」。
                         // 以前只比 kind：自定义关系被自动整理改名时 kind 都是 OTHER，会被误判无变化跳过。
-                        val spec = relationTypeSpec(rawKind, old, book.bible)
+                        val spec = relationTypeSpec(rawKind, old, afterCharacters.bible)
                         if (rawKind.isBlank() ||
                             (spec.kind == old.kind && spec.label == old.kindText && spec.tier == old.tier)
                         ) {
@@ -525,17 +698,22 @@ object AiBibleSync {
                 skipped++
             }
         }
+        val afterRelations = store.book(bookId)
+        if (afterRelations == null) {
+            Log.d(TAG, "整理结果没处可写：书已经不在了")
+            return
+        }
         for (args in plan.events) {
             // 事件归属这一章：直接给 chapterId，别让模型猜标题。
             // 已经存在的事件（同名同时间）保住原有的多章 / 出场角色关联，只把本章并进去，
             // 免得自动整理把作者手动挂的第二章、人物抹掉。
             val title = args.optString("title").trim()
             val whenText = args.optString("whenText").trim()
-            val exact = book.bible.events.firstOrNull { it.title == title && it.whenText == whenText }
+            val exact = afterRelations.bible.events.firstOrNull { it.title == title && it.whenText == whenText }
             // 本章这一条没带时间、而书里同名的只有一条时按标题合并：同一件事在不同章的正文里
             // 很容易一边写得出时间、一边写不出。两边都带了不同时间就当成两件事，不硬并。
             val byTitle = if (exact == null && whenText.isBlank()) {
-                book.bible.events.filter { it.title == title }.takeIf { it.size == 1 }?.first()
+                afterRelations.bible.events.filter { it.title == title }.takeIf { it.size == 1 }?.first()
             } else {
                 null
             }
@@ -550,14 +728,16 @@ object AiBibleSync {
                 args.put("chapterIds", JSONArray(chapterIds))
                 val names = LinkedHashSet<String>()
                 old.characterIds.forEach { id ->
-                    book.bible.characters.firstOrNull { it.id == id }?.name?.let { names.add(it) }
+                    afterRelations.bible.characters.firstOrNull { it.id == id }?.name?.let { names.add(it) }
                 }
                 names.addAll(extractedNames)
                 if (names.isNotEmpty()) args.put("characters", JSONArray(names))
                 // 本章已在事件里、时间没变、补充说明没变、牵涉的人也没多 → 不用重写。
                 val whenChanged = args.has("whenText") && whenText.isNotBlank() && whenText != old.whenText
                 val noteChanged = args.has("note") && args.optString("note").trim() != old.note
-                val castIds = extractedNames.map { n -> book.bible.characters.firstOrNull { it.name == n }?.id }
+                val castIds = extractedNames.map { n ->
+                    afterRelations.bible.characters.firstOrNull { it.name == n }?.id
+                }
                 val castUnchanged = castIds.none { it == null } && castIds.filterNotNull().all { it in old.characterIds }
                 if (!whenChanged && !noteChanged && castUnchanged && chapterId in old.chapterIds) {
                     unchanged++
@@ -572,11 +752,16 @@ object AiBibleSync {
                 skipped++
             }
         }
+        val afterEvents = store.book(bookId)
+        if (afterEvents == null) {
+            Log.d(TAG, "整理结果没处可写：书已经不在了")
+            return
+        }
         if (plan.beats.isNotEmpty()) {
-            val old = book.bible.outline.firstOrNull { it.chapterId == chapter.id }
+            val old = afterEvents.bible.outline.firstOrNull { it.chapterId == chapter.id }
             if (old != null && old.beats.map { it.text } == plan.beats) {
                 unchanged++
-            } else if (book.chapters.count { it.title == chapter.title } > 1) {
+            } else if (afterEvents.chapters.count { it.title == chapter.title } > 1) {
                 // AiBible.mutate 的 outline 用章名定位章节：章名重名时可能写到别的章上，
                 // 宁可不写情节点，也不把内容挂错。
                 Log.d(TAG, "章名重复（${chapter.title}），跳过情节点")
@@ -820,6 +1005,145 @@ object AiBibleSync {
             get() = characters.isEmpty() && relations.isEmpty() &&
                 events.isEmpty() && beats.isEmpty()
     }
+
+    /**
+     * 3.26.56：一章多块抽取结果的合并器。
+     *
+     * 去重口径：角色按名字、关系按无序人名对、事件按标题、情节点按去掉空白 / 标点后的文本。
+     * 冲突口径：**先写入的块优先**——前块已经给出的 role / note / relation / whenText 不被后块
+     * 覆盖；后块只能补空字段、给事件的人名集合补人（并集）。
+     */
+    private class PlanMerger {
+        private val characters = LinkedHashMap<String, JSONObject>()
+        private val relations = LinkedHashMap<String, JSONObject>()
+        private val events = LinkedHashMap<String, JSONObject>()
+        private val beats = LinkedHashMap<String, String>()
+
+        fun add(plan: Plan) {
+            plan.characters.forEach { mergeCharacter(it) }
+            plan.relations.forEach { mergeRelation(it) }
+            plan.events.forEach { mergeEvent(it) }
+            plan.beats.forEach { mergeBeat(it) }
+        }
+
+        fun build(): Plan = Plan(
+            characters = characters.values.toList(),
+            relations = relations.values.toList(),
+            events = events.values.toList(),
+            beats = beats.values.toList(),
+        )
+
+        private fun mergeCharacter(src: JSONObject) {
+            val name = src.optString("name").trim()
+            if (name.isBlank()) return
+            val old = characters[name]
+            if (old == null) {
+                characters[name] = JSONObject().apply {
+                    put("name", name)
+                    put("role", src.optString("role").trim())
+                    put("note", src.optString("note").trim())
+                }
+            } else {
+                fillBlank(old, src, "role")
+                fillBlank(old, src, "note")
+            }
+        }
+
+        private fun mergeRelation(src: JSONObject) {
+            val from = src.optString("from").trim()
+            val to = src.optString("to").trim()
+            if (from.isBlank() || to.isBlank() || from == to) return
+            // 关系是无向的：A—B 与 B—A 是同一对（与 applyOnMain 的匹配口径一致）。
+            val key = if (from <= to) "$from\u0000$to" else "$to\u0000$from"
+            val old = relations[key]
+            if (old == null) {
+                relations[key] = JSONObject().apply {
+                    put("from", from)
+                    put("to", to)
+                    val relation = src.optString("relation").trim()
+                    if (relation.isNotBlank()) put("relation", relation)
+                }
+            } else {
+                fillBlank(old, src, "relation")
+            }
+        }
+
+        private fun mergeEvent(src: JSONObject) {
+            val title = src.optString("title").trim()
+            if (title.isBlank()) return
+            val srcWhen = src.optString("whenText").trim().let { if (it == "null") "" else it }
+            val base = events[title]
+            // 先写入的块优先：同名且时间不冲突 → 同一件事，只补空字段 / 并人名。
+            // 同名但两边都写了**不同**的规范化时间 → 是两件事（与 applyOnMain 的判据一致），
+            // 另存一条，免得后块的时间把前块已写死的时间顶掉、或整件事被合并丢掉。
+            val old = if (base == null) null else {
+                val baseWhen = base.optString("whenText").trim()
+                if (srcWhen.isNotBlank() && baseWhen.isNotBlank() && srcWhen != baseWhen) {
+                    events[title + "\u0000" + srcWhen]
+                } else {
+                    base
+                }
+            }
+            if (old == null) {
+                val fresh = JSONObject().apply {
+                    put("title", title)
+                    fillBlank(this, src, "whenText")
+                    fillBlank(this, src, "note")
+                }
+                unionEventNames(fresh, src)
+                val key = if (base == null) title else title + "\u0000" + srcWhen
+                events[key] = fresh
+            } else {
+                fillBlank(old, src, "whenText")
+                fillBlank(old, src, "note")
+                unionEventNames(old, src)
+            }
+        }
+
+        /** 同名事件在不同块里带的牵涉人取并集，最多 [MAX_EVENT_NAMES] 个（保持首次出现顺序）。 */
+        private fun unionEventNames(old: JSONObject, src: JSONObject) {
+            val names = ArrayList<String>(MAX_EVENT_NAMES)
+            fun collect(arr: JSONArray?) {
+                if (arr == null) return
+                for (i in 0 until arr.length()) {
+                    if (names.size >= MAX_EVENT_NAMES) return
+                    val name = arr.optString(i).trim()
+                    if (name.isNotBlank() && name != "null" && name !in names) names += name
+                }
+            }
+            collect(old.optJSONArray("characters"))
+            collect(src.optJSONArray("characters"))
+            if (names.isNotEmpty()) old.put("characters", JSONArray(names))
+        }
+
+        /** 后块只补空字段：前块已经写死的 role / note / relation / whenText 不覆盖。 */
+        private fun fillBlank(dst: JSONObject, src: JSONObject, key: String) {
+            if (dst.optString(key).isNotBlank()) return
+            val value = src.optString(key).trim()
+            if (value.isNotBlank() && value != "null") dst.put(key, value)
+        }
+
+        private fun mergeBeat(text: String) {
+            val value = text.trim()
+            if (value.isBlank()) return
+            val key = beatKey(value)
+            if (key.isBlank() || beats.containsKey(key)) return
+            beats[key] = value
+        }
+    }
+
+    /** 情节点去重键：去掉空白和常见标点，避免相邻块把同一句写成「……。」和「……」两条。 */
+    private fun beatKey(text: String): String {
+        val sb = StringBuilder(text.length)
+        for (c in text) {
+            if (c.isWhitespace()) continue
+            if (CJK_PUNCT.indexOf(c) >= 0) continue
+            sb.append(c)
+        }
+        return sb.toString()
+    }
+
+    private const val CJK_PUNCT = "，。！？；：、,.!?;:…—-“”‘’\"'（）()「」『』【】《》"
 
     // ───────────────────────── 侧车 sync-state.json ─────────────────────────
 
