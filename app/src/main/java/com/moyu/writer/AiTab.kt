@@ -1483,7 +1483,7 @@ fun AiScreen(
                             label = AiTools.label(call.name),
                             args = traceArgs(call.args),
                             result = reply.replace(Regex("\\s+"), " ").trim().take(90),
-                            ok = !reply.startsWith("error:"),
+                            ok = AiToolResult.isOk(reply),
                             elapsedMs = System.currentTimeMillis() - started,
                         )
                         chat.setTools(id, traces.toList())
