@@ -567,7 +567,14 @@ DepthStack(
                 TutorialOverlay(
                     group = activeTutorial,
                     registry = tutorialRegistry,
-                    onFinished = { tutorial.finish() },
+                    onFinished = {
+                        // 3.26.57：重看入口是在设置页之上起全屏 PPT，结束时栈底仍是设置页，
+                        // 引导一散就读成「重看把人留在了设置里」。收尾统一回书架 tab，
+                        // 与首启落点一致（和根 tab 返回键同一个写法，走既有 tab 转场规则）。
+                        // 首启时栈底本来就是 Library：列表结构相等，不写状态、不会多一次转场。
+                        stack = listOf(Screen.Library)
+                        tutorial.finish()
+                    },
                 )
             }
         }
