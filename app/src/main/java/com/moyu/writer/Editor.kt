@@ -201,8 +201,10 @@ import com.kyant.backdrop.effects.vibrancy
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.findViewTreeLifecycleOwner
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.LocalTime
@@ -570,6 +572,45 @@ fun WritingScreen(
     val latestTodosChange by androidx.compose.runtime.rememberUpdatedState(onTodosChange)
     val lifecycleOwner = LocalView.current.findViewTreeLifecycleOwner()
 
+    // 3.26.57 历史版本自动存档：上次快照时间 + 距上次快照累计改动的字数。
+    // 这两个状态**不随 seedKey 重建**：原生 EditText 的 TextWatcher 只创建一次并把
+    // 它们捕进闭包（和 bodyScrollTick 一个写法）；换章由下面的 effect 复位数值，
+    // 不能换对象，否则原生那边数到的永远是旧章。
+    val autoLastTs = remember { mutableLongStateOf(0L) }
+    val autoChars = remember { mutableIntStateOf(0) }
+    LaunchedEffect(seedKey) {
+        autoChars.intValue = 0
+        // 盘上已有快照就接着它的时间算节流；没有就以 0 起算（首次保存必定到点，
+        // 先给这一章留一个起点，之后靠 8 分钟 / 1200 字两个阈值拉开间隔）。
+        autoLastTs.longValue = withContext(Dispatchers.IO) {
+            if (isNote) 0L else ChapterHistory.newestTs(context, seedKey) ?: 0L
+        }
+    }
+
+    /**
+     * 3.26.57：正文保存路径上的自动存档。
+     *
+     * 节流：距上次快照 ≥ [ChapterHistory.AUTO_MIN_INTERVAL_MS]（8 分钟）**或**
+     * 距上次快照累计改动 ≥ [ChapterHistory.AUTO_MIN_CHARS]（1200 字），才补一条。
+     * 上限/清理在 [ChapterHistory.record] 里：同一章 24 小时最多 12 条自动条目、
+     * 每章总量仍 20 条，清理时手动条目优先保留——所以这里只是「到点记一条」，
+     * 不会把磁盘写爆。笔记页与现有留底口径一致：不写章节历史。
+     */
+    fun maybeAutoSnapshot(text: String) {
+        if (isNote || text.isBlank()) return
+        // 这一段没改过正文（比如只动了标题）就不存重复内容。
+        if (autoChars.intValue <= 0) return
+        val now = System.currentTimeMillis()
+        if (now - autoLastTs.longValue < ChapterHistory.AUTO_MIN_INTERVAL_MS &&
+            autoChars.intValue < ChapterHistory.AUTO_MIN_CHARS
+        ) return
+        // 写失败（磁盘满等）不动节流状态：别的保存点还会再试，不会卡死这一章。
+        if (ChapterHistory.record(context, seedKey, text, manual = false)) {
+            autoLastTs.longValue = now
+            autoChars.intValue = 0
+        }
+    }
+
     fun snapshot() = EditorSnapshot(title, body, inlineTodos)
     fun doSave() {
         if (!dirty) {
@@ -586,6 +627,7 @@ fun WritingScreen(
         onSave(title, body.text)
         dirty = false
         saved = true
+        maybeAutoSnapshot(body.text)
     }
     LaunchedEffect(saveTick) {
         if (saveTick == 0) return@LaunchedEffect
@@ -599,12 +641,16 @@ fun WritingScreen(
                 latestSave(latestTitle, latestBody)
                 dirty = false
                 saved = true
+                maybeAutoSnapshot(latestBody)
             }
         }
         lifecycleOwner?.lifecycle?.addObserver(observer)
         onDispose {
             lifecycleOwner?.lifecycle?.removeObserver(observer)
-            if (latestDirty) latestSave(latestTitle, latestBody)
+            if (latestDirty) {
+                latestSave(latestTitle, latestBody)
+                maybeAutoSnapshot(latestBody)
+            }
         }
     }
     BackHandler {
@@ -1676,6 +1722,15 @@ fun WritingScreen(
                                 override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
                                     if (count == 1 && s?.getOrNull(start) == '\n') {
                                         self.pendingNewline = true
+                                    }
+                                    // 3.26.57：累计改动字数，给保存路径的自动存档节流用。
+                                    // 这里拿得到 before/count，O(1)，不用扫全文；封顶到阈值防溢出。
+                                    // syncing = Compose 镜像回写，不算作者改动。
+                                    if (!syncing.value && !isNote) {
+                                        autoChars.intValue = minOf(
+                                            autoChars.intValue + maxOf(before, count),
+                                            ChapterHistory.AUTO_MIN_CHARS,
+                                        )
                                     }
                                 }
                                 override fun afterTextChanged(s: Editable?) {

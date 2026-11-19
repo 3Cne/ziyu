@@ -145,7 +145,10 @@ fun ChapterHistorySheet(
             ) {
                 // 行点击用项目统一的 bouncy（按压水滴，同设置行/列表行）。
                 SettingRow(
-                    title = historyTime(v.ts) + " · " + v.words + " 字",
+                    // 3.26.57：自动存档的条目在原有的「时间 · 字数」后面挂一个短标记，
+                    // 复用同一行文字、不加图标/颜色块（自动条目不是作者主动留的底）。
+                    title = historyTime(v.ts) + " · " + v.words + " 字" +
+                        if (v.manual) "" else " · 自动",
                     glyph = Glyph.Clock,
                     onClick = { selectedTs = if (selected) null else v.ts },
                     trailing = {
