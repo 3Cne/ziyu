@@ -232,7 +232,20 @@ fun MoyuTheme(settings: AppSettings, content: @Composable () -> Unit) {
         else -> false
     }
     val palette = paletteFor(settings.theme, dark)
-    val accent = accentFor(settings.accent, dark)
+    val accentTarget = accentFor(settings.accent, dark)
+    // 3.26.49：换主题 / 换点缀色时，paper、ink、muted、line、accent 五个颜色原来
+    // 是整屏硬切换。过渡只在这一处（LocalInk 的出口）做一次，所有页面读
+    // LocalInk 自动继承，不需要逐页改；`motion = none` 退化成 tween(0) 瞬切。
+    // 注意不要顺手动画 bgTop / bgBottom / faint：AmbientBackground 已经对
+    // bgTop 自己跑了一个 animateColorAsState，这里再包一层就会变成双层动画。
+    val colorSpec: FiniteAnimationSpec<Color> =
+        if (settings.motion == "none") tween(0) else tween(220)
+    val paper by animateColorAsState(palette.paper, colorSpec, label = "themePaper")
+    val ink by animateColorAsState(palette.ink, colorSpec, label = "themeInk")
+    val muted by animateColorAsState(palette.muted, colorSpec, label = "themeMuted")
+    val line by animateColorAsState(palette.line, colorSpec, label = "themeLine")
+    val accent by animateColorAsState(accentTarget, colorSpec, label = "themeAccent")
+    val animatedPalette = palette.copy(paper = paper, ink = ink, muted = muted, line = line)
     val view = LocalView.current
     val haptics = settings.haptics
     LaunchedEffect(dark) {
@@ -258,7 +271,7 @@ fun MoyuTheme(settings: AppSettings, content: @Composable () -> Unit) {
         }
     }
     CompositionLocalProvider(
-        LocalInk provides InkUi(palette, settings, accent, settings.font != "sans"),
+        LocalInk provides InkUi(animatedPalette, settings, accent, settings.font != "sans"),
         LocalHaptic provides haptic,
     ) { content() }
 }
