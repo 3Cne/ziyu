@@ -173,6 +173,7 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
@@ -1472,6 +1473,7 @@ fun WritingScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .tutorialAnchor("editor.title")
+                        .testTag("editor.title")
                         .padding(horizontal = settings.pageMargin.dp)
                         // 2026-11-15：整体往上贴——上留白 14→10dp，顶部呼吸靠顶栏本身。
                         .padding(top = 10.dp, bottom = 2.dp)
@@ -1553,6 +1555,7 @@ fun WritingScreen(
                         .weight(1f)
                         .fillMaxWidth()
                         .tutorialAnchor("editor.body")
+                        .testTag("editor.body")
                         // 2026-11-16 用户定的终版（A）：章名保留缩小动画，正文**一步都不动**。
                         // 于是章名和正文之间会留出一条空白（标题占位不变、视觉缩小让出的那块），
                         // 用户明确接受这个留白，换底部绝对稳定。
@@ -2006,6 +2009,7 @@ fun WritingScreen(
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
                     .tutorialAnchor("editor.dock")
+                    .testTag("editor.dock")
                     // 1型玻璃 only redraws when this node's draw is invalidated.
                     // Reading the scroll tick inside the draw scope subscribes the
                     // draw itself, so every body scroll re-samples the EditText
@@ -2167,6 +2171,7 @@ fun WritingScreen(
                         .padding(bottom = 10.dp)
                         .size(38.dp)
                         .tutorialAnchor("editor.ball")
+                        .testTag("editor.ball")
                         .clip(SmoothCorner(11.dp))
                         .background(dockTone(ui))
                         .bouncy {
@@ -4994,7 +4999,7 @@ private fun EditorTopBar(
             GlassIconButton(
                 Glyph.More,
                 onMore,
-                modifier = Modifier.tutorialAnchor("editor.more"),
+                modifier = Modifier.tutorialAnchor("editor.more").testTag("editor.more"),
                 size = 40.dp,
                 strength = .45f,
             )
@@ -5200,7 +5205,7 @@ private fun EditorDock(
                                     label = "aiTool",
                                 ) { open ->
                                     if (!open) {
-                                        DockTool(Glyph.Sparkles, "AI", true, onClick = { aiOpen = true })
+                                        DockTool(Glyph.Sparkles, "AI", true, onClick = { aiOpen = true }, tag = "editor.tool.ai")
                                     } else {
                                         Row(verticalAlignment = Alignment.CenterVertically) {
                                             // 3.26.41：三格内部错层（0 / 12% / 24% 起步、76% 追平）。
@@ -5210,20 +5215,20 @@ private fun EditorDock(
                                                 DockTool(Glyph.Check, "校核", true, onClick = {
                                                     aiOpen = false
                                                     onProof?.invoke()
-                                                })
+                                                }, tag = "editor.tool.proof")
                                             }
                                             AiCellStagger(aiT, 1) {
                                                 DockTool(Glyph.Edit, "修饰", true, onClick = {
                                                     aiOpen = false
                                                     onPolish?.invoke()
-                                                })
+                                                }, tag = "editor.tool.polish")
                                             }
                                             if (onAsk != null) {
                                                 AiCellStagger(aiT, 2) {
                                                     DockTool(Glyph.Sparkles, "问", true, onClick = {
                                                         aiOpen = false
                                                         onAsk?.invoke()
-                                                    })
+                                                    }, tag = "editor.tool.ask")
                                                 }
                                             }
                                         }
@@ -5231,12 +5236,12 @@ private fun EditorDock(
                                 }
                                 }
                             }
-                            DockCell { DockTool(Glyph.Share, "复制", true, onCopy) }
-                            DockCell { DockTool(Glyph.Check, "全选", true, onSelectAll) }
-                            DockCell { DockTool(Glyph.Edit, "剪切", true, onCut) }
-                            DockCell { DockTool(Glyph.Download, "粘贴", true, onPaste) }
-                            DockCell { DockTool(Glyph.Trash, "删除", true, onDelete) }
-                            DockCell { DockTool(Glyph.Close, "取消", true, onCancelSelection) }
+                            DockCell { DockTool(Glyph.Share, "复制", true, onCopy, tag = "editor.tool.copy") }
+                            DockCell { DockTool(Glyph.Check, "全选", true, onSelectAll, tag = "editor.tool.selectAll") }
+                            DockCell { DockTool(Glyph.Edit, "剪切", true, onCut, tag = "editor.tool.cut") }
+                            DockCell { DockTool(Glyph.Download, "粘贴", true, onPaste, tag = "editor.tool.paste") }
+                            DockCell { DockTool(Glyph.Trash, "删除", true, onDelete, tag = "editor.tool.delete") }
+                            DockCell { DockTool(Glyph.Close, "取消", true, onCancelSelection, tag = "editor.tool.cancel") }
                         }
                     } else {
                         // 工具行：8 格固定 36dp，整行 SpaceEvenly 均分。
@@ -5298,16 +5303,16 @@ private fun EditorDock(
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Box(Modifier.tutorialAnchor("editor.tool.undo")) {
-                                    DockTool(Glyph.Undo, "撤销", canUndo, onUndo, width = DockToolWidth)
+                                    DockTool(Glyph.Undo, "撤销", canUndo, onUndo, width = DockToolWidth, tag = "editor.tool.undo")
                                 }
                                 Box(Modifier.tutorialAnchor("editor.tool.redo")) {
-                                    DockTool(Glyph.Redo, "重做", canRedo, onRedo, width = DockToolWidth)
+                                    DockTool(Glyph.Redo, "重做", canRedo, onRedo, width = DockToolWidth, tag = "editor.tool.redo")
                                 }
-                                DockTool(Glyph.Indent, "缩进", true, onIndent, width = DockToolWidth)
-                                DockTool(Glyph.Quote, "引号", true, onQuote, width = DockToolWidth)
-                                DockTool(Glyph.Divider, "分节", true, onDivider, width = DockToolWidth)
+                                DockTool(Glyph.Indent, "缩进", true, onIndent, width = DockToolWidth, tag = "editor.tool.indent")
+                                DockTool(Glyph.Quote, "引号", true, onQuote, width = DockToolWidth, tag = "editor.tool.quote")
+                                DockTool(Glyph.Divider, "分节", true, onDivider, width = DockToolWidth, tag = "editor.tool.section")
                                 if (isNote && onTodos != null) {
-                                    Box(Modifier.width(DockToolWidth)) {
+                                    Box(Modifier.width(DockToolWidth).testTag("editor.tool.todo")) {
                                         AnimatedContent(
                                             targetState = todoActive,
                                             transitionSpec = {
@@ -5336,9 +5341,9 @@ private fun EditorDock(
                                     }
                                 }
                                 if (onStory != null) {
-                                    DockTool(Glyph.Book, "故事", true, onStory, width = DockToolWidth)
+                                    DockTool(Glyph.Book, "故事", true, onStory, width = DockToolWidth, tag = "editor.tool.story")
                                 }
-                                DockTool(Glyph.Font, "排版", true, onType, width = DockToolWidth)
+                                DockTool(Glyph.Font, "排版", true, onType, width = DockToolWidth, tag = "editor.tool.layout")
                                 if (onNotes != null) {
                                     DockTool(
                                         Glyph.Link,
@@ -5347,9 +5352,10 @@ private fun EditorDock(
                                         onNotes,
                                         onLongPress = onNotesLongPress,
                                         width = DockToolWidth,
+                                        tag = "editor.tool.note",
                                     )
                                 }
-                                DockTool(Glyph.Keyboard, "收起", true, onHideKeyboard, width = DockToolWidth)
+                                DockTool(Glyph.Keyboard, "收起", true, onHideKeyboard, width = DockToolWidth, tag = "editor.tool.hideKeyboard")
                             }
                             // 轴本体：白球严格跟手，轴从白球处向左右展开（DockScrubHud.kt）。
                             DockScrubAxis(
@@ -5363,7 +5369,7 @@ private fun EditorDock(
                 }
                 Spacer(Modifier.height(7.dp))
                 LazyRow(
-                    Modifier.fillMaxWidth().tutorialAnchor("editor.symbolRow"),
+                    Modifier.fillMaxWidth().tutorialAnchor("editor.symbolRow").testTag("editor.symbolRow"),
                     horizontalArrangement = Arrangement.spacedBy(1.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     // 左下角那一格（展开/收起球）占的宽度：38dp + 1dp 间隔，
@@ -5527,6 +5533,8 @@ private fun DockTool(
     iconSize: Dp = 18.dp,
     onLongPress: (() -> Unit)? = null,
     width: Dp = 42.dp,
+    /** 3.26.56：UI 自动化 / 引导定位用的稳定标识；null = 不挂。只加语义，不参与布局。 */
+    tag: String? = null,
 ) {
     val ui = LocalInk.current
     var pressed by remember { mutableStateOf(false) }
@@ -5535,6 +5543,7 @@ private fun DockTool(
     Column(
         Modifier
             .width(width)
+            .then(if (tag != null) Modifier.testTag(tag) else Modifier)
             // No clip: at the system's largest font scale a 36dp cell would cut
             // the last character of 「笔记·1」; the background already draws with
             // the rounded shape, so nothing needs clipping.
@@ -5615,110 +5624,113 @@ private fun TypographySheet(store: AppStore, onDismiss: () -> Unit) {
     val s = ui.settings
     val themes = listOf("paper" to "纸白", "mist" to "雾灰", "white" to "纯白", "sepia" to "茶褐", "night" to "夜黑")
     InlineModalSheet(onDismiss) { close ->
-        DialogTitle("排版", "改动会立刻作用到编辑器和提笔的手感。", onClose = close)
-        Spacer(Modifier.height(16.dp))
-        MoyuSurface(Modifier.fillMaxWidth(), radius = 20f, flat = true) {
-            Column(Modifier.padding(16.dp)) {
-                Txt("预览", size = 8.5f, color = ui.palette.muted, letterSpacing = 1f)
-                Spacer(Modifier.height(7.dp))
-                Txt(
-                    "雨落在旧城的屋檐上，故事从这里开始。",
-                    size = (17f * s.fontScale).coerceIn(12f, 28f),
-                    lineHeight = (17f * s.fontScale * s.lineHeight).coerceIn(20f, 52f),
-                    fontFamily = fontFamilyFor(s.font),
-                )
-            }
-        }
-        Spacer(Modifier.height(13.dp))
-        Segmented(
-            options = listOf("衬线", "无衬线", "等宽"),
-            selected = when (s.font) { "sans" -> 1; "mono" -> 2; else -> 0 },
-            onSelect = { index ->
-                store.updateSettings { it.copy(font = when (index) { 1 -> "sans"; 2 -> "mono"; else -> "serif" }) }
-            },
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Spacer(Modifier.height(13.dp))
-        SettingRow("字号", "${(17f * s.fontScale).toInt()} sp", Glyph.Font, trailing = {})
-        InkSlider(
-            value = s.fontScale,
-            onChange = { value -> store.updateSettings { it.copy(fontScale = (value * 100).toInt() / 100f) } },
-            min = .82f,
-            max = 1.4f,
-            modifier = Modifier.padding(horizontal = 15.dp),
-        )
-        SettingRow("行距", String.format("%.2f 倍", s.lineHeight), Glyph.Rows, trailing = {})
-        InkSlider(
-            value = s.lineHeight,
-            onChange = { value -> store.updateSettings { it.copy(lineHeight = (value * 100).toInt() / 100f) } },
-            min = 1.4f,
-            max = 2.3f,
-            modifier = Modifier.padding(horizontal = 15.dp),
-        )
-        SettingRow("页边距", "${s.pageMargin.toInt()} dp", Glyph.Indent, trailing = {})
-        InkSlider(
-            value = s.pageMargin,
-            onChange = { value -> store.updateSettings { it.copy(pageMargin = (value * 10).toInt() / 10f) } },
-            min = 14f,
-            max = 36f,
-            modifier = Modifier.padding(horizontal = 15.dp),
-        )
-        Spacer(Modifier.height(13.dp))
-        Txt("纸色", size = 10.5f, color = ui.palette.muted, modifier = Modifier.padding(start = 4.dp, bottom = 8.dp))
-        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(themes) { (key, label) ->
-                val pal = paletteFor(key, key == "night")
-                Row(
-                    Modifier
-                        .clip(CircleShape)
-                        .background(if (s.theme == key) ui.palette.ink else ui.palette.faint)
-                        .bouncy { store.updateSettings { it.copy(theme = key) } }
-                        .padding(horizontal = 11.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Box(
-                        Modifier
-                            .size(12.dp)
-                            .clip(CircleShape)
-                            .background(pal.paper)
-                            .border(.7.dp, ui.palette.line, CircleShape)
+        // 3.26.56：排版面板根的稳定标识（只加语义，不改布局）。
+        Column(Modifier.fillMaxWidth().testTag("editor.sheet.typography")) {
+            DialogTitle("排版", "改动会立刻作用到编辑器和提笔的手感。", onClose = close)
+            Spacer(Modifier.height(16.dp))
+            MoyuSurface(Modifier.fillMaxWidth(), radius = 20f, flat = true) {
+                Column(Modifier.padding(16.dp)) {
+                    Txt("预览", size = 8.5f, color = ui.palette.muted, letterSpacing = 1f)
+                    Spacer(Modifier.height(7.dp))
+                    Txt(
+                        "雨落在旧城的屋檐上，故事从这里开始。",
+                        size = (17f * s.fontScale).coerceIn(12f, 28f),
+                        lineHeight = (17f * s.fontScale * s.lineHeight).coerceIn(20f, 52f),
+                        fontFamily = fontFamilyFor(s.font),
                     )
-                    Spacer(Modifier.width(6.dp))
-                    Txt(label, size = 9.5f, color = if (s.theme == key) ui.palette.bgTop else ui.palette.muted)
                 }
             }
-        }
-        Spacer(Modifier.height(15.dp))
-        Txt("分节", size = 10.5f, color = ui.palette.muted, modifier = Modifier.padding(start = 4.dp, bottom = 8.dp))
-        LazyRow(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-            items(listOf("asterisk" to "星号", "line" to "短横", "dots" to "圆点", "blank" to "留白", "custom" to "自定义")) { (key, label) ->
-                GlassChip(label, s.sectionStyle == key) {
-                    store.updateSettings { it.copy(sectionStyle = key) }
+            Spacer(Modifier.height(13.dp))
+            Segmented(
+                options = listOf("衬线", "无衬线", "等宽"),
+                selected = when (s.font) { "sans" -> 1; "mono" -> 2; else -> 0 },
+                onSelect = { index ->
+                    store.updateSettings { it.copy(font = when (index) { 1 -> "sans"; 2 -> "mono"; else -> "serif" }) }
+                },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(Modifier.height(13.dp))
+            SettingRow("字号", "${(17f * s.fontScale).toInt()} sp", Glyph.Font, trailing = {})
+            InkSlider(
+                value = s.fontScale,
+                onChange = { value -> store.updateSettings { it.copy(fontScale = (value * 100).toInt() / 100f) } },
+                min = .82f,
+                max = 1.4f,
+                modifier = Modifier.padding(horizontal = 15.dp),
+            )
+            SettingRow("行距", String.format("%.2f 倍", s.lineHeight), Glyph.Rows, trailing = {})
+            InkSlider(
+                value = s.lineHeight,
+                onChange = { value -> store.updateSettings { it.copy(lineHeight = (value * 100).toInt() / 100f) } },
+                min = 1.4f,
+                max = 2.3f,
+                modifier = Modifier.padding(horizontal = 15.dp),
+            )
+            SettingRow("页边距", "${s.pageMargin.toInt()} dp", Glyph.Indent, trailing = {})
+            InkSlider(
+                value = s.pageMargin,
+                onChange = { value -> store.updateSettings { it.copy(pageMargin = (value * 10).toInt() / 10f) } },
+                min = 14f,
+                max = 36f,
+                modifier = Modifier.padding(horizontal = 15.dp),
+            )
+            Spacer(Modifier.height(13.dp))
+            Txt("纸色", size = 10.5f, color = ui.palette.muted, modifier = Modifier.padding(start = 4.dp, bottom = 8.dp))
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(themes) { (key, label) ->
+                    val pal = paletteFor(key, key == "night")
+                    Row(
+                        Modifier
+                            .clip(CircleShape)
+                            .background(if (s.theme == key) ui.palette.ink else ui.palette.faint)
+                            .bouncy { store.updateSettings { it.copy(theme = key) } }
+                            .padding(horizontal = 11.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Box(
+                            Modifier
+                                .size(12.dp)
+                                .clip(CircleShape)
+                                .background(pal.paper)
+                                .border(.7.dp, ui.palette.line, CircleShape)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Txt(label, size = 9.5f, color = if (s.theme == key) ui.palette.bgTop else ui.palette.muted)
+                    }
                 }
             }
-        }
-        Spacer(Modifier.height(7.dp))
-        Txt(
-            "分节时插入：${sectionBreakText(s).trim().ifBlank { "（留白）" }}",
-            size = 9f,
-            color = ui.palette.muted,
-            modifier = Modifier.padding(start = 4.dp),
-        )
-        Spacer(Modifier.height(16.dp))
-        GlassButton("恢复默认排版", {
-            // 3.26.53：值改从 AppSettings 的默认取，别再把旧外观写死在这里。
-            val d = AppSettings()
-            store.updateSettings {
-                it.copy(
-                    font = d.font,
-                    fontScale = d.fontScale,
-                    lineHeight = d.lineHeight,
-                    pageMargin = d.pageMargin,
-                )
+            Spacer(Modifier.height(15.dp))
+            Txt("分节", size = 10.5f, color = ui.palette.muted, modifier = Modifier.padding(start = 4.dp, bottom = 8.dp))
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                items(listOf("asterisk" to "星号", "line" to "短横", "dots" to "圆点", "blank" to "留白", "custom" to "自定义")) { (key, label) ->
+                    GlassChip(label, s.sectionStyle == key) {
+                        store.updateSettings { it.copy(sectionStyle = key) }
+                    }
+                }
             }
-            ToastBus.show("已恢复默认排版")
-        }, Modifier.fillMaxWidth(), glyph = Glyph.Undo)
-        Spacer(Modifier.height(6.dp))
+            Spacer(Modifier.height(7.dp))
+            Txt(
+                "分节时插入：${sectionBreakText(s).trim().ifBlank { "（留白）" }}",
+                size = 9f,
+                color = ui.palette.muted,
+                modifier = Modifier.padding(start = 4.dp),
+            )
+            Spacer(Modifier.height(16.dp))
+            GlassButton("恢复默认排版", {
+                // 3.26.53：值改从 AppSettings 的默认取，别再把旧外观写死在这里。
+                val d = AppSettings()
+                store.updateSettings {
+                    it.copy(
+                        font = d.font,
+                        fontScale = d.fontScale,
+                        lineHeight = d.lineHeight,
+                        pageMargin = d.pageMargin,
+                    )
+                }
+                ToastBus.show("已恢复默认排版")
+            }, Modifier.fillMaxWidth(), glyph = Glyph.Undo)
+            Spacer(Modifier.height(6.dp))
+        }
     }
 }
 
@@ -5803,6 +5815,8 @@ fun BookEditorScreen(
             }) { close ->
                 AnimatedContent(
                     targetState = level,
+                    // 3.26.56：写作选项面板根的稳定标识（只加语义，不改布局）。
+                    modifier = Modifier.testTag("editor.sheet.writeOptions"),
                     transitionSpec = {
                         val forward = targetState > initialState
                         // 3.26.18：整宽位移。原来两层各移 w/3，全程重叠；旧层比新层高时
