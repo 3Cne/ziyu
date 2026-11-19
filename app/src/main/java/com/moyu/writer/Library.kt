@@ -11,6 +11,8 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.core.FiniteAnimationSpec
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
@@ -63,6 +65,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
@@ -86,6 +89,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -915,7 +919,8 @@ fun BookEditorDialog(
             keyboard?.hide()
             close()
         }
-        AnimatedPane(targetState = editing, label = "bookField") { field ->
+        // 3.26.52：同框横滑改走 BookFieldPane（只滑不淡 / 整宽位移 / 裁切 / motion=none 降级）。
+        BookFieldPane(editing) { field ->
             if (field == null) {
             DialogTitle(
                 if (existing == null) "新建一本书" else "编辑书籍",
@@ -945,6 +950,49 @@ fun BookEditorDialog(
             RowDivider()
             BookFormRow("简介", synopsis.ifBlank { "未填写" }, maxLines = 2) { editing = "synopsis" }
             Spacer(Modifier.height(14.dp))
+            // 3.26.52：取消 / 创建原来在 AnimatedContent 外面，切层时它当帧消失、出现，
+            // 对话框会先硬缩、硬长 50dp 再播高度动画（读作「跳高」）。收进 level 0 这一层，
+            // 整块高度交给 AnimatedContent 自己的尺寸过渡。
+            Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                GlassButton("取消", closeAndHide, Modifier.weight(1f))
+                PrimaryButton(
+                    if (existing == null) "创建" else "保存",
+                    {
+                        if (titleState.value.isBlank()) {
+                            editing = "title"
+                            ToastBus.show("先给故事一个名字")
+                        } else {
+                            // 先暂存、再 close：真正的 onSubmit 在退场结束后的 onDismiss 里执行。
+                            pendingSubmit = if (existing == null) {
+                                val first = Chapter(title = chapterFallbackTitle(0))
+                                Book(
+                                    title = titleState.value.trim(),
+                                    author = author.trim(),
+                                    genre = genre.trim(),
+                                    synopsis = synopsis.trim(),
+                                    coverStyle = style,
+                                    coverUri = coverUri,
+                                    chapters = listOf(first),
+                                    groupId = groupId,
+                                )
+                            } else {
+                                existing.copy(
+                                    title = titleState.value.trim(),
+                                    author = author.trim(),
+                                    genre = genre.trim(),
+                                    synopsis = synopsis.trim(),
+                                    coverStyle = style,
+                                    coverUri = coverUri,
+                                    groupId = groupId,
+                                )
+                            }
+                            closeAndHide()
+                        }
+                    },
+                    Modifier.weight(1f),
+                    enabled = !savingCover,
+                )
+            }
         } else {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 GlassIconButton(Glyph.Back, { finishEdit() })
@@ -1044,50 +1092,51 @@ fun BookEditorDialog(
             Spacer(Modifier.height(16.dp))
             }
         }
-        if (editing == null) {
-        Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-            GlassButton("取消", closeAndHide, Modifier.weight(1f))
-            PrimaryButton(
-                if (existing == null) "创建" else "保存",
-                {
-                    if (titleState.value.isBlank()) {
-                        editing = "title"
-                        ToastBus.show("先给故事一个名字")
-                    } else {
-                        // 先暂存、再 close：真正的 onSubmit 在退场结束后的 onDismiss 里执行。
-                        pendingSubmit = if (existing == null) {
-                            val first = Chapter(title = chapterFallbackTitle(0))
-                            Book(
-                                title = titleState.value.trim(),
-                                author = author.trim(),
-                                genre = genre.trim(),
-                                synopsis = synopsis.trim(),
-                                coverStyle = style,
-                                coverUri = coverUri,
-                                chapters = listOf(first),
-                                groupId = groupId,
-                            )
-                        } else {
-                            existing.copy(
-                                title = titleState.value.trim(),
-                                author = author.trim(),
-                                genre = genre.trim(),
-                                synopsis = synopsis.trim(),
-                                coverStyle = style,
-                                coverUri = coverUri,
-                                groupId = groupId,
-                            )
-                        }
-                        closeAndHide()
-                    }
-                },
-                Modifier.weight(1f),
-                enabled = !savingCover,
-            )
-        }
-        }
         },
     )
+}
+
+/**
+ * 3.26.52：新建书籍对话框的「表单 ↔ 字段页」同框横滑。
+ *
+ * 这里以前用 Design.kt 的 `AnimatedPane`，它还是 3.26.12 之前的老写法：
+ * `fadeIn/fadeOut` + 只有 1/4 宽的位移 —— 切层时两层同时半透明、又全程重叠，
+ * 文字互相透（用户报的「同框滑动菜单有问题」）；也没有 `motion=none` 降级，
+ * 滑动内容不裁在内容框里。按 3.26.18 的修法重做，与同文件书籍菜单（3.26.48）
+ * 同一规格：只滑不淡、整宽位移（两层不重叠）、容器 `clipToBounds`、
+ * `motion=none` 一律 `tween(0)`。
+ *
+ * 关于每层纸底：`GlassDialog` 的 flat 面本身就是不透明的 `MoyuSurface`
+ * （色调 = `palette.paper` 向白/墨偏移 4%），滑动只是在这层不透明底上做整宽
+ * 位移、两层不重叠，所以这里不铺 `SheetPane` —— 纯纸色放进对话框会比面板暗 4%，
+ * 读作一块「灰框」（3.26.17 的教训）。
+ */
+@Composable
+private fun BookFieldPane(
+    editing: String?,
+    content: @Composable (String?) -> Unit,
+) {
+    val motion = LocalInk.current.settings.motion != "none"
+    val slideSpec: FiniteAnimationSpec<IntOffset> =
+        if (motion) spring(MOYU_DAMPING, 420f) else tween(0)
+    AnimatedContent(
+        targetState = editing,
+        modifier = Modifier.fillMaxWidth().clipToBounds(),
+        transitionSpec = {
+            // 前进 = 进入字段页（targetState 非空）：新层从右进、旧层往左出；返回反向。
+            // 位移取整宽（3.26.18：以前只走 1/4 宽，旧层全程从新层底下露出来）。
+            val forward = targetState != null
+            val transform = (slideInHorizontally(slideSpec) { w -> if (forward) w else -w }) togetherWith
+                (slideOutHorizontally(slideSpec) { w -> if (forward) -w else w })
+            // 两层高度差很大（表单 ≈ 440dp、字段页 ≈ 110dp）：交给 AnimatedContent 自己的
+            // SizeTransform 播高度，对话框不会「跳高」；motion=none 时高度也一起降成 tween(0)。
+            if (motion) transform
+            else transform.using(SizeTransform(clip = true, sizeAnimationSpec = { _, _ -> tween(0) }))
+        },
+        label = "bookField",
+    ) { state ->
+        Column(Modifier.fillMaxWidth()) { content(state) }
+    }
 }
 
 @Composable
