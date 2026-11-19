@@ -144,7 +144,14 @@ private const val PPT_EXIT_MS = 200
 private val PptTitleHeight = 40.dp
 private val PptBodyHeight = 48.dp
 
-/** 组 id（[TutorialGroups.LANDING]）的组壳：内容在 [PPT_PAGES]，教练层不渲染它。 */
+/**
+ * 组 id（[TutorialGroups.LANDING]）的组壳：内容在 [PPT_PAGES]，教练层不渲染它。
+ *
+ * 3.26.56 记录：教练引擎 [CoachOverlay] 补上了「等锚点宽限」（跨页真点可以接力，见
+ * `Tutorial.kt` 的 `AnchorWait`），但**首次引导仍然是 PPT**——3.26.53 用户明确要的是
+ * 「自动播放的 PPT 形式」，不能为了真点把 landing 改回教练组。等锚点这套留给**页内分步教学**
+ * （第一次进正文/编辑器时教某个控件），那类组用新的组 id 走教练层，与本文件无关。
+ */
 val LANDING_TUTORIAL: TutorialGroup = TutorialGroup(
     id = TutorialGroups.LANDING,
     steps = listOf(
