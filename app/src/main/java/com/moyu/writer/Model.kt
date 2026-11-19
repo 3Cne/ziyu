@@ -102,7 +102,13 @@ data class Group(
     val order: Int = 0,
 )
 
-/** 角色之间的关系类型。枚举而不是自由文本：图上的颜色、筛选、问书的读写都要靠它枚举。 */
+/**
+ * 角色之间的关系**底档**（3.26.49 起关系类型可以自定义，这里只留 8 种内置档）。
+ *
+ * 为什么还留着枚举而不是纯自由文本：图例的三档颜色（亲近 / 对立 / 其他）、图上弹簧的档位、
+ * 问书 / 自动整理读回来时认类型，都靠它；旧备份里的 `kind` 枚举名照原样读回来，一条不丢。
+ * 自定义类型另外存 [StoryRelation.kindLabel] / [StoryRelation.kindColor]，底档落在 OTHER。
+ */
 enum class RelationKind(val label: String) {
     FAMILY("亲人"),
     LOVER("恋人"),
@@ -127,14 +133,59 @@ data class StoryCharacter(
     val color: String? = null,
 )
 
+/**
+ * 一条关系。3.26.49：类型可自定义（内置 8 种 + 作者自建）。
+ *
+ * 四个字段的分工：
+ * - [kind]：底档，旧数据就是它；决定默认颜色（三档）和图上弹簧长度。
+ * - [kindLabel]：显示名。内置类型 = 枚举中文名；自定义类型 = 作者起的名字。空时回退 [kind].label
+ *   （老备份没有这个字段，解码时按 kind 派生，所以读回来永远不会是空白）。
+ * - [kindColor]：自定义颜色 #RRGGBB；null / 非法 = 按 [kind] 的三档取色。
+ * - `origin / updatedAt`：来源与修改时间（沿用 3.26.23）。
+ *
+ * 编码时 `kind`（枚举名）和 `kindLabel`（显示名）都写：新版本读两个，旧版本只认 `kind`，
+ * 所以降级 / 老备份都不会把内置类型读丢。
+ */
 data class StoryRelation(
     val id: String = uuid(),
     val from: String,
     val to: String,
     val kind: RelationKind = RelationKind.OTHER,
+    /** 3.26.49：显示名；空 = 回退 [kind].label。 */
+    val kindLabel: String = "",
+    /** 3.26.49：自定义颜色 #RRGGBB；null = 按 [kind] 的档位取色。 */
+    val kindColor: String? = null,
     val origin: String = "author",
     val updatedAt: Long = 0L,
-)
+) {
+    /** 显示名：自定义名优先，旧数据 / 未设名回退内置枚举名。 */
+    val kindText: String get() = kindLabel.ifBlank { kind.label }
+
+    /** 是否作者自建类型（显示名与内置枚举名不同）。 */
+    val customKind: Boolean get() = kindLabel.isNotBlank() && kindLabel != kind.label
+}
+
+/**
+ * 3.26.49：关系颜色只收 `#RRGGBB`。空白 / 非法一律返回 null（= 按内置档位取色），
+ * 这样解码、AI 差异、合并三条路径对颜色的判断完全一致。大写存储与角色球色同格式。
+ */
+internal fun normalizeRelationColor(raw: String?): String? {
+    val v = raw?.trim().orEmpty()
+    if (v.length != 7 || v[0] != '#') return null
+    val hex = v.substring(1)
+    if (!hex.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }) return null
+    return "#" + hex.uppercase()
+}
+
+/** 3.26.49：自定义关系类型名的长度上限（12 个字符，关系行一行放得下）。 */
+internal const val RELATION_LABEL_MAX = 12
+
+/** 按 code point 截断，不把 emoji / 生僻字切成半个；不 trim（输入过程中允许空格）。 */
+internal fun capRelationLabel(raw: String, max: Int = RELATION_LABEL_MAX): String {
+    if (raw.length <= max) return raw
+    val codePoints = raw.codePointCount(0, raw.length).coerceAtMost(max)
+    return raw.substring(0, raw.offsetByCodePoints(0, codePoints))
+}
 
 data class StoryEvent(
     val id: String = uuid(),
@@ -1128,7 +1179,13 @@ internal fun encodeBible(b: BookBible): JSONObject = JSONObject().apply {
     val rs = JSONArray()
     b.relations.forEach { r ->
         rs.put(JSONObject().apply {
-            put("id", r.id); put("from", r.from); put("to", r.to); put("kind", r.kind.name); put("origin", r.origin); put("updatedAt", r.updatedAt)
+            put("id", r.id); put("from", r.from); put("to", r.to)
+            // 3.26.49：kind 与 kindLabel 一起写。新版本两个都读；旧版本只认 kind（枚举名），
+            // 内置类型不会读丢；kindColor 只在自定义类型上有值。
+            put("kind", r.kind.name)
+            put("kindLabel", r.kindText)
+            put("kindColor", r.kindColor ?: JSONObject.NULL)
+            put("origin", r.origin); put("updatedAt", r.updatedAt)
         })
     }
     val es = JSONArray()
@@ -1182,11 +1239,17 @@ internal fun decodeBible(o: JSONObject?): BookBible {
         val from = r.optString("from", "")
         val to = r.optString("to", "")
         if (from.isBlank() || to.isBlank() || from == to) continue
+        // 3.26.49：老备份没有 kindLabel —— 从 kind 枚举派生显示名（内置类型的映射原样保留）；
+        // kindColor 缺 / 非法 = null（按内置档位取色），不让坏颜色进数据。
+        val relKind = RelationKind.entries.firstOrNull { it.name == r.optString("kind") } ?: RelationKind.OTHER
+        val relLabel = r.optString("kindLabel").trim().ifBlank { relKind.label }
         rels += StoryRelation(
             id = r.optString("id", uuid()),
             from = from,
             to = to,
-            kind = RelationKind.entries.firstOrNull { it.name == r.optString("kind") } ?: RelationKind.OTHER,
+            kind = relKind,
+            kindLabel = relLabel,
+            kindColor = if (r.isNull("kindColor")) null else normalizeRelationColor(r.optString("kindColor")),
             origin = r.optString("origin", "author"),
             updatedAt = r.optLong("updatedAt", 0L),
         )

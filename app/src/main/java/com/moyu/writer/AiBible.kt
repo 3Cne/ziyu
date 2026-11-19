@@ -39,7 +39,8 @@ object AiBible {
         if (b.relations.isNotEmpty()) {
             sb.append("关系：\n")
             b.relations.forEach { r ->
-                sb.append("- ${charName(book, r.from)} — ${charName(book, r.to)}：${r.kind.label}")
+                // 3.26.49：自定义类型用作者起的名字（内置类型回退枚举中文名）。
+                sb.append("- ${charName(book, r.from)} — ${charName(book, r.to)}：${r.kindText}")
                 sb.append(if (r.origin == "author") " [作者设定]" else " [${r.origin}]")
                 sb.append('\n')
             }
@@ -77,7 +78,7 @@ object AiBible {
         }
         "relations" -> if (book.bible.relations.isEmpty()) "没有关系"
         else book.bible.relations.joinToString("\n") { r ->
-            "${charName(book, r.from)} — ${charName(book, r.to)}：${r.kind.label}"
+            "${charName(book, r.from)} — ${charName(book, r.to)}：${r.kindText}"
         }
         "events" -> if (book.bible.events.isEmpty()) "没有事件"
         else book.bible.events.sortedBy { storyTimeKey(it.whenText) ?: Int.MAX_VALUE }
@@ -207,11 +208,23 @@ object AiBible {
                     after = before.copy(relations = before.relations.filterNot { it.id == old.id })
                     label = "删关系 $fromName—$toName"
                 } else {
-                    val kindValue = RelationKind.entries.firstOrNull { it.name == args.optString("relation") }
-                        ?: RelationKind.entries.firstOrNull { it.label == args.optString("relation") }
-                        ?: RelationKind.OTHER
-                    val next = (old ?: StoryRelation(id = uuid(), from = from.id, to = to.id)).copy(
+                    // 3.26.49：relation 既认内置枚举名 / 中文名，也认作者自定义的名字。
+                    // 自定义名字归到底档 OTHER（图例仍只有三档），显示名用作者/ AI 给的那个词。
+                    val rawKind = args.optString("relation").trim()
+                    val builtIn = RelationKind.entries.firstOrNull { it.name == rawKind }
+                        ?: RelationKind.entries.firstOrNull { it.label == rawKind }
+                    val base = old ?: StoryRelation(id = uuid(), from = from.id, to = to.id)
+                    val kindValue = builtIn ?: base.kind
+                    val labelValue = when {
+                        builtIn != null -> builtIn.label
+                        rawKind.isNotBlank() -> capRelationLabel(rawKind)
+                        else -> base.kindText
+                    }
+                    val next = base.copy(
                         kind = kindValue,
+                        kindLabel = labelValue,
+                        // 换回内置类型 = 丢掉自定义色（按档位取色）；自定义改自定义保留原色。
+                        kindColor = if (builtIn != null) null else base.kindColor,
                         origin = source,
                         updatedAt = now(),
                     )
@@ -698,7 +711,15 @@ object AiBible {
                     after = before.copy(relations = before.relations.filterNot { it.id == targetId })
                 } else {
                     val next = when (key) {
-                        "kind" -> old.copy(kind = parseRelationKind(payload.optString("kind", value)))
+                        "kind" -> {
+                            // 3.26.49：底档 + 显示名 + 自定义色是一条差异的三个部分，一次写入。
+                            val kind = parseRelationKind(payload.optString("kind", value))
+                            old.copy(
+                                kind = kind,
+                                kindLabel = capRelationLabel(payload.optString("kindLabel").trim()).ifBlank { kind.label },
+                                kindColor = normalizeRelationColor(payload.optString("kindColor")),
+                            )
+                        }
                         "ends" -> {
                             val from = before.characters.firstOrNull { it.name == payload.optString("fromName") } ?: return false
                             val to = before.characters.firstOrNull { it.name == payload.optString("toName") } ?: return false
@@ -801,6 +822,10 @@ object AiBible {
         return out
     }
 
+    /**
+     * 3.26.49：类型差异把 kind（底档）和 kindLabel（显示名）一起比较——内置名字换自定义、
+     * 自定义名字互改都会出差异；颜色随类型一起改（payload 也带 kindColor，同意时一次落库）。
+     */
     private fun relationDrafts(
         before: BookBible,
         old: StoryRelation,
@@ -811,8 +836,16 @@ object AiBible {
     ): List<PendingDraft> {
         val title = "${charName(before, old.from)}—${charName(before, old.to)}"
         val out = ArrayList<PendingDraft>(2)
-        if (old.kind != next.kind) {
-            out += PendingDraft("relation", "update", old.id, title, "kind", "类型", old.kind.label, next.kind.label, JSONObject().put("kind", next.kind.name))
+        if (old.kind != next.kind || old.kindText != next.kindText) {
+            out += PendingDraft(
+                "relation", "update", old.id, title, "kind", "类型",
+                old.kindText, next.kindText,
+                JSONObject().apply {
+                    put("kind", next.kind.name)
+                    put("kindLabel", next.kindText)
+                    put("kindColor", next.kindColor ?: "")
+                },
+            )
         }
         if (reversed) {
             out += PendingDraft("relation", "update", old.id, title, "ends", "两端", title, "$fromName—$toName", JSONObject().put("fromName", fromName).put("toName", toName))
@@ -1002,8 +1035,9 @@ object AiBible {
                     )
                 }
             } else {
-                if (counterpart.kind != r.kind) {
-                    add("relation", r.id, "kind", title, "类型", counterpart.kind.label, r.kind.label)
+                if (counterpart.kind != r.kind || counterpart.kindText != r.kindText) {
+                    // 3.26.49：类型差异带显示名（自定义名词也参与差异），不再只比枚举。
+                    add("relation", r.id, "kind", title, "类型", counterpart.kindText, r.kindText)
                 }
                 add("relation", r.id, "merge", title, "并入", "AI 关系", "并进我的同名关系")
             }
@@ -1148,7 +1182,14 @@ object AiBible {
                 ?: continue
             var target = counterpart
             if ("kind" in keys) {
-                target = target.copy(kind = current.kind, updatedAt = now())
+                // 3.26.49：类型同步连显示名与自定义色一起并过去。AI 自定义类型没带颜色时
+                // 保留作者原来设的颜色（不静默丢色）；并回内置类型则清掉自定义色。
+                target = target.copy(
+                    kind = current.kind,
+                    kindLabel = current.kindText,
+                    kindColor = if (current.customKind) current.kindColor ?: target.kindColor else null,
+                    updatedAt = now(),
+                )
                 applied++
             }
             if ("merge" in keys || "ends" in keys) {

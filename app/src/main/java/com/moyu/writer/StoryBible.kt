@@ -10,10 +10,12 @@ import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
@@ -97,6 +99,7 @@ import kotlin.math.sqrt
 import kotlin.random.Random
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
@@ -284,6 +287,14 @@ private fun CharacterPane(
     // 3.26.48：AI 页没有编辑，点开是只读详情。
     var detail by remember { mutableStateOf<StoryCharacter?>(null) }
     var relationDetail by remember { mutableStateOf<StoryRelation?>(null) }
+    // 3.26.49：刚保存的关系行用同一条 spring(.6f, 380f) 长出来；保存 700ms 后清掉标记。
+    var freshRelationId by remember(book.id) { mutableStateOf<String?>(null) }
+    LaunchedEffect(freshRelationId) {
+        if (freshRelationId != null) {
+            delay(700)
+            freshRelationId = null
+        }
+    }
     var centerId by remember(book.id) { mutableStateOf("") }
     // 3.26.44：换中心不再有「旧布局 → 新布局」的插值状态——力导向从当前坐标继续跑，
     // 节点自己走过去；点球就是直接改 centerId。
@@ -370,7 +381,8 @@ private fun CharacterPane(
                                 val other = bible.otherEnd(r, center.id) ?: return@forEach
                                 StoryRelationRow(
                                     title = other.name.ifBlank { "未命名" },
-                                    kind = r.kind,
+                                    relation = r,
+                                    fresh = r.id == freshRelationId,
                                     synced = r.id in synced,
                                     originTag = r.origin.takeIf { it != BIBLE_ORIGIN_AUTHOR },
                                     onClick = if (readOnly) {
@@ -459,7 +471,7 @@ private fun CharacterPane(
         val b = book.bible.character(r.to)?.name?.ifBlank { "未命名" } ?: "未命名"
         ConfirmDialog(
             title = "删除这条关系？",
-            message = "「$a」和「$b」之间的「${r.kind.label}」关系会被移除，两个角色都保留。",
+            message = "「$a」和「$b」之间的「${r.kindText}」关系会被移除，两个角色都保留。",
             confirmLabel = "删除",
             onConfirm = {
                 onBible(book.bible.copy(relations = book.bible.relations.filterNot { it.id == r.id }))
@@ -475,19 +487,26 @@ private fun CharacterPane(
             bible = book.bible.mineWith(synced),
             from = from,
             onDismiss = { linking = null },
-            onSave = { to, kind ->
+            onSave = { to, kind, kindLabel, kindColor ->
                 val b = book.bible
-                // 同一对角色只留一条关系：再连一次就是改类型。
+                // 同一对角色只留一条关系：再连一次就是改类型（含自定义名 / 颜色）。
                 val existing = b.relations.firstOrNull {
                     (it.from == from.id && it.to == to) || (it.from == to && it.to == from.id)
                 }
+                val next = if (existing != null) {
+                    existing.copy(kind = kind, kindLabel = kindLabel, kindColor = kindColor)
+                } else {
+                    StoryRelation(from = from.id, to = to, kind = kind, kindLabel = kindLabel, kindColor = kindColor)
+                }
                 onBible(
                     if (existing != null) {
-                        b.copy(relations = b.relations.map { if (it.id == existing.id) it.copy(kind = kind) else it })
+                        b.copy(relations = b.relations.map { if (it.id == existing.id) next else it })
                     } else {
-                        b.copy(relations = b.relations + StoryRelation(from = from.id, to = to, kind = kind))
+                        b.copy(relations = b.relations + next)
                     },
                 )
+                // 3.26.49：新行 / 改过的行落库后用 spring(.6f, 380f) 长出来。
+                freshRelationId = next.id
             },
         )
     }
@@ -508,7 +527,7 @@ private fun CharacterPane(
         StoryReadOnlySheet(
             title = relationTitle(bible, r),
             subtitle = "AI 关系 · ${originLabel(r.origin)}",
-            rows = listOf("类型" to r.kind.label),
+            rows = listOf("类型" to r.kindText),
             onDismiss = { relationDetail = null },
         )
     }
@@ -522,6 +541,14 @@ private fun relationTone(kind: RelationKind, ui: InkUi): Color = when (kind) {
         lerp(ui.palette.muted, Color(0xFFB4543C), .62f)
     else -> ui.palette.line
 }
+
+/**
+ * 3.26.49：一条关系的颜色 = 作者自定义色优先，没设色（或存的是坏值）按内置三档取色。
+ * 内置类型永远没有 kindColor，所以它们的外观与 3.26.48 完全一致。
+ */
+private fun relationColor(kind: RelationKind, kindColor: String?, ui: InkUi): Color =
+    kindColor?.let { raw -> runCatching { Color(android.graphics.Color.parseColor(raw)) }.getOrNull() }
+        ?: relationTone(kind, ui)
 
 // ───────────────────────── 角色球颜色（3.26.24） ─────────────────────────
 // 手动色存在 StoryCharacter.color；没设过就按 id 稳定取色板里的一色，重排/重启不变。
@@ -935,7 +962,7 @@ private fun RelationGraph(
                     val end = pb - dir * (b.r + lineInset)
                     if ((end - start).getDistance() <= 0f) return
                     drawLine(
-                        relationTone(s.kind, ui).copy(alpha = if (strong) .9f else .28f),
+                        relationColor(s.kind, s.kindColor, ui).copy(alpha = if (strong) .9f else .28f),
                         start,
                         end,
                         strokeWidth = if (strong) 1.6.dp.toPx() else 1.2.dp.toPx(),
@@ -1036,7 +1063,8 @@ private class ForceGraph(private val bookId: String) {
         val id: String get() = char.id
     }
 
-    class Spring(val a: Int, val b: Int, val rest: Float, val kind: RelationKind)
+    // 3.26.49：每条边带上自定义颜色（null = 按底档取色），绘制阶段直接算。
+    class Spring(val a: Int, val b: Int, val rest: Float, val kind: RelationKind, val kindColor: String?)
 
     val nodes = mutableListOf<Node>()
     val springs = mutableListOf<Spring>()
@@ -1126,7 +1154,7 @@ private class ForceGraph(private val bookId: String) {
             val a = index[r.from] ?: return@forEach
             val b = index[r.to] ?: return@forEach
             if (a == b) return@forEach
-            springs += Spring(a, b, (nodes[a].r + nodes[b].r) * springRestFactor(r.kind), r.kind)
+            springs += Spring(a, b, (nodes[a].r + nodes[b].r) * springRestFactor(r.kind), r.kind, r.kindColor)
         }
         val pinned = pinnedId
         if (pinned != null && index[pinned] == null) pinnedId = null
@@ -2117,17 +2145,32 @@ private fun CharacterEditor(
     }
 }
 
+/**
+ * 关系编辑器（3.26.16；3.26.49 支持自定义类型）。
+ *
+ * 「类型」= 8 个内置 chip + 一个「自定义」。选自定义时下面用 spring(dampingRatio = .6f,
+ * stiffness = 380f) 展开名字输入 + 颜色（复用角色球那套 ColorDot / HueSlider）：
+ * - 名字：存 [StoryRelation.kindLabel]，关系行、图上提示、AI 读圣经都用它；
+ * - 颜色：存 [StoryRelation.kindColor]；选「自动」= null，按内置三档取色；
+ * - 底档：自定义固定落在 [RelationKind.OTHER]（图例仍只有 亲近/对立/其他 三档）。
+ * 保存回调带 4 个值（对象、底档、显示名、颜色），调用方原样写进 bible。
+ */
 @Composable
 private fun RelationEditor(
     bible: BookBible,
     from: StoryCharacter,
     onDismiss: () -> Unit,
-    onSave: (String, RelationKind) -> Unit,
+    onSave: (String, RelationKind, String, String?) -> Unit,
 ) {
     val ui = LocalInk.current
+    val motion = ui.settings.motion != "none"
     val others = bible.characters.filter { it.id != from.id }
     var target by remember { mutableStateOf(others.firstOrNull()?.id) }
     var kind by remember { mutableStateOf(RelationKind.FRIEND) }
+    // 3.26.49：自定义类型（名字 + 颜色）。custom = false 时内置 chip 的选择照旧。
+    var custom by remember { mutableStateOf(false) }
+    var customName by remember { mutableStateOf("") }
+    var customColor by remember { mutableStateOf<String?>(null) }
     GlassDialog(onDismiss, dismissOnOutsideClick = false) {
         // 3.26.48：内容里的按钮一律走 close（见 [storyClose] 的 TODO）。
         val close = storyClose(onDismiss)
@@ -2149,8 +2192,70 @@ private fun RelationEditor(
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             RelationKind.entries.chunked(4).forEach { row ->
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    row.forEach { k -> GlassChip(k.label, k == kind) { kind = k } }
+                    row.forEach { k ->
+                        GlassChip(k.label, !custom && k == kind) {
+                            custom = false
+                            kind = k
+                        }
+                    }
                 }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                GlassChip("自定义", custom) { custom = true }
+            }
+        }
+        // 3.26.49：自定义区块「长出来」用项目同柔曲线 spring(.6f, 380f)；motion = none 直接落位。
+        AnimatedVisibility(
+            visible = custom,
+            enter = if (motion) {
+                expandVertically(spring(dampingRatio = .6f, stiffness = 380f)) +
+                    fadeIn(spring(dampingRatio = .6f, stiffness = 380f))
+            } else {
+                expandVertically(tween(0)) + fadeIn(tween(0))
+            },
+            exit = if (motion) {
+                shrinkVertically(spring(dampingRatio = .6f, stiffness = 380f)) +
+                    fadeOut(spring(dampingRatio = .6f, stiffness = 380f))
+            } else {
+                shrinkVertically(tween(0)) + fadeOut(tween(0))
+            },
+        ) {
+            Column(Modifier.fillMaxWidth()) {
+                Spacer(Modifier.height(10.dp))
+                InkField(customName, { customName = capRelationLabel(it) }, "关系名：结义兄弟 / 主仆 / 宿敌")
+                Spacer(Modifier.height(12.dp))
+                Txt("颜色", size = 11f, color = ui.palette.muted)
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    GlassChip("自动", customColor == null) { customColor = null }
+                    accentChoices.forEach { (_, value) ->
+                        val hex = "#%06X".format(value and 0xFFFFFF)
+                        ColorDot(Color(value), customColor.equals(hex, true)) { customColor = hex }
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                val hsv = remember(customColor) {
+                    FloatArray(3).also { out ->
+                        val argb = customColor?.let { runCatching { android.graphics.Color.parseColor(it) }.getOrNull() }
+                            ?: Color(0xFF7A5B3A).toArgb()
+                        android.graphics.Color.colorToHSV(argb, out)
+                    }
+                }
+                HueSlider(hsv[0]) { hue ->
+                    val argb = android.graphics.Color.HSVToColor(floatArrayOf(hue, .50f, .58f))
+                    customColor = String.format("#%06X", argb and 0xFFFFFF)
+                }
+                Spacer(Modifier.height(8.dp))
+                Txt(
+                    "自定义类型按「其他」档参与图例；选了颜色，关系线和圆点就用这个颜色。",
+                    size = 10f,
+                    color = ui.palette.muted,
+                    lineHeight = 16f,
+                )
             }
         }
         Spacer(Modifier.height(20.dp))
@@ -2159,11 +2264,17 @@ private fun RelationEditor(
             PrimaryButton(
                 "保存",
                 {
-                    target?.let { onSave(it, kind) }
+                    target?.let { to ->
+                        if (custom) {
+                            onSave(to, RelationKind.OTHER, customName.trim(), customColor)
+                        } else {
+                            onSave(to, kind, kind.label, null)
+                        }
+                    }
                     close()
                 },
                 Modifier.weight(1f),
-                enabled = target != null,
+                enabled = target != null && (!custom || customName.isNotBlank()),
             )
         }
     }
@@ -3405,31 +3516,49 @@ private fun StoryCharacterCard(
 
 /**
  * 关系行：作者页点「···」删这条关系（确认后才删）；AI 页只读（点开详情）+ 来源标签 / 已同步角标。
+ *
+ * 3.26.49：圆点与类型名都读 [StoryRelation.kindText] / [StoryRelation.kindColor]——自定义类型
+ * 显示作者起的名字，圆点用自定义色（没设色按内置三档）；刚保存的那一行 `fresh = true`，
+ * 用 spring(dampingRatio = .6f, stiffness = 380f) 从左侧淡入（motion = none 直接落位）。
  */
 @Composable
 private fun StoryRelationRow(
     title: String,
-    kind: RelationKind,
+    relation: StoryRelation,
     synced: Boolean = false,
+    fresh: Boolean = false,
     originTag: String? = null,
     onClick: (() -> Unit)? = null,
     onMore: (() -> Unit)? = null,
 ) {
     val ui = LocalInk.current
-    val alpha = storySyncedAlpha(synced)
+    val motion = ui.settings.motion != "none"
+    val syncedAlpha = storySyncedAlpha(synced)
+    val enter = remember { Animatable(if (fresh) 0f else 1f) }
+    LaunchedEffect(fresh) {
+        if (fresh) {
+            enter.snapTo(0f)
+            enter.animateTo(1f, if (motion) spring(dampingRatio = .6f, stiffness = 380f) else tween(0))
+        } else {
+            enter.snapTo(1f)
+        }
+    }
     Row(
         Modifier
             .fillMaxWidth()
-            .graphicsLayer { this.alpha = alpha }
+            .graphicsLayer {
+                alpha = syncedAlpha * enter.value
+                translationX = (1f - enter.value) * 10.dp.toPx()
+            }
             .then(if (onClick != null) Modifier.bouncy(scale = .98f) { onClick() } else Modifier)
             .padding(vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(Modifier.size(7.dp).background(relationTone(kind, ui), CircleShape))
+        Box(Modifier.size(7.dp).background(relationColor(relation.kind, relation.kindColor, ui), CircleShape))
         Spacer(Modifier.width(10.dp))
         Txt(title, size = 13f)
         Spacer(Modifier.width(8.dp))
-        Txt(kind.label, size = 11f, color = ui.palette.muted)
+        Txt(relation.kindText, size = 11f, color = ui.palette.muted)
         Spacer(Modifier.weight(1f))
         if (originTag != null) {
             AiOriginTag(originTag)
