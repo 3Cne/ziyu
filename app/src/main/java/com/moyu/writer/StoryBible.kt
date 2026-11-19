@@ -122,7 +122,7 @@ import org.json.JSONObject
  *   AI 页 = 同步 AI 内容到我的（两页按钮同一尺寸/位置，只有文案与动作不同）。
  * - 点卡片：我的页 = 打开编辑；AI 页 = 只读详情（唯一允许的差异）。
  * - 点卡片右上「···」：这张卡自己的次操作（建章 / 加关系 / 编辑 / 删除 / 清空情节点）。
- * - 点标题右侧「···」：面板级次操作（从正文生成大纲 / 再补一次全书整理）。
+ * - 点标题右侧「···」：面板级次操作（从正文生成大纲 / 按大纲建章 / 再补一次全书整理）。
  * - 点 X / 系统返回：关面板。
  * - 长按：不设入口。滑动：面板内容纵向滚；角色图里单指平移、双指缩放、双击空白复位
  *   （我的图还能拖球钉住；两页都能点球换中心，AI 页只是只读）。
@@ -160,6 +160,8 @@ fun StorySheet(
     var headerMenu by remember { mutableStateOf(false) }
     // 3.26.48：「从正文生成大纲」——面板级次操作，读正文 → AI 生成 → 预览 → 写入 bible。
     var generating by remember { mutableStateOf(false) }
+    // 3.26.56：「按大纲建章」——面板级次操作，把还没落地的章级节点一次建成空章节（预览勾选后才建）。
+    var buildingChapters by remember { mutableStateOf(false) }
     // 3.26.48：同步预览 / 一步撤销提到面板层，两页共用（切页不会把对话框打断）。
     val syncHost = rememberStorySyncHost(book.id, pager)
 
@@ -208,7 +210,9 @@ fun StorySheet(
     }
 
     if (headerMenu) {
-        // 「从正文生成大纲」只在大纲视图出现：它是这一页的次操作，不是全面板动作。
+        // 「从正文生成大纲 / 按大纲建章」只在大纲视图出现：它们是这一页的次操作，不是全面板动作。
+        // 3.26.56：两者用**同一份候选判据**（[outlineNodesToBuild]）——菜单副标题的数就是对话框里的数。
+        val buildable = outlineNodesToBuild(book).size
         val actions = buildList {
             if (pager.view == STORY_VIEW_OUTLINE) {
                 add(
@@ -217,6 +221,18 @@ fun StorySheet(
                         subtitle = "读这本书每章正文，先生成章级 / 自由大纲；预览确认后才写进故事圣经",
                         glyph = Glyph.Sparkles,
                         onClick = { generating = true },
+                    ),
+                )
+                add(
+                    StoryMenuAction(
+                        label = "按大纲建章",
+                        subtitle = if (buildable == 0) {
+                            "章级大纲都已经建章了；自由大纲不参与建章"
+                        } else {
+                            "还有 $buildable 条章级大纲没落地，预览勾选后一次建好"
+                        },
+                        glyph = Glyph.Book,
+                        onClick = { buildingChapters = true },
                     ),
                 )
             }
@@ -239,6 +255,9 @@ fun StorySheet(
     }
     if (generating) {
         GenerateOutlineDialog(book = book, onBible = onBible, onDismiss = { generating = false })
+    }
+    if (buildingChapters) {
+        BuildChaptersFromOutlineDialog(book = book, onDismiss = { buildingChapters = false })
     }
     StorySyncDialogs(syncHost)
 }
@@ -4378,7 +4397,21 @@ private fun GenerateOutlineDialog(
     }
 }
 
-// ───────────────────────── 按大纲建章（3.26.45） ─────────────────────────
+// ───────────────────────── 按大纲建章（3.26.45；3.26.56 批量入口） ─────────────────────────
+
+/**
+ * 「按大纲建章」的候选：**章级且还没落地**的节点。
+ *
+ * 判据与 AI 工具 `chapters_from_outline` / [OutlinePane] 卡片「建章」同口径：
+ * - `free_` 前缀的自由节点不绑章、不参与（自由大纲只做剧情规划）；
+ * - `chapterId` 已经指向某一章的算已落地，不再建。
+ *
+ * 标题「···」菜单的副标题与 [BuildChaptersFromOutlineDialog] 共用这一条判据，别在两处各写一份。
+ */
+private fun outlineNodesToBuild(book: Book): List<OutlineNode> =
+    book.bible.outline.filter { n ->
+        !n.id.startsWith(FREE_OUTLINE_PREFIX) && book.chapters.none { it.id == n.chapterId }
+    }
 
 /**
  * 按大纲建章：把一个未落地节点变成一章（标题用节点标题），再把 node.chapterId 指回新章。
@@ -4386,6 +4419,9 @@ private fun GenerateOutlineDialog(
  * 与 AI 工具 `chapters_from_outline` 的落地逻辑同源（那里在 AiTab.applyQueue 的
  * `AiPendingKind.ChapterFromOutline` 分支），但那边是 composable 里的 local function、
  * 本文件调不到，所以这里用同一对 store 写入口复刻：updateBook 加章 + updateBible 回填 chapterId。
+ *
+ * 3.26.56：批量入口 [BuildChaptersFromOutlineDialog] 逐条调这里——**同一条落地路径**，
+ * 不新造存储 / 网络层；每次调用都从 store 重读，所以连着建多章时章号、大纲回填都正确。
  */
 private fun buildChapterFromOutline(store: AppStore, bookId: String, node: OutlineNode) {
     val book = store.book(bookId) ?: return
@@ -4404,4 +4440,138 @@ private fun buildChapterFromOutline(store: AppStore, bookId: String, node: Outli
         ),
     )
     ToastBus.show("已建章「${chapter.title}」")
+}
+
+/**
+ * 「按大纲建章」预览对话框（3.26.56）。
+ *
+ * 入口：故事面板标题「···」→「按大纲建章」（仅大纲视图出现，排在同为面板级次操作的
+ * 「从正文生成大纲」旁边）。点卡片「···」→「建章」是**单条**入口；这里是**批量**入口，
+ * 但落地走的是同一个 [buildChapterFromOutline]，所以两条入口建出来的章完全一样。
+ *
+ * 交互：逐条列出「将新建：第 N 章 · 标题」，默认全选；点整行切换 [SelectMark] 勾选。
+ * 章号按「当前章数 + 已勾选里排第几」算——取消前面一条，后面的章号会跟着前移，所见即所得。
+ * 没有可建节点（章级大纲已全部落地 / 只有自由大纲 / 还没有大纲）时，按钮禁用并给一行说明。
+ *
+ * 动效（协议 §5）：列表行 `animateItem` 用项目统一的空间类 spring(.6, 380)，
+ * [SelectMark] 自带勾选扩散动画；`motion = none` 时两者都退化为 tween(0)，
+ * 见 [storyPlacementSpec] 与 [SelectMark] 内部的 motion 判断。
+ */
+@Composable
+private fun BuildChaptersFromOutlineDialog(
+    book: Book,
+    onDismiss: () -> Unit,
+) {
+    val ui = LocalInk.current
+    val store = LocalStore.current
+    // 打开这一下就定住候选快照：建章会改 book，若跟着 book 重算，关窗前会闪一帧「没有可建节点」。
+    val candidates = remember(book.id) { outlineNodesToBuild(book) }
+    var picked by remember { mutableStateOf(candidates.map { it.id }.toSet()) }
+    // 确认后立刻锁住：建章 + 关窗之间若再来一次点击，不会重复建。
+    var done by remember { mutableStateOf(false) }
+    val selected = candidates.filter { it.id in picked }
+    val chapterBase = book.chapters.size
+    // 已勾选节点 → 它会成为第几章（0 基下标）；取消勾选后后面的章号跟着前移。
+    val newIndex = selected.withIndex().associate { (i, n) -> n.id to i }
+    fun toggle(id: String) {
+        if (done) return
+        picked = if (id in picked) picked - id else picked + id
+    }
+
+    GlassDialog(onDismiss, dismissOnOutsideClick = false) {
+        val close = storyClose(onDismiss)
+        DialogTitle(
+            "按大纲建章",
+            subtitle = when {
+                candidates.isEmpty() -> "没有可建的章级大纲"
+                else -> "共 ${candidates.size} 条章级大纲还没落地，已勾选 ${picked.size} 条；勾中的各新建一章（正文空）"
+            },
+        )
+        Spacer(Modifier.height(12.dp))
+        if (candidates.isEmpty()) {
+            Txt(
+                "章级大纲都已经建过章，或者这本书还没有章级大纲。自由大纲（不绑章）不参与建章。",
+                size = 12f,
+                color = ui.palette.muted,
+                lineHeight = 19f,
+            )
+        } else {
+            // 只有 LazyColumn 能上 animateItem；高度封顶，外层对话框本身可滚，长列表不会撑破窗口。
+            val itemSpec = storyPlacementSpec()
+            LazyColumn(Modifier.fillMaxWidth().heightIn(max = 300.dp)) {
+                items(candidates, key = { it.id }) { node ->
+                    val checked = node.id in picked
+                    val rank = newIndex[node.id]
+                    val seq = rank?.let { chapterBase + it + 1 }
+                    val title = if (seq == null) {
+                        node.title.ifBlank { "未命名大纲" }
+                    } else {
+                        node.title.ifBlank { chapterFallbackTitle(seq - 1) }
+                    }
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(SmoothCorner(12.dp))
+                            // 一行 = 一条勾选：标记只画不点，点击交给整行（同同步预览的写法）。
+                            .bouncy(enabled = !done) { toggle(node.id) }
+                            .padding(horizontal = 6.dp, vertical = 5.dp)
+                            .animateItem(fadeInSpec = null, placementSpec = itemSpec, fadeOutSpec = null),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Txt(
+                                if (seq == null) "不新建：$title" else "将新建：第 $seq 章 · $title",
+                                size = 12f,
+                                weight = FontWeight.Medium,
+                                color = if (checked) ui.palette.ink else ui.palette.muted,
+                            )
+                            if (node.beats.isNotEmpty()) {
+                                Spacer(Modifier.height(2.dp))
+                                Txt(
+                                    "${node.beats.size} 个情节点会留在这一章的大纲里",
+                                    size = 10.5f,
+                                    color = ui.palette.muted,
+                                    lineHeight = 16f,
+                                )
+                            }
+                        }
+                        Spacer(Modifier.width(10.dp))
+                        SelectMark(
+                            checked = checked,
+                            onToggle = { toggle(node.id) },
+                            size = 20.dp,
+                            interactive = false,
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            Txt(
+                "建章 = 新建一个空章节（标题取这条大纲），正文从零开始写；自由大纲不参与。",
+                size = 10.5f,
+                color = ui.palette.muted,
+                lineHeight = 17f,
+            )
+        }
+        Spacer(Modifier.height(18.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+            GlassButton("取消", close, Modifier.weight(1f))
+            PrimaryButton(
+                if (picked.isEmpty()) "建章" else "建 ${picked.size} 章",
+                {
+                    if (done || picked.isEmpty()) return@PrimaryButton
+                    done = true
+                    val targets = candidates.filter { it.id in picked }
+                    // 复用卡片「···」→「建章」的同一条落地路径；循环里每次都从 store 重读，
+                    // 所以多章连建时章号与 chapterId 回填都不会串。
+                    targets.forEach { buildChapterFromOutline(store, book.id, it) }
+                    ToastBus.show("已建 ${targets.size} 章")
+                    close()
+                },
+                Modifier.weight(1f),
+                glyph = Glyph.Book,
+                enabled = picked.isNotEmpty() && !done,
+            )
+        }
+    }
 }
