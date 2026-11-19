@@ -743,7 +743,7 @@ fun AiScreen(
                 AiPendingKind.ChapterFromOutline -> {
                     val b = store.books.firstOrNull { it.id == p.bookId.ifBlank { book.id } }
                         ?: return@forEach
-                    val loose = b.bible.outline.filter { n -> b.chapters.none { it.id == n.chapterId } }
+                    val loose = b.bible.outline.filter { n -> !n.id.startsWith("free_") && b.chapters.none { it.id == n.chapterId } }
                     if (loose.isEmpty()) return@forEach
                     var list = b.chapters
                     var outline = b.bible.outline
