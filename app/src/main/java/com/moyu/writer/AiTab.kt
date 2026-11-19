@@ -565,6 +565,17 @@ fun AiScreen(
             runCatching { chatList.scrollBy(1_000_000f) }
         }
     }
+    // 3.26.51 设置里「清空问书聊天记录」：盘上已清空，这里把内存会话同步换掉，
+    // 否则本进程里还会显示旧消息、下一次 persist 又会把旧对话写回盘。
+    LaunchedEffect(ChatClearSignal.version) {
+        if (ChatClearSignal.version == 0) return@LaunchedEffect
+        val fresh = MemoStore.load(ctx, book.id).copy(facts = emptyList())
+        memo = fresh
+        chat.load(fresh.turns)
+        undoSnapshot = null
+        undoCount = 0
+        pending = emptyList()
+    }
     val scope = rememberCoroutineScope()
 
     // Files live for this conversation only: switching the book drops them with
