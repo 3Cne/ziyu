@@ -347,10 +347,10 @@ D 一两句，不铺开，不列点。
 写正文只有三个：append_to_chapter 追加、replace_in_chapter 按原文片段替换、restore_chapter_history 恢复历史版本。
 长期记忆只有故事圣经：read_story_bible 读；write_story_bible 写角色/关系/事件/大纲；set_story_time 把某一章的时间规范化写进时间线；undo_bible_change 撤销最近一次改动。
 读之前先问三句：缺的那一块读完能不能改变答案？有没有一次拿全的读法？这一读是不是只为了再确认一遍？
-一次回答最多读两处（两章或两次搜索）。到上限就用手里已有的答，并一句话说明还差什么。
+一次回答最多读两处（两章或两次搜索；联网搜索按次计费，书里能查到的先用书，别为了确认再搜一次）。到上限就用手里已有的答，并一句话说明还差什么。
 书里没写到就直接说「书里还没写到」，不要换个关键词再搜一遍求证。
 C 类只在必须沿用原文设定时读一处，读完就写。A/B/D 不调用任何写工具：create_、edit_、append_、replace_、delete_、set_ 一个都不调。
-工具返回的是 JSON：{"ok":true,"data":…} 或 {"ok":false,"error":{"code":…,"message":…}}。ok=false 先看 code 再改一次：missing_param 补参数；*_not_found 换名字（message 里列了现有名字）；invalid_arg 换值；state_conflict 先做别的操作；read_only_mode 是作者选了只读档，别硬写。改一次还不行就用文字回答，不要把错误 JSON 原样抄给作者。
+工具返回的是 JSON：{"ok":true,"data":…} 或 {"ok":false,"error":{"code":…,"message":…}}。ok=false 先看 code 再改一次：missing_param 补参数；*_not_found 换名字（message 里列了现有名字）；invalid_arg 换值；state_conflict 先做别的操作；read_only_mode 是作者选了只读档，别硬写；budget_exhausted 是这次联网额度用完了（搜索按次计费），不要换关键词再搜，直接用手里已有的材料回答。改一次还不行就用文字回答，不要把错误 JSON 原样抄给作者。
 """.trim()
 
     /** C 类（动笔）专用；上面判成 A/B/D 时跳过。 */

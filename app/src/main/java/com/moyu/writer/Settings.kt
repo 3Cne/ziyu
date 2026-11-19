@@ -1798,7 +1798,13 @@ private fun AiSettingsPage(store: AppStore, onBack: () -> Unit, onOpen: (String)
                     InkToggle(settings.aiWeb) { v -> store.updateSettings { it.copy(aiWeb = v) } }
                 }
                 RowDivider()
-                SettingRow("搜索上限", "一次最多几次", Glyph.Layers, stacked = true) {
+                SettingRow(
+                    "搜索上限",
+                    // 3.26.57：只说「一次最多几次」时，作者不知道这个数就是每次回答会被计费的最大搜索次数。
+                    "每个回答最多 ${settings.aiWebMax} 次搜索，到上限就停",
+                    Glyph.Layers,
+                    stacked = true,
+                ) {
                     // 3.26.51：5 枚筹码原来塞在标题右侧会被挤扁，改 stacked 独占一行。
                     androidx.compose.foundation.layout.Row(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
