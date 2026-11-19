@@ -16,6 +16,7 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
@@ -395,99 +396,119 @@ fun LibraryScreen(
 
     Box(Modifier.fillMaxSize()) {
         AmbientBackground()
-        if (settings.libraryMode == "list") {
-            LazyColumn(
-                Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(start = 20.dp, top = 0.dp, end = 20.dp, bottom = 130.dp),
-                // Match the grid/compact top rhythm exactly: same item gap, no extra
-                // list-only spacer after the header. The old 12dp + 6dp combo made
-                // the header/continue/shelf offsets jump only in list mode.
-                verticalArrangement = Arrangement.spacedBy(20.dp),
-            ) {
-                item { LibraryHeader(store) { createOpen = true } }
-                if (continueBook != null && continueChapter != null) {
-                    item {
-                        ContinueCard(continueBook, continueChapter) {
-                            onContinue(continueBook, continueChapter)
+        // 3.26.47：排布切换原来 if/else 同帧换容器，整架内容硬切。
+        // 现在两套容器包进 AnimatedContent：新排布淡入 + 从 98% 放大落位，
+        // 旧排布 140ms 淡出；两套容器共用同一份 visibleBooks。
+        // 滚动位置不要求跨排布保留（各排布自己从顶部开始）。
+        // motion=none 一律降成 tween(0)，直接落终态（与项目其它动效同一写法）。
+        val motion = settings.motion != "none"
+        AnimatedContent(
+            targetState = settings.libraryMode,
+            modifier = Modifier.fillMaxSize(),
+            transitionSpec = {
+                if (motion) {
+                    (fadeIn(tween(200)) + scaleIn(initialScale = .98f)) togetherWith fadeOut(tween(140))
+                } else {
+                    (fadeIn(tween(0)) + scaleIn(initialScale = .98f, animationSpec = tween(0))) togetherWith
+                        fadeOut(tween(0))
+                }
+            },
+            label = "libraryMode",
+        ) { mode ->
+            if (mode == "list") {
+                LazyColumn(
+                    Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(start = 20.dp, top = 0.dp, end = 20.dp, bottom = 130.dp),
+                    // Match the grid/compact top rhythm exactly: same item gap, no extra
+                    // list-only spacer after the header. The old 12dp + 6dp combo made
+                    // the header/continue/shelf offsets jump only in list mode.
+                    verticalArrangement = Arrangement.spacedBy(20.dp),
+                ) {
+                    item { LibraryHeader(store) { createOpen = true } }
+                    if (continueBook != null && continueChapter != null) {
+                        item {
+                            ContinueCard(continueBook, continueChapter) {
+                                onContinue(continueBook, continueChapter)
+                            }
                         }
                     }
-                }
-                item {
-                    ShelfHeader(
-                        summary = librarySummary(store, settings, selectedGroup),
-                        onFilters = { controlsOpen = true },
-                    )
-                }
-                if (visibleBooks.isEmpty()) {
                     item {
-                        EmptyState(
-                            Glyph.Book,
-                            if (selectedGroup == null) "书架还空着" else "这个分组还没有书",
-                            if (selectedGroup == null) {
-                                "点右上角 +，先给故事一个名字。书名、封面、章节都可以随时再改。"
-                            } else {
-                                "点右上角 + 新建一本，会自动放进当前分组；也可以从书籍信息里换组。"
-                            },
+                        ShelfHeader(
+                            summary = librarySummary(store, settings, selectedGroup),
+                            onFilters = { controlsOpen = true },
                         )
                     }
-                } else {
-                    items(visibleBooks, key = { it.id }) { book ->
-                        Box(Modifier.animateItem()) {
-                            BookListRow(
-                                book,
-                                groupName = store.bookGroups.firstOrNull { it.id == book.groupId }?.name,
-                                onClick = { openBook(book) },
+                    if (visibleBooks.isEmpty()) {
+                        item {
+                            EmptyState(
+                                Glyph.Book,
+                                if (selectedGroup == null) "书架还空着" else "这个分组还没有书",
+                                if (selectedGroup == null) {
+                                    "点右上角 +，先给故事一个名字。书名、封面、章节都可以随时再改。"
+                                } else {
+                                    "点右上角 + 新建一本，会自动放进当前分组；也可以从书籍信息里换组。"
+                                },
                             )
                         }
-                    }
-                }
-            }
-        } else {
-            // Compact must be visibly denser than the normal grid, not just a
-            // smaller caption on the same 3-column layout.
-            val columns = if (settings.libraryMode == "compact") 4 else settings.columns.coerceIn(2, 4)
-            LazyVerticalGrid(
-                columns = GridCells.Fixed(columns),
-                Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(start = 20.dp, top = 0.dp, end = 20.dp, bottom = 132.dp),
-                horizontalArrangement = Arrangement.spacedBy(13.dp),
-                verticalArrangement = Arrangement.spacedBy(20.dp),
-            ) {
-                item(span = { GridItemSpan(maxLineSpan) }) { LibraryHeader(store) { createOpen = true } }
-                if (continueBook != null && continueChapter != null) {
-                    item(span = { GridItemSpan(maxLineSpan) }) {
-                        ContinueCard(continueBook, continueChapter) {
-                            onContinue(continueBook, continueChapter)
+                    } else {
+                        items(visibleBooks, key = { it.id }) { book ->
+                            Box(Modifier.animateItem()) {
+                                BookListRow(
+                                    book,
+                                    groupName = store.bookGroups.firstOrNull { it.id == book.groupId }?.name,
+                                    onClick = { openBook(book) },
+                                )
+                            }
                         }
                     }
                 }
-                item(span = { GridItemSpan(maxLineSpan) }) {
-                    ShelfHeader(
-                        summary = librarySummary(store, settings, selectedGroup),
-                        onFilters = { controlsOpen = true },
-                    )
-                }
-                if (visibleBooks.isEmpty()) {
+            } else {
+                // Compact must be visibly denser than the normal grid, not just a
+                // smaller caption on the same 3-column layout.
+                val columns = if (mode == "compact") 4 else settings.columns.coerceIn(2, 4)
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(columns),
+                    Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(start = 20.dp, top = 0.dp, end = 20.dp, bottom = 132.dp),
+                    horizontalArrangement = Arrangement.spacedBy(13.dp),
+                    verticalArrangement = Arrangement.spacedBy(20.dp),
+                ) {
+                    item(span = { GridItemSpan(maxLineSpan) }) { LibraryHeader(store) { createOpen = true } }
+                    if (continueBook != null && continueChapter != null) {
+                        item(span = { GridItemSpan(maxLineSpan) }) {
+                            ContinueCard(continueBook, continueChapter) {
+                                onContinue(continueBook, continueChapter)
+                            }
+                        }
+                    }
                     item(span = { GridItemSpan(maxLineSpan) }) {
-                        EmptyState(
-                            Glyph.Book,
-                            if (selectedGroup == null) "书架还空着" else "这个分组还没有书",
-                            if (selectedGroup == null) {
-                                "点右上角 +，先给故事一个名字。书名、封面、章节都可以随时再改。"
-                            } else {
-                                "点右上角 + 新建一本，会自动放进当前分组；也可以从书籍信息里换组。"
-                            },
+                        ShelfHeader(
+                            summary = librarySummary(store, settings, selectedGroup),
+                            onFilters = { controlsOpen = true },
                         )
                     }
-                } else {
-                    items(visibleBooks, key = { it.id }) { book ->
-                        Box(Modifier.animateItem()) {
-                            BookGridCard(
-                                book,
-                                compact = settings.libraryMode == "compact",
-                                groupName = store.bookGroups.firstOrNull { it.id == book.groupId }?.name,
-                                onClick = { openBook(book) },
+                    if (visibleBooks.isEmpty()) {
+                        item(span = { GridItemSpan(maxLineSpan) }) {
+                            EmptyState(
+                                Glyph.Book,
+                                if (selectedGroup == null) "书架还空着" else "这个分组还没有书",
+                                if (selectedGroup == null) {
+                                    "点右上角 +，先给故事一个名字。书名、封面、章节都可以随时再改。"
+                                } else {
+                                    "点右上角 + 新建一本，会自动放进当前分组；也可以从书籍信息里换组。"
+                                },
                             )
+                        }
+                    } else {
+                        items(visibleBooks, key = { it.id }) { book ->
+                            Box(Modifier.animateItem()) {
+                                BookGridCard(
+                                    book,
+                                    compact = mode == "compact",
+                                    groupName = store.bookGroups.firstOrNull { it.id == book.groupId }?.name,
+                                    onClick = { openBook(book) },
+                                )
+                            }
                         }
                     }
                 }
@@ -513,8 +534,10 @@ fun LibraryScreen(
         GroupManagerSheet(GroupKind.BOOK, store) { groupManagerOpen = false }
     }
     if (controlsOpen) {
-        InlineModalSheet(onDismiss = { controlsOpen = false }) { _ ->
-            DialogTitle("书架筛选与排布", "布局、分栏和分组集中在这里。", onClose = { controlsOpen = false })
+        // 3.26.47：X 走框架的 close()——先跑面板滑出、等退出动画空闲后才 onDismiss，
+        // 不再直接改外层状态把宿主一帧卸载（否则面板在一帧里消失、遮罩硬切）。
+        InlineModalSheet(onDismiss = { controlsOpen = false }) { close ->
+            DialogTitle("书架筛选与排布", "布局、分栏和分组集中在这里。", onClose = close)
             Spacer(Modifier.height(14.dp))
             Txt("排布", size = 10f, color = LocalInk.current.palette.muted)
             Spacer(Modifier.height(7.dp))
