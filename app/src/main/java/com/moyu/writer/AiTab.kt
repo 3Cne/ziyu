@@ -183,8 +183,11 @@ private fun ToolTraceStrip(tools: List<ToolTrace>, ui: InkUi, p: InkPalette, id:
                     .background(if (failed) ui.accent else p.muted.copy(alpha = .55f), CircleShape)
             )
             Spacer(Modifier.width(7.dp))
+            // 3.26.57：本轮真联网搜过几次，接在摘要行尾，不展开也能数。
+            val webCalls = tools.count { it.name == "web_search" }
             Txt(
-                "用了 " + tools.size + " 个工具 · " + tools.take(3).joinToString("、") { it.label },
+                "用了 " + tools.size + " 个工具 · " + tools.take(3).joinToString("、") { it.label } +
+                    (if (webCalls > 0) " · 联网 " + webCalls + " 次" else ""),
                 size = 10.5f,
                 color = p.muted,
                 lineHeight = 14f,

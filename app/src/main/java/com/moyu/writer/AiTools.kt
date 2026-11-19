@@ -1572,7 +1572,7 @@ object AiTools {
                     val e = env
                     when {
                         e == null -> bad(AiToolError.NO_RUNTIME, "当前没有运行环境，联不了网")
-                        !e.webEnabled -> bad(AiToolError.WEB_DISABLED, "联网没开。作者可以在 设置 → 问书 → 联网与文件 打开")
+                        !e.webEnabled -> bad(AiToolError.WEB_DISABLED, "联网没开。作者可以在 设置 → 问书 → 联网与工具 打开")
                         e.searches >= e.webMax -> bad(
                             AiToolError.BUDGET_EXHAUSTED,
                             "这次已经搜了 " + e.searches + " 次，到上限了；先用已有结果回答",
@@ -1600,7 +1600,7 @@ object AiTools {
                     val e = env
                     when {
                         e == null -> bad(AiToolError.NO_RUNTIME, "当前没有运行环境，联不了网")
-                        !e.webEnabled -> bad(AiToolError.WEB_DISABLED, "联网没开。作者可以在 设置 → 问书 → 联网与文件 打开")
+                        !e.webEnabled -> bad(AiToolError.WEB_DISABLED, "联网没开。作者可以在 设置 → 问书 → 联网与工具 打开")
                         e.fetches >= 3 -> bad(AiToolError.BUDGET_EXHAUSTED, "这次已经抓了 " + e.fetches + " 页，到上限了")
                         else -> {
                             e.fetches++
