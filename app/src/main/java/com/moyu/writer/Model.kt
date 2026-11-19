@@ -285,11 +285,16 @@ data class BookBible(
     )
 }
 
+/**
+ * 3.26.52：默认外观对齐用户真机当前设置（来源：backups/v32643/before-1919.json 的 settings）。
+ * 全新安装（没有 moyu.json）时直接落到这套；旧数据 / 旧备份里已有的字段照旧读取，不受影响。
+ * 只放外观类字段（主题、点缀色、字体、字号、纸面、分节、标签栏、玻璃）；功能类默认不动。
+ */
 data class AppSettings(
-    val theme: String = "paper",
-    val accent: Long = 0xFF22221E,
-    val font: String = "serif",
-    val fontScale: Float = 1f,
+    val theme: String = "system",
+    val accent: Long = 0xFF9A4B43,
+    val font: String = "sans",
+    val fontScale: Float = .93f,
     val lineHeight: Float = 1.82f,
     val pageMargin: Float = 22f,
     val glow: Boolean = true,
@@ -308,28 +313,28 @@ data class AppSettings(
     val dockOpen: Boolean = false,
     // Liquid-glass knobs, two independent sets: the whole tab bar and the
     // selected lens inside it.
-    val tabBlur: Float = 8f,
-    val tabRefraction: Float = 30f,
-    val tabDispersion: Boolean = true,
+    val tabBlur: Float = 0f,
+    val tabRefraction: Float = 9.776876f,
+    val tabDispersion: Boolean = false,
     val tabShadow: Float = .30f,
     // Tint concentration of the glass: 1 keeps today's look, 0 leaves only the
     // blur/refraction. Separate for the bar body and the selected lens.
-    val tabBarOpacity: Float = 0f,
+    val tabBarOpacity: Float = .83671397f,
     val tabLensOpacity: Float = 0f,
     /** 0..1 strength of the inner bevel band: the bar and the selected lens
      *  each get their own, so the thickness can be tuned separately. */
-    val tabEdge: Float = 1f,
+    val tabEdge: Float = 0f,
     val lensEdge: Float = 1f,
     val lensRefraction: Float = 9f,
     val lensBlur: Float = 0f,
     val lensDispersion: Boolean = true,
     val lensShadow: Float = .28f,
-    val tabNames: List<String> = listOf("书架", "笔记", "数据", "设置"),
+    val tabNames: List<String> = listOf("书架", "笔记", "数据", "问书", "设置"),
     /** 被关掉的底部页面 key：library / notes / stats / ai。设置页永远显示。 */
-    val hiddenTabs: List<String> = emptyList(),
+    val hiddenTabs: List<String> = listOf("stats"),
     val dailyGoal: Int = 2000,
     val indent: Boolean = true,
-    val sectionStyle: String = "asterisk",
+    val sectionStyle: String = "line",
     val sectionSymbol: String = "＊　＊　＊",
     val autoSave: Int = 700,
     val showWordCount: Boolean = true,
@@ -338,7 +343,7 @@ data class AppSettings(
     val appName: String = "素纸",
     val showFps: Boolean = false,
     val autoUpdate: Boolean = true,
-    val paperStyle: String = "plain",
+    val paperStyle: String = "solid",
     val paperLineAlpha: Float = .5f,
     val onboardingDone: Boolean = false,
     /**
@@ -396,26 +401,26 @@ data class AppSettings(
     val noteMaxTokens: Int = 8000,
     /** Glass on the AI input row: veil, blur, edge band, refraction, shadow. */
     val fieldGlassOpacity: Float = .18f,
-    val fieldGlassBlur: Float = 10f,
-    val fieldGlassEdge: Float = 1f,
-    val fieldGlassRefraction: Float = 16f,
-    val fieldGlassShadow: Float = .14f,
-    val fieldGlassDispersion: Boolean = true,
+    val fieldGlassBlur: Float = 11.744422f,
+    val fieldGlassEdge: Float = 0f,
+    val fieldGlassRefraction: Float = 12.425123f,
+    val fieldGlassShadow: Float = .3296146f,
+    val fieldGlassDispersion: Boolean = false,
     /** Glass on the AI buttons (link / send), tuned on their own because they
      *  are small round pills over moving text. */
     val btnGlassOpacity: Float = .18f,
     val btnGlassBlur: Float = 12f,
-    val btnGlassEdge: Float = 1f,
+    val btnGlassEdge: Float = 0f,
     val btnGlassRefraction: Float = 18f,
     val btnGlassShadow: Float = .16f,
-    val btnGlassDispersion: Boolean = true,
+    val btnGlassDispersion: Boolean = false,
     /** Glass on the motion notification, tuned on its own. */
-    val bubbleGlassOpacity: Float = .18f,
-    val bubbleGlassBlur: Float = 12f,
-    val bubbleGlassEdge: Float = 1f,
-    val bubbleGlassRefraction: Float = 18f,
-    val bubbleGlassShadow: Float = .16f,
-    val bubbleGlassDispersion: Boolean = true,
+    val bubbleGlassOpacity: Float = .44114578f,
+    val bubbleGlassBlur: Float = 0f,
+    val bubbleGlassEdge: Float = 0f,
+    val bubbleGlassRefraction: Float = 15.375253f,
+    val bubbleGlassShadow: Float = .2530426f,
+    val bubbleGlassDispersion: Boolean = false,
 )
 
 data class AppData(
