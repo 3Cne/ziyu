@@ -85,13 +85,18 @@ import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.min
@@ -139,15 +144,9 @@ fun StorySheet(
 ) {
     // 3.26.47：导航 = 来源（我的/AI）→ 视图（角色/时间线/大纲）；默认停在「我的 · 大纲」（写作前规划台）。
     val pager = remember { StoryPagerState() }
-    // 3.26.45：待同意的 AI 改动（AiBible 侧车 → 待同意抽屉；映射见 storyPendingChanges）。
-    // 3.26.58：抽屉是页面级的一处（[StoryPendingDrawer]），两侧来源 × 三个视图看到的是同一份。
-    var pending by remember(book.id) { mutableStateOf(storyPendingChanges(book.id)) }
-    LaunchedEffect(book.bible) { pending = storyPendingChanges(book.id) }
-    fun resolveChange(change: StoryPendingChange, accept: Boolean) {
-        storyResolveChange(book.id, change.id, accept)
-        pending = pending.filterNot { it.id == change.id }
-        ToastBus.show(if (accept) "已同意这一处 AI 改动" else "已拒绝这一处 AI 改动")
-    }
+    // 3.26.58：待同意抽屉是页面级的一处（两侧来源 × 三个视图看到的是同一份）。
+    // 3.26.59：计数与抽屉一起下沉到 [StoryPageScaffold]（自包含），抽屉本体走可复用宿主
+    // [StoryPendingDrawerHost]（AiTab 也调它），面板这里不再持有这份状态。
 
     val ui = LocalInk.current
     val synced = remember(book.bible, pager.syncTick) { bibleSyncedIds(book.id) }
@@ -158,7 +157,6 @@ fun StorySheet(
         // 3.26.45：给 AiBible 的无参入口预热 Context / Store（待同意、同步预览都靠它取数据）。
         AiBible.host(appCtx, store)
         AiBibleSync.noteBookOpened(appCtx, store, book.id)
-        pending = storyPendingChanges(book.id)
     }
     val sync = AiBibleSync.progressFor(book.id)
     var headerMenu by remember { mutableStateOf(false) }
@@ -205,9 +203,7 @@ fun StorySheet(
             onOpenChapter = onOpenChapter,
             pager = pager,
             syncHost = syncHost,
-            pending = pending,
             synced = synced,
-            resolve = { c, a -> resolveChange(c, a) },
             bleed = true,
             modifier = Modifier.fillMaxSize(),
         )
@@ -291,8 +287,6 @@ private fun CharacterPane(
     book: Book,
     onBible: (BookBible) -> Unit,
     syncHost: StorySyncHost,
-    pending: List<StoryPendingChange>,
-    resolve: (StoryPendingChange, Boolean) -> Unit,
     synced: Set<String>,
     readOnly: Boolean,
 ) {
@@ -339,9 +333,8 @@ private fun CharacterPane(
 
     // 3.26.19：工作台模式——上半区自己滚，主按钮固定在 pane 底部，长内容不会把按钮顶出屏幕。
     StoryPageScaffold(
+        book = book,
         syncHost = syncHost,
-        pending = pending,
-        resolve = resolve,
         primaryLabel = if (readOnly) "同步 AI 内容到我的" else "新建角色",
         primaryGlyph = if (readOnly) Glyph.Sparkles else Glyph.Plus,
         onPrimary = { if (readOnly) syncHost.requestSync() else creating = true },
@@ -439,7 +432,7 @@ private fun CharacterPane(
                 subtitle = "角色 · ${bible.relationsOf(c.id).size} 条关系",
                 actions = listOf(
                     StoryMenuAction("加一条关系", "和另一个角色连线；同一对只留一条", Glyph.Link) { linking = c },
-                    StoryMenuAction("编辑角色", "名字 / 身份 / 一句话 / 球的颜色", Glyph.Edit) { editing = c },
+                    StoryMenuAction("编辑角色", "名字 / 身份 / 阵营 / 性格外貌 / 一句话 / 球的颜色", Glyph.Edit) { editing = c },
                     StoryMenuAction("删除角色", "和 TA 相关的关系会一起删掉", Glyph.Trash) { deleting = c },
                 ),
                 onDismiss = { charMenu = false },
@@ -461,17 +454,36 @@ private fun CharacterPane(
         CharacterEditor(
             initial = editing,
             onDismiss = { creating = false; editing = null },
-            onSave = { name, role, note, color ->
+            onSave = { name, role, traits, faction, note, color ->
                 val b = book.bible
                 if (editing == null) {
-                    val c = StoryCharacter(name = name, role = role, note = note, color = color)
+                    // 3.26.59：手动新建也要带上性格外貌 / 阵营（空串 = 没填，与 role / note 同口径）。
+                    val c = StoryCharacter(
+                        name = name,
+                        role = role,
+                        traits = traits,
+                        faction = faction,
+                        note = note,
+                        color = color,
+                    )
                     onBible(b.copy(characters = b.characters + c))
                     pick(c.id)
                 } else {
                     onBible(
                         b.copy(
                             characters = b.characters.map {
-                                if (it.id == editing!!.id) it.copy(name = name, role = role, note = note, color = color) else it
+                                if (it.id == editing!!.id) {
+                                    it.copy(
+                                        name = name,
+                                        role = role,
+                                        traits = traits,
+                                        faction = faction,
+                                        note = note,
+                                        color = color,
+                                    )
+                                } else {
+                                    it
+                                }
                             },
                         ),
                     )
@@ -548,10 +560,13 @@ private fun CharacterPane(
         StoryReadOnlySheet(
             title = c.name.ifBlank { "未命名角色" },
             subtitle = "AI 角色 · ${originLabel(c.origin)}",
-            rows = listOf(
-                "身份" to c.role,
-                "一句话" to c.note,
-                "球的颜色" to (c.color ?: "自动"),
+            // 3.26.59：详情列出 身份 / 阵营 / 性格外貌 / 一句话；空项跳过（不占一行「（空）」）。
+            // 性格外貌只在这里展开——卡片上不铺（整段太长会把卡片撑高）。
+            rows = listOfNotNull(
+                c.role.takeIf { it.isNotBlank() }?.let { "身份" to it },
+                c.faction.takeIf { it.isNotBlank() }?.let { "阵营" to it },
+                c.traits.takeIf { it.isNotBlank() }?.let { "性格外貌" to it },
+                c.note.takeIf { it.isNotBlank() }?.let { "一句话" to it },
             ),
             onDismiss = { detail = null },
         )
@@ -1446,8 +1461,6 @@ private fun TimelinePane(
     onBible: (BookBible) -> Unit,
     onOpenChapter: (String) -> Unit,
     syncHost: StorySyncHost,
-    pending: List<StoryPendingChange>,
-    resolve: (StoryPendingChange, Boolean) -> Unit,
     synced: Set<String>,
     readOnly: Boolean,
 ) {
@@ -1465,9 +1478,8 @@ private fun TimelinePane(
 
     // 3.26.19：工作台模式——上半区自己滚，主按钮固定在 pane 底部。
     StoryPageScaffold(
+        book = book,
         syncHost = syncHost,
-        pending = pending,
-        resolve = resolve,
         primaryLabel = if (readOnly) "同步 AI 内容到我的" else "新建事件",
         primaryGlyph = if (readOnly) Glyph.Sparkles else Glyph.Plus,
         onPrimary = { if (readOnly) syncHost.requestSync() else creating = true },
@@ -1780,8 +1792,6 @@ private fun OutlinePane(
     book: Book,
     onBible: (BookBible) -> Unit,
     syncHost: StorySyncHost,
-    pending: List<StoryPendingChange>,
-    resolve: (StoryPendingChange, Boolean) -> Unit,
     synced: Set<String>,
     readOnly: Boolean,
 ) {
@@ -1830,9 +1840,8 @@ private fun OutlinePane(
 
     // 3.26.19：工作台模式——列表自己滚，主按钮固定在 pane 底部。
     StoryPageScaffold(
+        book = book,
         syncHost = syncHost,
-        pending = pending,
-        resolve = resolve,
         primaryLabel = if (readOnly) "同步 AI 内容到我的" else "新建大纲",
         primaryGlyph = if (readOnly) Glyph.Sparkles else Glyph.Plus,
         onPrimary = { if (readOnly) syncHost.requestSync() else creating = true },
@@ -2144,15 +2153,24 @@ private fun toggleOutlineBeat(bible: BookBible, node: OutlineNode, beat: Outline
 
 // ───────────────────────── 编辑器 ─────────────────────────
 
+/**
+ * 角色编辑器（新建 / 编辑共用）。3.26.59 在「身份」之后、「备注（一句话）」之前加两格：
+ * - 阵营所属：[StoryCharacter.faction]，单行，门派 / 组织 / 势力；
+ * - 性格外貌：[StoryCharacter.traits]，多行，性格 / 长相 / 口癖。
+ * 两格都沿用同一个 [InkField]（不引入新控件类型）；空串 = 没填，与 role / note 同口径。
+ * 保存回调顺序：名字、身份、阵营、性格外貌、一句话、球的颜色（null = 自动）。
+ */
 @Composable
 private fun CharacterEditor(
     initial: StoryCharacter?,
     onDismiss: () -> Unit,
-    onSave: (String, String, String, String?) -> Unit,
+    onSave: (name: String, role: String, traits: String, faction: String, note: String, color: String?) -> Unit,
 ) {
     val ui = LocalInk.current
     var name by remember { mutableStateOf(initial?.name ?: "") }
     var role by remember { mutableStateOf(initial?.role ?: "") }
+    var traits by remember { mutableStateOf(initial?.traits ?: "") }
+    var faction by remember { mutableStateOf(initial?.faction ?: "") }
     var note by remember { mutableStateOf(initial?.note ?: "") }
     // 3.26.24：null = 自动色，按角色 id 稳定取色板。
     var color by remember { mutableStateOf(initial?.color) }
@@ -2164,6 +2182,17 @@ private fun CharacterEditor(
         InkField(name, { name = it }, "名字")
         Spacer(Modifier.height(10.dp))
         InkField(role, { role = it }, "身份：主角 / 配角 / 反派（可空）")
+        Spacer(Modifier.height(10.dp))
+        // 3.26.59：阵营所属（单行）放在身份之后；性格外貌（多行）紧跟其后，备注仍在最后。
+        InkField(faction, { faction = it }, "阵营所属：门派 / 组织 / 势力（可空）")
+        Spacer(Modifier.height(10.dp))
+        InkField(
+            traits,
+            { traits = it },
+            "性格外貌：性格、长相、说话习惯（可空）",
+            singleLine = false,
+            minHeight = 76.dp,
+        )
         Spacer(Modifier.height(10.dp))
         InkField(note, { note = it }, "一句话：他是谁、想要什么（可空）", singleLine = false, minHeight = 76.dp)
         Spacer(Modifier.height(16.dp))
@@ -2198,7 +2227,7 @@ private fun CharacterEditor(
             PrimaryButton(
                 "保存",
                 {
-                    onSave(name.trim(), role.trim(), note.trim(), color)
+                    onSave(name.trim(), role.trim(), traits.trim(), faction.trim(), note.trim(), color)
                     close()
                 },
                 Modifier.weight(1f),
@@ -2729,19 +2758,11 @@ internal fun StoryBibleFloatSheet(
     var showLog by remember { mutableStateOf(false) }
     // 3.26.47：标题栏的撤销 / 改动记录两个次操作收进「···」菜单。
     var menu by remember { mutableStateOf(false) }
-    var pending by remember(book.id) { mutableStateOf(storyPendingChanges(book.id)) }
     val appCtx = LocalContext.current.applicationContext
     val store = LocalStore.current
     LaunchedEffect(book.id) {
-        // 3.26.45：预热 AiBible 的无参入口，再读一次待同意（故事面板打开时可能已有侧车）。
+        // 3.26.45：预热 AiBible 的无参入口（同步预览 / 待同意抽屉都靠它取数据）。
         AiBible.host(appCtx, store)
-        pending = storyPendingChanges(book.id)
-    }
-    LaunchedEffect(book.bible) { pending = storyPendingChanges(book.id) }
-    fun resolveChange(change: StoryPendingChange, accept: Boolean) {
-        storyResolveChange(book.id, change.id, accept)
-        pending = pending.filterNot { it.id == change.id }
-        ToastBus.show(if (accept) "已同意这一处 AI 改动" else "已拒绝这一处 AI 改动")
     }
     val synced = remember(book.bible, pager.syncTick) { bibleSyncedIds(book.id) }
     val sheetH = (LocalConfiguration.current.screenHeightDp * .60f).dp
@@ -2801,9 +2822,7 @@ internal fun StoryBibleFloatSheet(
                         onOpenChapter = {},
                         pager = pager,
                         syncHost = syncHost,
-                        pending = pending,
                         synced = synced,
-                        resolve = { c, a -> resolveChange(c, a) },
                         bleed = false,
                         modifier = Modifier.weight(1f).fillMaxWidth(),
                     )
@@ -2903,6 +2922,7 @@ private fun bibleKindLabel(kind: String): String = when (kind) {
  * 待同意的 AI 改动：把 AiBible 的字段级差异 [BibleChange] 映射成待同意抽屉的一条。
  * 角色 / 关系归角色 tab，事件归时间线，大纲归大纲；三个视图看到的是**同一份**列表
  * （3.26.58：不再按视图过滤，抽屉是页面级的一处，计数也按全书待同意算）。
+ * 3.26.59：读取方只有 [StoryPageScaffold]（footer 计数）与 [StoryPendingDrawerHost]（抽屉）。
  */
 private fun storyPendingChanges(bookId: String): List<StoryPendingChange> =
     pendingChanges(bookId).map { c ->
@@ -2983,9 +3003,7 @@ private fun StoryNavBody(
     onOpenChapter: (String) -> Unit,
     pager: StoryPagerState,
     syncHost: StorySyncHost,
-    pending: List<StoryPendingChange>,
     synced: Set<String>,
-    resolve: (StoryPendingChange, Boolean) -> Unit,
     bleed: Boolean,
     modifier: Modifier = Modifier,
 ) {
@@ -3007,9 +3025,6 @@ private fun StoryNavBody(
                         book = book,
                         onBible = onBible,
                         syncHost = syncHost,
-                        // 3.26.58：三个视图看到的是同一份待同意列表——入口计数与抽屉内容不再按视图分。
-                        pending = pending,
-                        resolve = resolve,
                         synced = synced,
                         readOnly = readOnly,
                     )
@@ -3018,8 +3033,6 @@ private fun StoryNavBody(
                         onBible = onBible,
                         onOpenChapter = onOpenChapter,
                         syncHost = syncHost,
-                        pending = pending,
-                        resolve = resolve,
                         synced = synced,
                         readOnly = readOnly,
                     )
@@ -3027,8 +3040,6 @@ private fun StoryNavBody(
                         book = book,
                         onBible = onBible,
                         syncHost = syncHost,
-                        pending = pending,
-                        resolve = resolve,
                         synced = synced,
                         readOnly = readOnly,
                     )
@@ -3038,7 +3049,7 @@ private fun StoryNavBody(
     }
 }
 
-// ───────────────────────── 待同意抽屉（两页共用 · 3.26.58） ─────────────────────────
+// ───────────────────────── 待同意抽屉（两页共用 · 3.26.58；3.26.59 提成可复用宿主） ─────────────────────────
 //
 // 3.26.48：AI 页不再是「另一套 pane」——角色 / 时间线 / 大纲三页各只有**一个** composable
 // （[CharacterPane] / [TimelinePane] / [OutlinePane]），我的页与 AI 页用同一段代码、同一个
@@ -3048,6 +3059,9 @@ private fun StoryNavBody(
 // 「都堆一起」），统一收进底部抽屉 [StoryPendingDrawer]：页面只留 footer 里一行「待同意 · N」，
 // 抽屉里**一条一行**，点行展开字段级差异（[PendingChangeDetail]）。
 // 差异的呈现只有这一份、落库仍只有 [storyResolveChange]/`resolveChange` 一条路径。
+//
+// 3.26.59：抽屉对外只有 [StoryPendingDrawerHost] 一个入口（故事页 + AiTab 共用）。宿主自包含
+// 读侧车 / 落库 / 刷新，[StoryPendingDrawer] 只负责画（标题 + 列表 + 行组件），不做数据决策。
 
 /** 待同意一行的类型图标：角色 / 关系 / 事件 / 大纲。 */
 private fun pendingKindGlyph(change: StoryPendingChange): Glyph = when (change.kind) {
@@ -3221,11 +3235,14 @@ private fun PendingChangeRow(
 }
 
 /**
- * 「待同意 AI 改动」抽屉（3.26.58）。
+ * 「待同意 AI 改动」抽屉的**呈现层**（3.26.58；3.26.59 提成可复用宿主，见 [StoryPendingDrawerHost]）。
  *
- * 入口：故事页 footer 的「待同意 · N」行（只在有待同意时出现，见 [StoryPageFooter]）。
+ * 入口：故事页 footer 的「待同意 · N」行（只在有待同意时出现，见 [StoryPageFooter]）；
  * 抽屉里：顶部「待同意 N 处改动」+「全部同意」+ 关闭；下面一条一行（[PendingChangeRow]）。
  * 行右侧同意/拒绝后该行移除、计数减一；全部处理完（pending 空）抽屉自己收起。
+ *
+ * 本函数只画、不做数据决策：待同意从哪来、同意/拒绝怎么落库、收起后怎么刷新，全在
+ * [StoryPendingDrawerHost] 里（故事页与 AiTab 同一个入口，避免复制一份 UI）。
  *
  * 进出场复用 [ModalSheet]（滑入 + 遮罩淡入，退场播完才回调 onDismiss）；
  * 行移除后的落位用 `animateItem`（见 [storyPlacementSpec]）——`motion = none` 全 tween(0)。
@@ -3285,6 +3302,49 @@ private fun StoryPendingDrawer(
             }
             Spacer(Modifier.height(4.dp))
         },
+    )
+}
+
+/**
+ * 待同意抽屉的**可复用宿主**（3.26.59）：故事页 footer 与 AiTab 共用这一个入口。
+ *
+ * 自包含三件事：
+ * ① 读：先 [AiBible.host] 补上静态 ctx / store（AiTab 里没有故事页那段预热），
+ *    再从侧车读待同意（[storyPendingChanges]）；开着抽屉时 AI 侧又写了新改动也跟着 `book.bible` 刷新；
+ * ② 写：同意 / 拒绝只走既有唯一路径 [storyResolveChange] → `AiBible.resolveChange`
+ *    （同意才写 bible；拒绝只记 journal）——**不复制解析、不复制写入**；
+ * ③ 画：直接复用抽屉的既有呈现（[StoryPendingDrawer] → [PendingChangeRow] / [PendingChangeDetail]），
+ *    不复制一套 UI。
+ *
+ * 调用方只需要 `shown` 与 `onDismiss` 两个外部状态；[shown] = false 时这个宿主不组合任何东西，
+ * 所以可以像故事页那样常驻在页面树里、由状态控制显隐。
+ */
+@Composable
+internal fun StoryPendingDrawerHost(
+    book: Book,
+    store: AppStore,
+    shown: Boolean,
+    onDismiss: () -> Unit,
+) {
+    if (!shown) return
+    val appCtx = LocalContext.current.applicationContext
+    // 首次组合就把 AiBible 的宿主补上（幂等）：少了这一步读不到侧车，resolveChange 也会返回 false。
+    var pending by remember(book.id) {
+        AiBible.host(appCtx, store)
+        mutableStateOf(storyPendingChanges(book.id))
+    }
+    // AI 整理 / 工具在抽屉开着时又排队了新的待同意：跟着 bible 变化重读侧车。
+    // 同意会改 bible（本行会跑一次，此时侧车里的那条已被移除）；拒绝不改 bible，靠 onDismiss 后的
+    // 宿主页面补读对齐计数——抽屉里的行自己已经从本地列表移除了。
+    LaunchedEffect(book.bible) { pending = storyPendingChanges(book.id) }
+    StoryPendingDrawer(
+        pending = pending,
+        resolve = { change, accept ->
+            storyResolveChange(book.id, change.id, accept)
+            pending = pending.filterNot { it.id == change.id }
+            ToastBus.show(if (accept) "已同意这一处 AI 改动" else "已拒绝这一处 AI 改动")
+        },
+        onDismiss = onDismiss,
     )
 }
 
@@ -3402,27 +3462,39 @@ private fun LazyListScope.emptyPage(glyph: Glyph, title: String, message: String
 }
 
 /**
- * 两页共用的页面骨架（3.26.48；3.26.58 待同意卡改成底部抽屉）。
+ * 两页共用的页面骨架（3.26.48；3.26.58 待同意卡改成底部抽屉；3.26.59 计数 + 抽屉自包含）。
  *
  * 结构固定成三层，任何一页都不许自己再拼：
  * ① 可滚动内容区（[BoxWithConstraints] 给关系图算高度，两页同一个「30% 夹 150–240dp」规则；
  *    关系图是该列表的**第一个 item**，所以永远在首屏）；
  * ② 底部：待同意入口行（有待同意时才长出来）+ 已同步结果行 + 主按钮（见 [StoryPageFooter]）；
- * ③ 待同意抽屉 [StoryPendingDrawer]——点②的入口才出现，页面本身不再铺任何卡。
+ * ③ 待同意抽屉 [StoryPendingDrawerHost]——点②的入口才出现，页面本身不再铺任何卡。
+ *
+ * 3.26.59：待同意的**计数与抽屉**都住在骨架里——计数从侧车读（[storyPendingChanges]），
+ * 抽屉本体走可复用的 [StoryPendingDrawerHost]（AiTab 也调它），故事页不再自己维护一份列表。
  *
  * 3.26.57 的「页面顶上 28% 卡区 + 卡区内部滚」整个撤掉：卡一多那一段竖拖是死区、一次操作后
  * 下面的卡瞬时上移（用户原话「都堆一起，太乱」）。收进抽屉后页面只剩一行入口。
  */
 @Composable
 private fun StoryPageScaffold(
+    book: Book,
     syncHost: StorySyncHost,
-    pending: List<StoryPendingChange>,
-    resolve: (StoryPendingChange, Boolean) -> Unit,
     primaryLabel: String,
     primaryGlyph: Glyph,
     onPrimary: () -> Unit,
     content: LazyListScope.(graphHeight: Dp) -> Unit,
 ) {
+    val appCtx = LocalContext.current.applicationContext
+    val store = LocalStore.current
+    // 3.26.59：首次组合先读一次侧车；AiBible 还没预热时读不到，预热后无条件再读一次
+    // （与旧版面板层的刷新口径一致），之后跟着 `book.bible` 变化刷新。
+    var pending by remember(book.id) { mutableStateOf(storyPendingChanges(book.id)) }
+    LaunchedEffect(book.id) {
+        AiBible.host(appCtx, store)
+        pending = storyPendingChanges(book.id)
+    }
+    LaunchedEffect(book.bible) { pending = storyPendingChanges(book.id) }
     // 抽屉开关住在骨架里——三个视图 / 两个宿主（故事面板 + 悬浮故事页）共用这一份。
     var drawer by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize()) {
@@ -3446,13 +3518,17 @@ private fun StoryPageScaffold(
             onPrimary = onPrimary,
         )
     }
-    if (drawer) {
-        StoryPendingDrawer(
-            pending = pending,
-            resolve = resolve,
-            onDismiss = { drawer = false },
-        )
-    }
+    // 3.26.59：抽屉本体统一走可复用宿主。收起后再补读一次侧车——拒绝不写 bible，
+    // 靠这一下把 footer 的「待同意 · N」与侧车对齐（旧版是页面列表当场 filter，表现一致）。
+    StoryPendingDrawerHost(
+        book = book,
+        store = store,
+        shown = drawer,
+        onDismiss = {
+            drawer = false
+            pending = storyPendingChanges(book.id)
+        },
+    )
 }
 
 /**
@@ -3806,8 +3882,46 @@ private fun AiOriginTag(origin: String) {
 }
 
 /**
+ * 角色卡第一行的富文本（3.26.59）：**名字 → 身份 ·（阵营，弱化）**。
+ *
+ * 合成一行而不是普通 Row：名字 18f、身份 / 阵营 11f，三段宽度互不相同；用同一个文本行
+ * 才能在窄卡上整体单行省略（`maxLines = 1` + `Ellipsis`），不会出现名字被挤成两行、
+ * 或「· 阵营」被挤出卡片右边。阵营比身份再淡一档，读作身份之外的补充。
+ * 性格外貌不进卡片（整段太长会把卡片撑高），只在点开的详情里出现。
+ */
+private fun characterIdentityLine(c: StoryCharacter, ui: InkUi): AnnotatedString {
+    val role = c.role.trim()
+    val faction = c.faction.trim()
+    return buildAnnotatedString {
+        append(c.name.trim().ifBlank { "未命名" })
+        if (role.isNotEmpty()) {
+            withStyle(SpanStyle(fontSize = 11.sp, color = ui.palette.muted, fontWeight = FontWeight.Normal)) {
+                append("  ")
+                append(role)
+            }
+        }
+        if (faction.isNotEmpty()) {
+            withStyle(
+                SpanStyle(
+                    fontSize = 11.sp,
+                    color = ui.palette.muted.copy(alpha = .72f),
+                    fontWeight = FontWeight.Normal,
+                ),
+            ) {
+                // 有身份才画中间点；只有阵营时直接跟在名字后面（不留下一个孤零零的「·」）。
+                append(if (role.isNotEmpty()) "  ·  " else "  ")
+                append(faction)
+            }
+        }
+    }
+}
+
+/**
  * 角色卡：作者页的「中心角色」与 AI 页的角色列表共用同一套外观
  * （20dp 圆角 / 16dp 内边距 / 18f 名字 / 11f 身份 / 11.5f 一句话）。
+ *
+ * 3.26.59：第一行 = 名字 → 身份 · 阵营（阵营弱化，见 [characterIdentityLine]）；
+ * 性格外貌**不铺在卡上**（会长），只在详情里看。
  *
  * 右上「···」= 卡片次操作（作者页：加关系 / 编辑 / 删除）；AI 页只读，不传 [onMore] 就不画。
  */
@@ -3835,13 +3949,16 @@ private fun StoryCharacterCard(
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.size(10.dp).background(ballColor(character), CircleShape))
                 Spacer(Modifier.width(8.dp))
-                Txt(character.name.ifBlank { "未命名" }, size = 18f, weight = FontWeight.SemiBold)
-                if (character.role.isNotBlank()) {
-                    Spacer(Modifier.width(8.dp))
-                    Txt(character.role, size = 11f, color = ui.palette.muted)
-                }
-                Spacer(Modifier.weight(1f))
+                Txt(
+                    characterIdentityLine(character, ui),
+                    modifier = Modifier.weight(1f),
+                    size = 18f,
+                    weight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
                 if (originTag != null) {
+                    Spacer(Modifier.width(6.dp))
                     AiOriginTag(originTag)
                     Spacer(Modifier.width(6.dp))
                 }
