@@ -367,16 +367,28 @@ data class AppSettings(
      */
     val glassVeilMigrated: Boolean = false,
     /**
-     * 3.26.66：折射带的「弯折宽度」倍率 1.0–4.0（全局，所有玻璃表面共用一条换算）。
-     * 3.26.65 之前它是 GlassBar.kt 里的内部常量 2.2；默认值仍取 2.2，升级后观感不变，
-     * 只有拖动「设置 → 外观 → 玻璃 → 弯折宽度」才变。
+     * 3.26.67：折射带的「弯折宽度」= H（带宽）倍率，**按部件各存一对**：
+     * 标签栏 [tabBend] / 镜片 [lensBend] / 通知 [bubbleBend]。
+     * 3.26.65 之前它是 GlassBar.kt 里的内部常量 2.2；3.26.66 曾做成一对全局字段
+     * （glassBend / glassSqueeze），用户指出「不是全局，是按部件算的」，此为三对。
+     * 3.26.67 同轮还把 H 与 A 拆开：bend 只乘带宽，不再连带放大位移。
+     * 默认 2.2 = 3.26.65/66 的常量 → `H = 基准 × 2.2` 与旧观感一致。
      */
-    val glassBend: Float = 2.2f,
+    val tabBend: Float = 2.2f,
     /**
-     * 3.26.66：「边缘压缩」强度 0.5–1.5（全局，只乘折射带的最大位移，不改带宽）。
-     * 3.26.65 之前它是内部常量 1.0；默认值仍取 1.0。
+     * 3.26.67：「边缘压缩」= A（最大位移）倍率，与带宽正交：`A = 基准 × squeeze`。
+     * 默认 2.2 是**重新标定值**：旧式子是 `A = H × squeeze_旧(1.0) = 基准 × 2.2`，
+     * 取 2.2 才让默认观感与 3.26.66 逐像素一致。
      */
-    val glassSqueeze: Float = 1f,
+    val tabSqueeze: Float = 2.2f,
+    /** 3.26.67：选中镜片自己的弯折宽度（默认同 [tabBend]）。 */
+    val lensBend: Float = 2.2f,
+    /** 3.26.67：选中镜片自己的边缘压缩（默认同 [tabSqueeze]，2.2 = 旧观感）。 */
+    val lensSqueeze: Float = 2.2f,
+    /** 3.26.67：通知 / toast 表面自己的弯折宽度（默认同 [tabBend]）。 */
+    val bubbleBend: Float = 2.2f,
+    /** 3.26.67：通知 / toast 表面自己的边缘压缩（默认同 [tabSqueeze]）。 */
+    val bubbleSqueeze: Float = 2.2f,
     val tabNames: List<String> = listOf("书架", "笔记", "数据", "设置"),
     /** 被关掉的底部页面 key：library / notes / stats。设置页永远显示。 */
     val hiddenTabs: List<String> = listOf("stats"),
@@ -524,8 +536,12 @@ fun AppSettings.withDefaultAppearance(): AppSettings {
         glassRim = d.glassRim,
         glassDisperse = d.glassDisperse,
         glassVeil = d.glassVeil,
-        glassBend = d.glassBend,
-        glassSqueeze = d.glassSqueeze,
+        tabBend = d.tabBend,
+        tabSqueeze = d.tabSqueeze,
+        lensBend = d.lensBend,
+        lensSqueeze = d.lensSqueeze,
+        bubbleBend = d.bubbleBend,
+        bubbleSqueeze = d.bubbleSqueeze,
         sectionStyle = d.sectionStyle,
         sectionSymbol = d.sectionSymbol,
         paperStyle = d.paperStyle,
@@ -1165,9 +1181,13 @@ class AppStore(context: Context) {
             glassEdgeBlur = settings.glassEdgeBlur.coerceIn(0f, 1f),
             glassRim = settings.glassRim.coerceIn(0f, 1f),
             glassVeil = settings.glassVeil.coerceIn(0f, 1f),
-            // 3.26.66：全局弯折/边缘压缩滑杆量程（与 decode 同一口径），手里有坏值也不越界。
-            glassBend = settings.glassBend.coerceIn(1f, 4f),
-            glassSqueeze = settings.glassSqueeze.coerceIn(.5f, 1.5f),
+            // 3.26.67：弯折/边缘压缩按部件 6 个字段的量程（与 decode 同一口径）。
+            tabBend = settings.tabBend.coerceIn(GLASS_BEND_MIN, GLASS_BEND_MAX),
+            tabSqueeze = settings.tabSqueeze.coerceIn(GLASS_SQUEEZE_MIN, GLASS_SQUEEZE_MAX),
+            lensBend = settings.lensBend.coerceIn(GLASS_BEND_MIN, GLASS_BEND_MAX),
+            lensSqueeze = settings.lensSqueeze.coerceIn(GLASS_SQUEEZE_MIN, GLASS_SQUEEZE_MAX),
+            bubbleBend = settings.bubbleBend.coerceIn(GLASS_BEND_MIN, GLASS_BEND_MAX),
+            bubbleSqueeze = settings.bubbleSqueeze.coerceIn(GLASS_SQUEEZE_MIN, GLASS_SQUEEZE_MAX),
             fieldGlassOpacity = settings.fieldGlassOpacity.coerceIn(0f, 1f),
             fieldGlassBlur = settings.fieldGlassBlur.coerceIn(0f, 40f),
             fieldGlassEdge = settings.fieldGlassEdge.coerceIn(0f, 2f),
@@ -1532,9 +1552,11 @@ private fun encodeSettings(s: AppSettings): JSONObject = JSONObject().apply {
     put("glassEdgeBlur", s.glassEdgeBlur.toDouble()); put("glassRim", s.glassRim.toDouble())
     put("glassDisperse", s.glassDisperse); put("glassVeil", s.glassVeil.toDouble())
     put("glassVeilMigrated", s.glassVeilMigrated)
-    // 3.26.66：全局弯折与边缘压缩。旧备份没有这两个键 → 解码落到 AppSettings 默认
-    // （2.2 / 1.0），与 3.26.65 的常量逐像素一致；缺键不影响其它条目。
-    put("glassBend", s.glassBend.toDouble()); put("glassSqueeze", s.glassSqueeze.toDouble())
+    // 3.26.67：弯折/边缘压缩从一对全局改为按部件各一对（标签栏 / 镜片 / 通知）。
+    // 旧全局键 glassBend/glassSqueeze 不再写回；旧备份缺新键 → 解码落 AppSettings 默认。
+    put("tabBend", s.tabBend.toDouble()); put("tabSqueeze", s.tabSqueeze.toDouble())
+    put("lensBend", s.lensBend.toDouble()); put("lensSqueeze", s.lensSqueeze.toDouble())
+    put("bubbleBend", s.bubbleBend.toDouble()); put("bubbleSqueeze", s.bubbleSqueeze.toDouble())
     put("tabNames", JSONArray(s.tabNames))
     put("hiddenTabs", JSONArray(s.hiddenTabs))
     put("dailyGoal", s.dailyGoal); put("indent", s.indent)
@@ -1621,6 +1643,19 @@ private fun decodeSettings(o: JSONObject?): AppSettings {
     } else {
         (o?.optDouble("glassVeil", d.glassVeil.toDouble()) ?: d.glassVeil.toDouble()).toFloat()
     }
+    // 3.26.67：弯折/边缘压缩从「一对全局」改为「按部件各一对」。3.26.66 已提交过、
+    // 旧键 `glassBend` / `glassSqueeze` 可能已落盘：迁移成**标签栏**那一对（旧值当年
+    // 就是条与镜片共用的口径），镜片/通知取默认；新键存在时优先。编码只写新键，
+    // 旧键读到即不再使用，也没有第二次迁移。
+    val legacyBend: Float? = o?.let { if (it.has("glassBend")) it.optDouble("glassBend").toFloat() else null }
+    val legacySqueezeRaw: Float? = o?.let { if (it.has("glassSqueeze")) it.optDouble("glassSqueeze").toFloat() else null }
+    // 旧 squeeze 的量纲是「×H」，新量纲是「×B（未乘 bend 的基准）」：
+    // 旧式 A = H_old × sq_old = B × bend_old × sq_old → 新 squeeze = bend_old × sq_old。
+    // 旧默认 2.2 × 1.0 = 2.2 = 新默认 → 升级后观感不变；调过旧滑杆的力度也按比例保留。
+    // （旧 A 可以超过 .55×minSide 封顶、新 A 会被封顶，极值场景单向收敛，属可接受代价。）
+    val legacySqueeze: Float? = legacySqueezeRaw?.let { sq -> (legacyBend ?: d.tabBend) * sq }
+    fun pick(k: String, fallback: Float, legacy: Float?): Float =
+        (o?.optDouble(k, legacy?.toDouble() ?: fallback.toDouble()) ?: fallback.toDouble()).toFloat()
     return AppSettings(
         theme = o?.optString("theme", d.theme) ?: d.theme,
         accent = o?.optLong("accent", d.accent) ?: d.accent,
@@ -1663,12 +1698,17 @@ private fun decodeSettings(o: JSONObject?): AppSettings {
         // 解码后一律 true：迁移只可能发生一次，下次落盘会把 glassVeilMigrated 键
         // 写进文件；3.26.61 的旧文件（无此键）因此只会被迁一次。
         glassVeilMigrated = true,
-        // 3.26.66：全局弯折/边缘压缩。旧备份没有键 → 取 AppSettings 默认（2.2 / 1.0），
-        // 不迁移旧值、不丢其它条目；显式坏值夹回滑杆量程，避免滑杆读数越界。
-        glassBend = (o?.optDouble("glassBend", d.glassBend.toDouble()) ?: d.glassBend.toDouble())
-            .toFloat().coerceIn(1f, 4f),
-        glassSqueeze = (o?.optDouble("glassSqueeze", d.glassSqueeze.toDouble()) ?: d.glassSqueeze.toDouble())
-            .toFloat().coerceIn(.5f, 1.5f),
+        // 3.26.67：弯折/边缘压缩（按部件 3 对）。缺键 → AppSettings 默认（2.2 / 2.2）；
+        // 标签栏那一对还会读 3.26.66 的旧全局键（迁移）；显式坏值夹回滑杆量程。
+        tabBend = pick("tabBend", d.tabBend, legacyBend).coerceIn(GLASS_BEND_MIN, GLASS_BEND_MAX),
+        tabSqueeze = pick("tabSqueeze", d.tabSqueeze, legacySqueeze)
+            .coerceIn(GLASS_SQUEEZE_MIN, GLASS_SQUEEZE_MAX),
+        lensBend = pick("lensBend", d.lensBend, null).coerceIn(GLASS_BEND_MIN, GLASS_BEND_MAX),
+        lensSqueeze = pick("lensSqueeze", d.lensSqueeze, null)
+            .coerceIn(GLASS_SQUEEZE_MIN, GLASS_SQUEEZE_MAX),
+        bubbleBend = pick("bubbleBend", d.bubbleBend, null).coerceIn(GLASS_BEND_MIN, GLASS_BEND_MAX),
+        bubbleSqueeze = pick("bubbleSqueeze", d.bubbleSqueeze, null)
+            .coerceIn(GLASS_SQUEEZE_MIN, GLASS_SQUEEZE_MAX),
         tabNames = o?.optJSONArray("tabNames")?.let { a -> (0 until a.length()).map { a.optString(it) } }
             ?: d.tabNames,
         hiddenTabs = o?.optJSONArray("hiddenTabs")

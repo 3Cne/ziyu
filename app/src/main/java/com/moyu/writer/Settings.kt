@@ -703,6 +703,9 @@ private fun GlassPreview(
                         palette = p,
                         blurDp = barBlur,
                         refractionDp = barRefraction,
+                        // 3.26.67：这张卡预览的是「标签栏」条，弯折/压缩读标签栏那一对。
+                        bend = ui.settings.tabBend,
+                        squeeze = ui.settings.tabSqueeze,
                         dispersion = barDispersion,
                         shadowAlpha = barShadow,
                         veil = barVeil,
@@ -1736,29 +1739,26 @@ private fun AiSettingsPage(store: AppStore, onBack: () -> Unit) {
     }
 }
 
-// 3.26.66：「弯折宽度 / 边缘压缩」滑杆是 0–100%，内部量程不同。映射只写在这几个
-// 小函数里（纯 UI 换算）；内部默认值仍由 AppSettings 单源给出（2.2 / 1.0）。
-private const val GLASS_BEND_FROM = 1f
-private const val GLASS_BEND_TO = 4f
-private const val GLASS_SQUEEZE_FROM = .5f
-private const val GLASS_SQUEEZE_TO = 1.5f
-
+// 3.26.67：「弯折宽度 / 边缘压缩」滑杆是 0–100%，内部量程见 GlassBar.kt 的
+// GLASS_BEND_* / GLASS_SQUEEZE_*（bend 1–4、squeeze 0.5–4，默认 2.2 / 2.2）。
+// 映射只写在这几个小函数里（纯 UI 换算）；内部默认值仍由 AppSettings 单源给出。
+// 两个滑杆**正交**：宽度只改 H（带宽）、压缩只改 A（位移），不再互相串。
 private fun glassBendToUi(v: Float): Float =
-    ((v - GLASS_BEND_FROM) / (GLASS_BEND_TO - GLASS_BEND_FROM)).coerceIn(0f, 1f)
+    ((v - GLASS_BEND_MIN) / (GLASS_BEND_MAX - GLASS_BEND_MIN)).coerceIn(0f, 1f)
 
 private fun glassBendFromUi(v: Float): Float =
-    GLASS_BEND_FROM + v.coerceIn(0f, 1f) * (GLASS_BEND_TO - GLASS_BEND_FROM)
+    GLASS_BEND_MIN + v.coerceIn(0f, 1f) * (GLASS_BEND_MAX - GLASS_BEND_MIN)
 
 private fun glassSqueezeToUi(v: Float): Float =
-    ((v - GLASS_SQUEEZE_FROM) / (GLASS_SQUEEZE_TO - GLASS_SQUEEZE_FROM)).coerceIn(0f, 1f)
+    ((v - GLASS_SQUEEZE_MIN) / (GLASS_SQUEEZE_MAX - GLASS_SQUEEZE_MIN)).coerceIn(0f, 1f)
 
 private fun glassSqueezeFromUi(v: Float): Float =
-    GLASS_SQUEEZE_FROM + v.coerceIn(0f, 1f) * (GLASS_SQUEEZE_TO - GLASS_SQUEEZE_FROM)
+    GLASS_SQUEEZE_MIN + v.coerceIn(0f, 1f) * (GLASS_SQUEEZE_MAX - GLASS_SQUEEZE_MIN)
 
 /** A named slider with its live value and a one-line explanation. Used by the
  *  glass section so the knobs do not need bespoke rows.
- *  3.26.66 加 [subtitle]：只给「弯折宽度 / 边缘压缩」写「越大…」的一句话说明；
- *  其它行不传时与原来逐像素一致（标题行 + 滑杆的结构不变）。 */
+ *  3.26.67：[subtitle] 给「弯折宽度 / 边缘压缩」写「只改什么、不改什么」的一句话，
+ *  让两个正交滑杆的区别一眼可读；其它行不传时与原来逐像素一致（标题行 + 滑杆）。 */
 @Composable
 private fun GlassSliderRow(
     title: String,
@@ -1825,28 +1825,8 @@ private fun GlassSettingsPage(store: AppStore, onBack: () -> Unit) {
     // the reason "nothing moves while I drag": each new value reset the timer,
     // so a continuous drag never let a single snapshot through.
     SettingsPage("玻璃", "", onBack) {
-        // 3.26.66：弯折宽度 / 边缘压缩是**全局**参数（乘到所有玻璃表面的折射带），
-        // 不属于三个表面分组，所以放在切换器之前单独一节；切换器与下方六行不动。
-        item { SectionCaption("弯折") }
-        item {
-            SettingGroup {
-                GlassSliderRow(
-                    "弯折宽度",
-                    glassBendToUi(s.glassBend),
-                    0f,
-                    1f,
-                    subtitle = "越大，边缘被掰弯的带越宽",
-                ) { v -> store.updateSettings { it.copy(glassBend = glassBendFromUi(v)) } }
-                RowDivider()
-                GlassSliderRow(
-                    "边缘压缩",
-                    glassSqueezeToUi(s.glassSqueeze),
-                    0f,
-                    1f,
-                    subtitle = "越大，边缘内容挤得越狠",
-                ) { v -> store.updateSettings { it.copy(glassSqueeze = glassSqueezeFromUi(v)) } }
-            }
-        }
+        // 3.26.67：弯折/压缩不再是全页一节——它们**按部件各一套**，挪进每组的滑杆
+        // 列表末尾（见 GlassKnobs）；这里只剩「选哪个部件 → 预览 → 该部件的行」。
         item {
             Segmented(
                 listOf("标签栏", "镜片", "通知"),
@@ -1884,29 +1864,35 @@ private fun GlassSettingsPage(store: AppStore, onBack: () -> Unit) {
                     when (g) {
                         0 -> GlassKnobs(
                             blur = s.tabBlur, onBlur = { v -> store.updateSettings { it.copy(tabBlur = v) } },
-                            refraction = s.tabRefraction, onRefraction = { v -> store.updateSettings { it.copy(tabRefraction = v) } },
                             shadow = s.tabShadow, onShadow = { v -> store.updateSettings { it.copy(tabShadow = v) } },
                             opacity = s.tabBarOpacity, onOpacity = { v -> store.updateSettings { it.copy(tabBarOpacity = v) } },
                             edge = s.tabEdge, onEdge = { v -> store.updateSettings { it.copy(tabEdge = v) } },
                             dispersion = s.tabDispersion, onDispersion = { v -> store.updateSettings { it.copy(tabDispersion = v) } },
+                            // 3.26.67：标签栏自己的弯折/压缩（与镜片、通知互不影响）。
+                            bend = s.tabBend, onBend = { v -> store.updateSettings { it.copy(tabBend = glassBendFromUi(v)) } },
+                            squeeze = s.tabSqueeze, onSqueeze = { v -> store.updateSettings { it.copy(tabSqueeze = glassSqueezeFromUi(v)) } },
                             opacityLabel = "整条不透明度",
                         )
                         1 -> GlassKnobs(
                             blur = s.lensBlur, onBlur = { v -> store.updateSettings { it.copy(lensBlur = v) } },
-                            refraction = s.lensRefraction, onRefraction = { v -> store.updateSettings { it.copy(lensRefraction = v) } },
                             shadow = s.lensShadow, onShadow = { v -> store.updateSettings { it.copy(lensShadow = v) } },
                             opacity = s.tabLensOpacity, onOpacity = { v -> store.updateSettings { it.copy(tabLensOpacity = v) } },
                             edge = s.lensEdge, onEdge = { v -> store.updateSettings { it.copy(lensEdge = v) } },
                             dispersion = s.lensDispersion, onDispersion = { v -> store.updateSettings { it.copy(lensDispersion = v) } },
+                            // 3.26.67：选中镜片自己的弯折/压缩。
+                            bend = s.lensBend, onBend = { v -> store.updateSettings { it.copy(lensBend = glassBendFromUi(v)) } },
+                            squeeze = s.lensSqueeze, onSqueeze = { v -> store.updateSettings { it.copy(lensSqueeze = glassSqueezeFromUi(v)) } },
                             opacityLabel = "镜片不透明度",
                         )
                         else -> GlassKnobs(
                             blur = s.bubbleGlassBlur, onBlur = { v -> store.updateSettings { it.copy(bubbleGlassBlur = v) } },
-                            refraction = s.bubbleGlassRefraction, onRefraction = { v -> store.updateSettings { it.copy(bubbleGlassRefraction = v) } },
                             shadow = s.bubbleGlassShadow, onShadow = { v -> store.updateSettings { it.copy(bubbleGlassShadow = v) } },
                             opacity = s.bubbleGlassOpacity, onOpacity = { v -> store.updateSettings { it.copy(bubbleGlassOpacity = v) } },
                             edge = s.bubbleGlassEdge, onEdge = { v -> store.updateSettings { it.copy(bubbleGlassEdge = v) } },
                             dispersion = s.bubbleGlassDispersion, onDispersion = { v -> store.updateSettings { it.copy(bubbleGlassDispersion = v) } },
+                            // 3.26.67：通知 / toast 自己的弯折/压缩。
+                            bend = s.bubbleBend, onBend = { v -> store.updateSettings { it.copy(bubbleBend = glassBendFromUi(v)) } },
+                            squeeze = s.bubbleSqueeze, onSqueeze = { v -> store.updateSettings { it.copy(bubbleSqueeze = glassSqueezeFromUi(v)) } },
                             opacityLabel = "通知不透明度",
                         )
                     }
@@ -1916,21 +1902,27 @@ private fun GlassSettingsPage(store: AppStore, onBack: () -> Unit) {
     }
 }
 
-/** The same six rows for every group, so the three tabs cannot drift apart. */
+/**
+ * The same seven rows for every group, so the three tabs cannot drift apart.
+ *
+ * 3.26.67：删掉「边缘折射」这一行 UI（它与「弯折宽度」都乘在 H 上，两个滑杆看起来
+ * 一样）；它的值只作为该部件折射基准 B 留在 AppSettings 里（不再被 UI 写）。末尾追加
+ * 「弯折宽度 / 边缘压缩」两行：前者只改 H（折射带铺多宽），后者只改 A（边缘内容被挤
+ * 得多狠），两条换算互不出现对方参数，所以拖哪个只变哪个。三组各读各的字段。
+ */
 @Composable
 private fun GlassKnobs(
     blur: Float, onBlur: (Float) -> Unit,
-    refraction: Float, onRefraction: (Float) -> Unit,
     shadow: Float, onShadow: (Float) -> Unit,
     opacity: Float, onOpacity: (Float) -> Unit,
     edge: Float, onEdge: (Float) -> Unit,
     dispersion: Boolean, onDispersion: (Boolean) -> Unit,
+    bend: Float, onBend: (Float) -> Unit,
+    squeeze: Float, onSqueeze: (Float) -> Unit,
     opacityLabel: String,
 ) {
     SettingGroup {
         GlassSliderRow("模糊", blur, 0f, 30f) { onBlur(it) }
-        RowDivider()
-        GlassSliderRow("边缘折射", refraction, 0f, 40f) { onRefraction(it) }
         RowDivider()
         GlassSliderRow("内外阴影", shadow, 0f, 1f) { onShadow(it) }
         RowDivider()
@@ -1939,5 +1931,23 @@ private fun GlassKnobs(
         GlassSliderRow("边缘带", edge, 0f, 2f) { onEdge(it) }
         RowDivider()
         DispersionRow(dispersion) { onDispersion(it) }
+        RowDivider()
+        // 3.26.67：两行都显示 0–100%，内部量程由 glassBendFromUi / glassSqueezeFromUi
+        // 映射（弯折 1–4 默认 2.2；压缩 0.5–4 默认 2.2 → 默认观感 = 3.26.66）。
+        GlassSliderRow(
+            "弯折宽度",
+            glassBendToUi(bend),
+            0f,
+            1f,
+            subtitle = "只改变折射带铺多宽，不改变折得多狠",
+        ) { onBend(it) }
+        RowDivider()
+        GlassSliderRow(
+            "边缘压缩",
+            glassSqueezeToUi(squeeze),
+            0f,
+            1f,
+            subtitle = "只改变边缘内容挤得多狠，不改变带宽",
+        ) { onSqueeze(it) }
     }
 }

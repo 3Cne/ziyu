@@ -59,33 +59,45 @@ import androidx.compose.runtime.compositionLocalOf/**
  * 「压缩」多狠。3.26.58 原版把滑杆值同时当 H 和 A（9.78dp），在 56dp 高的条上
  * 只占一圈 17% 的窄边 → 只能读出「边上有点扭曲」，读不出整块玻璃被掰弯。
  *
- * 3.26.66：放大倍率与压缩强度不再写死，改成「设置 → 外观 → 玻璃 → 弯折」里的两个
- * 全局设置项（[AppSettings.glassBend] / [AppSettings.glassSqueeze]）。换算仍只有
- * [glassLensBand] + [liquidGlassBar] 这一条路径：真表面、设置页预览、输入框/按钮/
- * 通知都走它，预览不另写公式。默认 2.2 / 1.0 = 3.26.65 的常量，升级后逐像素一致。
+ * 3.26.66：放大倍率与压缩强度不再写死，改成设置项。3.26.67 起这两个量**按部件各
+ * 一套**（标签栏 [AppSettings.tabBend] / 镜片 [AppSettings.lensBend] / 通知
+ * [AppSettings.bubbleBend]，各带自己的 squeeze），并且拆成**正交**的两个滑杆：
+ * 「弯折宽度」只进 [glassLensBand]（H），「边缘压缩」只进 [glassLensAmount]（A）——
+ * 3.26.66 的 `A = H × squeeze` 会让两个滑杆看起来都只在放大同一件事（用户实测
+ * 「弯折宽度和边缘折射效果一样」）。`liquidGlassBar` 不再自己读设置，由调用方
+ * 显式传 `bend` / `squeeze`。默认 2.2 / 2.2 与 3.26.66 的观感逐像素一致：A 的基准
+ * 改成未乘 bend 的折射值后，squeeze 要从 1.0 重新标定到 2.2 才等于旧式
+ * `A = H × 1.0 = 基准 × 2.2`。
  */
 
 /** 折射带宽上限：不超过表面最小边的这个比例。小芯片（按钮 46dp、通知 36dp）的
- *  折射滑杆值本来就大（18dp / 15dp），放大后会比自身还大、采样点翻到对侧去
+ *  折射基准值本来就大（18dp / 15dp），放大后会比自身还大、采样点翻到对侧去
  *  （读成万花筒）。条 56dp：2.2×9.78=21.5dp < 30.8dp 不受影响；46dp 按钮的
  *  18×2.2=39.6dp 会被压到 25.3dp。3.26.66 起倍率可调到 4.0，这道封顶是防
  *  「预览/小表面变万花筒」的关键，预览同样受它约束（同一函数内封顶）。 */
 private const val GLASS_LENS_MAX_SIDE = .55f
 
-/**
- * 未显式传 `bend` 的调用点兜底：直接从数据类默认值派生，不另写字面量。
- * 当前的活调用点（TabBar 条与选中镜片、设置页预览、输入框/按钮/通知）要么显式传
- * 设置值、要么由 [liquidGlassBar] 内部读设置；这里留默认只为以后新增调用点漏传时
- * 不会退回一个漂移的常量。
- */
-private val GLASS_BEND_FALLBACK: Float = AppSettings().glassBend
+/** 3.26.67：弯折宽度 / 边缘压缩的量程。数据夹取（Model）、UI 映射（Settings）、
+ *  换算（这里）共用一份，避免三处各写一份范围慢慢漂开。 */
+internal const val GLASS_BEND_MIN = 1f
+internal const val GLASS_BEND_MAX = 4f
+internal const val GLASS_SQUEEZE_MIN = .5f
+internal const val GLASS_SQUEEZE_MAX = 4f
 
 /**
- * 透镜两个 uniform 的唯一换算入口（标签条 / 选中镜片 / 设置预览共用同一口径）。
+ * 未显式传 `bend` / `squeeze` 的调用点兜底：直接从数据类默认值派生，不另写字面量。
+ * 3.26.67 起 [liquidGlassBar] 不再内部读设置（弯折按部件各一套，必须由调用方指定），
+ * 默认值只服务「以后新增调用点漏传」这一种情况，取标签栏那对（2.2 / 2.2 = 3.26.66 观感）。
+ */
+private val GLASS_BEND_FALLBACK: Float = AppSettings().tabBend
+private val GLASS_SQUEEZE_FALLBACK: Float = AppSettings().tabSqueeze
+
+/**
+ * 折射带宽度 H（px）的唯一换算入口（标签条 / 选中镜片 / 设置预览共用同一口径）。
  *
- * 返回折射带宽度（px）；最大位移 = 它 × `glassSqueeze`（镜片另有 1.2 的历史偏置）。
- * [bend] 是「设置 → 玻璃 → 弯折宽度」的倍率；[minSidePx] 传表面最小边，小表面按
- * [GLASS_LENS_MAX_SIDE] 封顶。
+ * **只由「弯折宽度」控制**：拖这个滑杆只改带铺多宽，不改折得多狠（位移见
+ * [glassLensAmount]）。[bend] 是「设置 → 玻璃 → 对应部件 → 弯折宽度」的倍率；
+ * [minSidePx] 传表面最小边，小表面按 [GLASS_LENS_MAX_SIDE] 封顶。
  */
 internal fun glassLensBand(
     refractionPx: Float,
@@ -94,6 +106,19 @@ internal fun glassLensBand(
 ): Float =
     if (refractionPx <= 0f || minSidePx <= 0f) 0f
     else (refractionPx * bend).coerceAtMost(minSidePx * GLASS_LENS_MAX_SIDE)
+
+/**
+ * 最大位移 A（px）的唯一换算入口：**只由「边缘压缩」控制**，与 H 正交（基准取未乘
+ * bend 的折射值，所以拖「弯折宽度」不会顺带把边缘内容拉得更狠）。同样按
+ * [GLASS_LENS_MAX_SIDE] 封顶——小表面 A 太大会让采样点翻到对侧，读成万花筒。
+ */
+internal fun glassLensAmount(
+    refractionPx: Float,
+    minSidePx: Float,
+    squeeze: Float = GLASS_SQUEEZE_FALLBACK,
+): Float =
+    if (refractionPx <= 0f || minSidePx <= 0f) 0f
+    else (refractionPx * squeeze).coerceAtMost(minSidePx * GLASS_LENS_MAX_SIDE)
 
 @Composable
 internal fun Modifier.liquidGlassBar(
@@ -108,6 +133,10 @@ internal fun Modifier.liquidGlassBar(
     epoch: Int = 0,
     blurDp: Float = 8f,
     refractionDp: Float = 30f,
+    /** 3.26.67：弯折宽度倍率（[GLASS_BEND_MIN]–[GLASS_BEND_MAX]），按部件由调用方传。 */
+    bend: Float = GLASS_BEND_FALLBACK,
+    /** 3.26.67：边缘压缩倍率（[GLASS_SQUEEZE_MIN]–[GLASS_SQUEEZE_MAX]），只进 A；同上按部件传。 */
+    squeeze: Float = GLASS_SQUEEZE_FALLBACK,
     dispersion: Boolean = true,
     shadowAlpha: Float = .30f,
     /** 0..1 paper veil over the glass. 0 = pure glass (blur/refraction
@@ -128,11 +157,10 @@ internal fun Modifier.liquidGlassBar(
             .background(fallback)
             .border(.6.dp, palette.ink.copy(alpha = .10f), shape)
     }
-    // 3.26.66：弯折宽度 / 边缘压缩是全局设置项，所有玻璃表面（真标签栏、选中镜片预览、
-    // 输入框/按钮/通知、设置页预览）都从这一处读——预览不另写公式，也不写死数值。
-    val glass = LocalInk.current.settings
-    val bend = glass.glassBend.coerceIn(1f, 4f)
-    val squeeze = glass.glassSqueeze.coerceIn(.5f, 1.5f)
+    // 3.26.67：弯折宽度 / 边缘压缩按部件各一套，由调用方显式传（真标签栏 / 选中镜片
+    // / 通知各读自己那对）；这里只做量程夹取，不再从 LocalInk 里读一对全局值。
+    val bendNow = bend.coerceIn(GLASS_BEND_MIN, GLASS_BEND_MAX)
+    val squeezeNow = squeeze.coerceIn(GLASS_SQUEEZE_MIN, GLASS_SQUEEZE_MAX)
     // High transparency: the page stays visible through the bar. A tenth of
     // the old paper fill, so the glass reads as glass and not as a panel.
     val tint = if (palette.isDark) {
@@ -157,10 +185,15 @@ internal fun Modifier.liquidGlassBar(
                 // 「垂直于最近这条边」拧向「从形状中心指向该点」（两项相加再归一），
                 // 四条边的位移都朝中心收，才读成一块凸透镜；false 时四边各自笔直
                 // 往里挤，中间还留着法线跳变的折痕（只像一圈斜面，不像弯）。
-                val band = glassLensBand(refractionDp.dp.toPx(), minOf(size.width, size.height), bend)
+                // 3.26.67：H 只由 bend、A 只由 squeeze 决定（两条式子互不出现对方的
+                // 参数），所以两个滑杆的观感真正不同：宽度只改带多宽，压缩只改折多狠。
+                val base = refractionDp.dp.toPx()
+                val minSide = minOf(size.width, size.height)
+                val band = glassLensBand(base, minSide, bendNow)
+                val amount = glassLensAmount(base, minSide, squeezeNow)
                 lens(
                     refractionHeight = band,
-                    refractionAmount = band * squeeze,
+                    refractionAmount = amount,
                     depthEffect = true,
                     chromaticAberration = dispersion,
                 )
@@ -352,6 +385,10 @@ fun GlassField(
             press = press,
             blurDp = blur,
             refractionDp = refraction,
+            // 3.26.67：弯折/压缩按部件各一套。这条链现在只剩「通知 / toast」还活着
+            // （输入框与按钮表面已不用玻璃），所以统一读通知那一对。
+            bend = s.bubbleBend,
+            squeeze = s.bubbleSqueeze,
             dispersion = dispersion,
             shadowAlpha = shadow,
             veil = veil ?: baseVeil,

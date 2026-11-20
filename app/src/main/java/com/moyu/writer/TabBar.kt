@@ -72,13 +72,26 @@ private val LensSettle = spring<Float>(dampingRatio = .78f, stiffness = 380f, vi
 private val LensLift = spring<Float>(dampingRatio = .56f, stiffness = 520f, visibilityThreshold = 1e-3f)
 
 /**
- * 3.26.66：选中镜片尺寸的**唯一事实源**（下一轮只改这两行）。
+ * 3.26.67：选中镜片尺寸的**唯一事实源**。
  *
- * 条高 64dp（带文字），镜片高 72dp → 上下各鼓出 4dp，读作「从条里凸出来」；
- * 圆角永远取高度一半（= 胶囊）。横向 76dp 在 4 格里居中，离格子边界还有富余。
+ * 真机（1220px / density 3.25）条宽 343.38dp，4 格 → **每格 83.35dp**。用户要求
+ * 「镜片不能大于标签框、扁一点点的圆角矩形、越润越好」：
+ *  - 宽 72dp < 83.35dp → 左右各余 ≈5.7dp，静止态不会压到邻格；
+ *  - 高 56dp < 条高 64dp → 上下各留 4dp，**不再凸出条**（3.26.66 是 76×72、上下各鼓 4dp）；
+ *  - 宽高比 72:56 ≈ 1.29，读作「扁圆角矩形」而不是胶囊。
+ * 长按拖动时的粘滞水滴拉伸（最多 1.75×）**允许**超出格子甚至超出条：用户明确要求
+ * 「只有长按拖动镜片时其大小才可以超过标签栏」，所以这里不加任何 clamp / 裁剪，
+ * 也不为了让拖动不越界去缩小静止尺寸。
  */
-private val TAB_LENS_W_DP = 76.dp
-private val TAB_LENS_H_DP = 72.dp
+private val TAB_LENS_W_DP = 72.dp
+private val TAB_LENS_H_DP = 56.dp
+
+/**
+ * 3.26.67：镜片圆角 18dp（< 高/2 = 28dp），比 3.26.21 的纯胶囊（高/2）扁一档；
+ * 再交给 [SmoothCornerShape] 做曲率连续的平滑圆角，切点不会出现「棱角」——
+ * 用户要的「越润越好」由这层平滑给，尺寸交给上面两个常量。
+ */
+private val TAB_LENS_CORNER_DP = 18.dp
 
 /**
  * Floating four-tab bar made from a real liquid-glass surface.
@@ -124,18 +137,20 @@ internal fun MoyuTabBar(
     // 栏体是胶囊。注意 SmoothCorner(50) 命中 Int 重载 = CircleShape，
     // 这在「宽远大于高」的栏体上正好是胶囊；但**不能**拿给镜片用（会变椭圆）。
     val capsule = SmoothCorner(50)
-    // 镜片是胶囊，不是普通圆角矩形。
+    // 镜片是**扁圆角矩形**，不是胶囊。
     // 3.26.9：普通 RoundedCornerShape 在直线与圆弧的切点处曲率从 0 跳到 1/R，大屏上
     // 能看出「棱角」；SmoothCornerShape 曲率连续，且仍继承 CornerBasedShape，
     // drawBackdrop 的 lens() 才不会抛 "Only CornerBasedShape is supported in lens
     // effects"（折射仍按圆弧半径算，角上 1–3dp 偏差被边缘带盖住）。
-    // 3.26.21：用户要「像水滴一样圆满圆润」——圆角取高度一半，视觉直边最短。
-    // 3.26.66：尺寸 76×72dp（条高 64dp → 上下各鼓出 4dp），圆角仍 = 高/2 = 36dp。
+    // 3.26.21：用户要「像水滴一样圆满圆润」——圆角一度取到高度一半（= 胶囊）。
+    // 3.26.67：用户改口「扁一点点的圆角矩形、越润越好」——半径收回 18dp（< 高/2 =
+    // 28dp），上下读作扁；「润」由 SmoothCornerShape 的曲率连续负责（平滑量
+    // p=(1+.8)×r 会被预算夹到 min(宽,高)/2 = 28dp，过渡更长、更软）。
     val lensShape: androidx.compose.foundation.shape.CornerBasedShape = SmoothCornerShape(
-        androidx.compose.foundation.shape.CornerSize(TAB_LENS_H_DP / 2f),
-        androidx.compose.foundation.shape.CornerSize(TAB_LENS_H_DP / 2f),
-        androidx.compose.foundation.shape.CornerSize(TAB_LENS_H_DP / 2f),
-        androidx.compose.foundation.shape.CornerSize(TAB_LENS_H_DP / 2f),
+        androidx.compose.foundation.shape.CornerSize(TAB_LENS_CORNER_DP),
+        androidx.compose.foundation.shape.CornerSize(TAB_LENS_CORNER_DP),
+        androidx.compose.foundation.shape.CornerSize(TAB_LENS_CORNER_DP),
+        androidx.compose.foundation.shape.CornerSize(TAB_LENS_CORNER_DP),
     )
     val glassEnabled = backdrop != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
     val count = names.size.coerceAtLeast(1)
@@ -201,8 +216,10 @@ internal fun MoyuTabBar(
             val itemWidth = (maxWidth - 10.dp) / count
             val density = LocalDensity.current
             val itemPx = with(density) { itemWidth.toPx() }
-            // 镜片槽位：左右各留 4dp（不压邻格）；高度方向镜片 72dp > 条 64dp，
-            // 上下各鼓出 4dp——从本层到根 Box 都没有 clipToBounds/clip，鼓出部分不会被裁。
+            // 镜片槽位：左右各留 4dp（不压邻格）。3.26.67 起镜片本体 72×56dp，同时小于
+            // 格宽 83.35dp 与条高 64dp → 槽内居中即可，静止态没有任何凸出。
+            // 长按拖动时的粘滞拉伸由内层 graphicsLayer 缩放实现，Box 默认不裁剪，
+            // 允许瞬时越格/越条（用户要求）。
             val lensInsetX = 4.dp
             val lensWidth = itemWidth - lensInsetX * 2
             val lensLeftPx = with(density) { (5.dp + lensInsetX).toPx() }
@@ -284,6 +301,9 @@ internal fun MoyuTabBar(
                         press = 0f,
                         blurDp = s.tabBlur,
                         refractionDp = s.tabRefraction,
+                        // 3.26.67：条读「标签栏」那一对弯折/压缩（镜片、通知各读各的）。
+                        bend = s.tabBend,
+                        squeeze = s.tabSqueeze,
                         dispersion = s.tabDispersion,
                         shadowAlpha = s.tabShadow,
                         veil = s.tabBarOpacity,
@@ -292,11 +312,12 @@ internal fun MoyuTabBar(
             )
 
             // 镜片：外层是整格槽位（管位置与抬起），内层是水滴本体（管速度拉伸）。
-            // 3.26.66：本体固定 TAB_LENS_W_DP×TAB_LENS_H_DP（76×72dp）、槽内居中；
-            // 槽宽与命中区域不变（点的时候还是整格可点），72 > 条高 64 → 上下各鼓出 4dp。
+            // 3.26.67：本体固定 TAB_LENS_W_DP×TAB_LENS_H_DP（72×56dp）、槽内居中；
+            // 72 < 格宽 83.35、56 < 条高 64 → 静止态整块落在自己格子里，不凸出条也不压邻格；
+            // 槽宽与命中区域不变（点的时候还是整格可点、镜片本身没有 pointerInput）。
             // 必须用 requiredSize：槽位由 fillMaxHeight / width 给出的是固定约束，
-            // 普通 width/height 会被父约束夹回 64dp（等于鼓不出来）。requiredSize
-            // 不理会传入约束，父 Box 以 Center 放置、负偏移就是那 4dp 凸出。
+            // 普通 height 会被父约束夹回 64dp（高度方向的条高），requiredSize 不理会
+            // 传入约束、按本体尺寸居中放置；拖动拉伸由内层 graphicsLayer 缩放，不被它限制。
             Box(
                 Modifier
                     .width(lensWidth)
@@ -347,17 +368,15 @@ internal fun MoyuTabBar(
                                             // 3.26.65：与条同口径（glassLensBand）——原版把
                                             // 9dp 同时当带宽与位移，镜片上只有一圈窄边；
                                             // 放大后带才铺开，镜片才像一块真透镜。
-                                            // 3.26.66：弯折宽度/边缘压缩接入全局设置项，与条、
-                                            // 输入框、设置预览共用同一个换算入口；1.2 是镜片
-                                            // 比条略强的历史偏置，设置取默认值时与 3.26.65 同观感。
-                                            val band = glassLensBand(
-                                                s.lensRefraction.dp.toPx(),
-                                                minOf(size.width, size.height),
-                                                s.glassBend,
-                                            )
+                                            // 3.26.67：走按部件拆开的两个换算入口——H 只吃
+                                            // lensBend、A 只吃 lensSqueeze（两条式子互不出现
+                                            // 对方参数）；1.2 是镜片比条略强的历史偏置。
+                                            val base = s.lensRefraction.dp.toPx()
+                                            val minSide = minOf(size.width, size.height)
+                                            val band = glassLensBand(base, minSide, s.lensBend)
                                             lens(
                                                 refractionHeight = band,
-                                                refractionAmount = band * 1.2f * s.glassSqueeze,
+                                                refractionAmount = glassLensAmount(base, minSide, s.lensSqueeze) * 1.2f,
                                                 depthEffect = true,
                                                 chromaticAberration = s.lensDispersion,
                                             )

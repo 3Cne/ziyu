@@ -36,10 +36,13 @@ import com.kyant.backdrop.backdrops.rememberLayerBackdrop
  * 3.26.66 起输入框 / 按钮表面不再用玻璃，对应预览档随之删除，只剩
  * 标签栏 / 镜片 / 通知三档。
  *
- * 3.26.66：弯折宽度 / 边缘压缩是全局设置，`liquidGlassBar` 内部统一读
- * `AppSettings.glassBend` / `glassSqueeze` 再进 `glassLensBand`——预览和真表面
- * 走的是同一条换算（连 `.55×minSide` 封顶都在同一函数里），这里不写死数值、
- * 也不另拼公式。因此拖动「弯折」两行时本预览会随重组即时重算。
+ * 3.26.66：弯折宽度 / 边缘压缩不再是全局值。3.26.67 起它们**按部件各一套**，三档
+ * 预览各用自己那一对（标签栏 tabBend/tabSqueeze、镜片 lensBend/lensSqueeze、通知
+ * bubbleBend/bubbleSqueeze），并且 `liquidGlassBar` 不再内部读设置、由调用方显式传。
+ * 预览仍与真表面走同一条换算：`glassLensBand`（只吃 bend，进 refractionHeight）+
+ * `glassLensAmount`（只吃 squeeze，进 refractionAmount），连 `.55×minSide` 封顶都在
+ * 同一函数里，这里不写死数值、也不另拼公式。因此拖动任一滑杆本预览会随重组即时重算。
+ * 预览几何比真表面小是既有的（绝对 dp 相同、相对比例不同），不为它改布局。
  */
 @Composable
 internal fun GlassLivePreview(group: Int, s: AppSettings) {
@@ -100,6 +103,8 @@ internal fun GlassLivePreview(group: Int, s: AppSettings) {
                             palette = p,
                             blurDp = s.tabBlur,
                             refractionDp = s.tabRefraction,
+                            bend = s.tabBend,
+                            squeeze = s.tabSqueeze,
                             dispersion = s.tabDispersion,
                             shadowAlpha = s.tabShadow,
                             veil = s.tabBarOpacity,
@@ -133,6 +138,8 @@ internal fun GlassLivePreview(group: Int, s: AppSettings) {
                                 palette = p,
                                 blurDp = s.lensBlur,
                                 refractionDp = s.lensRefraction,
+                                bend = s.lensBend,
+                                squeeze = s.lensSqueeze,
                                 dispersion = s.lensDispersion,
                                 shadowAlpha = s.lensShadow,
                                 veil = s.tabLensOpacity,
@@ -153,6 +160,8 @@ internal fun GlassLivePreview(group: Int, s: AppSettings) {
                             palette = p,
                             blurDp = s.bubbleGlassBlur,
                             refractionDp = s.bubbleGlassRefraction,
+                            bend = s.bubbleBend,
+                            squeeze = s.bubbleSqueeze,
                             dispersion = s.bubbleGlassDispersion,
                             shadowAlpha = s.bubbleGlassShadow,
                             veil = s.bubbleGlassOpacity,
