@@ -278,11 +278,79 @@ data class SelectionGeometry(
     val dragDirY: Float = 0f,
 )
 
+// ── 选区手柄放大镜（2026-11-20，3.26.60）───────────────────────────────────────
+// 系统手柄已经彻底关掉（prepareSelectionHandle 清 handle + 反射 hideSelectionHandles），
+// 所以放大镜也只能自己画，分两段：
+//   ① 采样在原生 BodyEditText 里做（view.draw 到软件位图，和 EditorBodyBackdrop 同一写法）；
+//   ② 绘制在 SelectionOverlay 的 Canvas 上——AndroidView 带 clipToBounds()，在
+//      EditText.onDraw 里画会被正文容器裁掉，盖不到手柄上方。
+// 位图**不进** SelectionGeometry（每帧新值会多一次重组），走独立回调 + 缓存。
+
+/** 放大镜半径（dp）：显示直径 = 2 × 它。 */
+private const val MAG_RADIUS_DP = 44f
+
+/** 放大镜与被拖手柄之间的空隙（dp）。 */
+private const val MAG_GAP_DP = 8f
+
+/** 放大倍数：采样区边长 = 显示直径 / MAG_ZOOM。 */
+private const val MAG_ZOOM = 2f
+
+/** 放大镜描边宽度（dp）。 */
+private const val MAG_BORDER_DP = 1f
+
+/** 放大镜里落点指示线的宽度（dp）。 */
+private const val MAG_MARK_DP = 1f
+
+/** 拖动中重新采样的位移阈值（dp）：不到就复用上一张，不每帧全量重绘正文。 */
+private const val MAG_REFRESH_DP = 4f
+
+/** 拖动中重新采样的最大帧间隔（帧）：位移很小也保底刷一次。 */
+private const val MAG_REFRESH_FRAMES = 3
+
+/**
+ * 放大镜的一帧采样。
+ *
+ * [centerX]/[centerY] 是**真实采样中心**（正文视图坐标 px，已夹进可视区）——
+ * 绘制侧靠它把位图内容、落点竖线对齐到圆弧里，而不是另建坐标系。
+ */
+private class MagnifierFrame(
+    val bitmap: Bitmap,
+    val centerX: Float,
+    val centerY: Float,
+    /** 正在被拖的那只：0 起点 / 1 终点。 */
+    val side: Int,
+)
+
+/**
+ * 放大镜采样帧的旁路缓存。
+ *
+ * [frame] 只在 Canvas 画布里读（订阅 draw 阶段，换帧只重绘、不重组）；
+ * [visible] 只在起手/松手各变一次（订阅组合阶段），给淡入动画用。
+ */
+private class MagnifierState {
+    var frame by mutableStateOf<MagnifierFrame?>(null)
+        private set
+
+    var visible by mutableStateOf(false)
+        private set
+
+    fun push(next: MagnifierFrame?) {
+        frame = next
+        val on = next != null
+        if (visible != on) visible = on
+    }
+}
+
 @Composable
 private fun SelectionOverlay(
     geometry: SelectionGeometry?,
     handleDrawable: android.graphics.drawable.Drawable?,
     color: Color,
+    palette: InkPalette,
+    /** 动效档（motion=none 时放大镜直接显隐，不做淡入/缩放）。 */
+    animate: Boolean,
+    /** 拖柄放大镜的采样帧缓存。 */
+    magnifier: MagnifierState,
     onTopInWindow: (Int) -> Unit,
 ) {
     val active = geometry != null && geometry.active
@@ -296,6 +364,19 @@ private fun SelectionOverlay(
         if (active) vis.animateTo(1f, spring(dampingRatio = .52f, stiffness = 300f))
         else vis.animateTo(0f, tween(150))
     }
+    // 放大镜起手淡入 + 轻微放大；松手时采样帧已经被原生侧清空，这里只把读数收回 0。
+    val magT = remember { Animatable(0f) }
+    LaunchedEffect(magnifier.visible) {
+        when {
+            !magnifier.visible -> magT.snapTo(0f)
+            animate -> magT.animateTo(1f, spring(dampingRatio = .52f, stiffness = 300f))
+            else -> magT.snapTo(1f)
+        }
+    }
+    // 放大镜画笔：颜色/透明度每次 draw 才定，不每帧 new Paint。
+    val magFill = remember { Paint(Paint.ANTI_ALIAS_FLAG) }
+    val magStroke = remember { Paint(Paint.ANTI_ALIAS_FLAG) }
+    val magMark = remember { Paint(Paint.ANTI_ALIAS_FLAG) }
     val g: SelectionGeometry = geometry?.takeIf { it.active } ?: last ?: return
     val v = vis.value
     if (!active && v <= .01f) return
@@ -384,6 +465,66 @@ private fun SelectionOverlay(
             ax = if (dragEnd) dirScaleX else 1f,
             ay = if (dragEnd) dirScaleY else 1f,
         )
+    }
+    // ── 拖柄放大镜（2026-11-20，3.26.60）───────────────────────────────────────
+    // 单独一层 Canvas 画在手柄之上：拖终点柄时放大镜会盖住起点柄，这是正常遮挡；
+    // 也避开上面那层在「拿不到手柄 drawable」时的提前 return。
+    // 只显示、不吃触摸（SelectionOverlay 本来就不挂 pointerInput）；位置只取
+    // SelectionGeometry 的手柄盒 + 原生推来的采样帧，没有第二套坐标系。
+    if (active) {
+        Canvas(Modifier.fillMaxSize()) {
+            val mag = magnifier.frame
+            val magV = magT.value
+            if (mag != null && magV > .01f) {
+                val side = if (g.dragSide >= 0) g.dragSide else mag.side
+                val box = if (side == 0) g.startHandle else g.endHandle
+                val r = MAG_RADIUS_DP.dp.toPx()
+                val gap = MAG_GAP_DP.dp.toPx()
+                val a = magV.coerceIn(0f, 1f)
+                // 被拖那只手柄的正上方；上面放不下（贴正文上边界）就翻到下方。
+                var cy = box.top - gap - r
+                if (cy - r < 0f) cy = box.bottom + gap + r
+                cy = cy.coerceIn(r, (size.height - r).coerceAtLeast(r))
+                val cx = mag.centerX.coerceIn(r, (size.width - r).coerceAtLeast(r))
+                // 落点指示线：正文里 1px 在放大镜里是 MAG_ZOOM px，按采样中心换算。
+                val caretX = if (side == 0) g.startCaretX else g.endCaretX
+                val markX = (cx + (caretX - mag.centerX) * MAG_ZOOM)
+                    .coerceIn(cx - r * .74f, cx + r * .74f)
+                // 弹簧会出现轻微过冲，缩放据此弹一下再落定。
+                val magScale = .88f + .12f * a
+                drawIntoCanvas { canvas ->
+                    val native = canvas.nativeCanvas
+                    native.save()
+                    native.scale(magScale, magScale, cx, cy)
+                    // 纸底：正文纸色画在 Compose 层、EditText 自己没背景，不铺纸色
+                    // 采样位图只有文字透出来，放大镜会透出下面的正文。
+                    magFill.color = palette.paper.toArgb()
+                    magFill.alpha = (255 * a).toInt()
+                    magFill.style = Paint.Style.FILL
+                    native.drawCircle(cx, cy, r, magFill)
+                    // 圆内：放大后的正文 + 落点竖线。
+                    native.save()
+                    val clip = Path().apply { addCircle(cx, cy, r, Path.Direction.CW) }
+                    native.clipPath(clip)
+                    magFill.isFilterBitmap = true
+                    native.drawBitmap(mag.bitmap, null, RectF(cx - r, cy - r, cx + r, cy + r), magFill)
+                    magMark.color = palette.muted.toArgb()
+                    magMark.alpha = (140 * a).toInt()
+                    magMark.style = Paint.Style.STROKE
+                    magMark.strokeWidth = MAG_MARK_DP.dp.toPx()
+                    magMark.strokeCap = Paint.Cap.ROUND
+                    native.drawLine(markX, cy - r * .74f, markX, cy + r * .74f, magMark)
+                    native.restore()
+                    // 主题描边：一条 1dp 细环，不发光、不叠第二道亮边。
+                    magStroke.color = palette.line.toArgb()
+                    magStroke.alpha = (255 * a).toInt()
+                    magStroke.style = Paint.Style.STROKE
+                    magStroke.strokeWidth = MAG_BORDER_DP.dp.toPx()
+                    native.drawCircle(cx, cy, r - magStroke.strokeWidth / 2f, magStroke)
+                    native.restore()
+                }
+            }
+        }
     }
 }
 
@@ -1449,6 +1590,8 @@ fun WritingScreen(
     val words = countWords(body.text)
     var selectionMenu by remember { mutableStateOf<SelectionBar?>(null) }
     var selectionGeometry by remember { mutableStateOf<SelectionGeometry?>(null) }
+    // 拖柄放大镜：原生侧推采样帧，SelectionOverlay 只在画布里读（不随帧重组）。
+    val magnifier = remember { MagnifierState() }
     val selectionColors = TextSelectionColors(
         handleColor = ui.accent.copy(alpha = .58f),
         backgroundColor = ui.accent.copy(alpha = .20f),
@@ -1620,6 +1763,8 @@ fun WritingScreen(
                                 selectionMenu = if (y2 > y1) SelectionBar(x1, y1, x2, y2) else null
                             },
                             onGeometry = { selectionGeometry = it },
+                            // 拖柄放大镜的采样位图走这条旁路，不进 SelectionGeometry。
+                            onMagnifier = { magnifier.push(it) },
                             onTodoToggle = { id ->
                                 val updated = latestTodos.map {
                                     if (it.id == id) it.copy(done = !it.done) else it
@@ -1843,6 +1988,9 @@ fun WritingScreen(
                     geometry = selectionGeometry,
                     handleDrawable = bodyEditor?.selectHandleDrawable,
                     color = ui.accent,
+                    palette = p,
+                    animate = settings.motion != "none",
+                    magnifier = magnifier,
                     onTopInWindow = { bodyEditor?.updateOverlayTop(it) },
                 )
                 AnimatedContent(
@@ -2507,6 +2655,8 @@ private class BodyEditText(
     private val onReminderTap: ((String) -> Unit)? = null,
     private val onTodoDeleted: ((String) -> Unit)? = null,
     private val onBodyScroll: (() -> Unit)? = null,
+    /** 拖柄放大镜：起手/节流刷新时推采样帧，松手/取消/选区消失时推 null。 */
+    private val onMagnifier: ((MagnifierFrame?) -> Unit)? = null,
 ) : EditText(context) {
     // TextView calls onSelectionChanged() from its own constructor, before this
     // property is initialized. Keep it nullable and register after super().
@@ -2546,6 +2696,11 @@ private class BodyEditText(
     private var autoScrollSpeed = 0f
     private var lastDragX = 0f
     private var lastDragY = 0f
+    // ── 拖柄放大镜采样（2026-11-20）───────────────────────────────────────────
+    // 上一帧的采样中心与节流计数：位移不到阈值就复用上一张，不每帧重绘正文。
+    private var magLastX = Float.NaN
+    private var magLastY = Float.NaN
+    private var magFrameNo = 0
 
     private val handleSpringDriver = object : Runnable {
         override fun run() {
@@ -2584,6 +2739,8 @@ private class BodyEditText(
                 kotlin.math.abs(handleSpringVel) < 10f
             invalidate()
             emitGeometry()
+            // 放大镜跟着手柄走：这一帧的弹簧位置定下来再采样（节流在 refreshMagnifier 里）。
+            if (handleDrag >= 0) refreshMagnifier()
             if (!settled || autoScrollDir != 0) {
                 postOnAnimation(this)
             } else {
@@ -2633,6 +2790,8 @@ private class BodyEditText(
         lastDragY = downY
         parent?.requestDisallowInterceptTouchEvent(true)
         invalidate()
+        // 起手先抓一帧：放大镜要立刻出现，不等第一次 MOVE。
+        refreshMagnifier(force = true)
     }
 
     private fun resetHandleSpring() {
@@ -2644,6 +2803,8 @@ private class BodyEditText(
         autoScrollDir = 0
         autoScrollSpeed = 0f
         removeCallbacks(handleSpringDriver)
+        // 选区消失 / 手势被上层抢走 / 页面销毁：放大镜一起收掉，不留僵住的采样帧。
+        releaseMagnifier()
     }
 
     /** 拖到正文上/下边缘时自己滚：越靠边越快，滚动时手柄继续跟着手指。 */
@@ -2735,6 +2896,54 @@ private class BodyEditText(
         draw(canvas)
         return bmp
     }
+
+    /**
+     * 拖柄放大镜的采样 + 节流（2026-11-20，3.26.60）。
+     *
+     * 起手抓一张；拖动中只在「位移超过 [MAG_REFRESH_DP]」或「过了
+     * [MAG_REFRESH_FRAMES] 帧」时才重抓——不每帧全量重绘整页。
+     * 采样用 `View.draw` 画进小位图，和 [EditorBodyBackdrop]/[renderDockSlice]
+     * 同一条路，不新开渲染管线。
+     */
+    private fun refreshMagnifier(force: Boolean = false) {
+        val emit = onMagnifier ?: return
+        val side = handleDrag
+        if (side < 0) return
+        val caret = caretGeom(if (side == 0) selectionStart else selectionEnd) ?: return
+        val d = resources.displayMetrics.density
+        val samplePx = (2f * MAG_RADIUS_DP * d / MAG_ZOOM).roundToInt().coerceAtLeast(8)
+        // 采样区边长 = 显示直径 / 倍率；再夹进可视区（贴边时只贴边，不取到空白）。
+        val hx = if (handleSpringOn && !handleSpringX.isNaN()) handleSpringX else caret.x
+        val left = (hx - samplePx / 2f).roundToInt().coerceIn(0, max(0, width - samplePx))
+        val top = ((caret.top + caret.bottom) / 2f - samplePx / 2f).roundToInt()
+            .coerceIn(0, max(0, height - samplePx))
+        val cx = left + samplePx / 2f
+        val cy = top + samplePx / 2f
+        if (!force && !magLastX.isNaN()) {
+            magFrameNo++
+            val moved = kotlin.math.hypot(cx - magLastX, cy - magLastY)
+            if (moved < MAG_REFRESH_DP * d && magFrameNo < MAG_REFRESH_FRAMES) return
+        }
+        magFrameNo = 0
+        magLastX = cx
+        magLastY = cy
+        val bmp = Bitmap.createBitmap(samplePx, samplePx, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        // 采样区左上角搬到原点，位图边界天然裁掉其它像素，不用再 clipRect。
+        // 不铺纸色：正文纸色画在 Compose 层，放大镜自己铺（见 SelectionOverlay）。
+        canvas.translate(-left.toFloat(), -top.toFloat())
+        draw(canvas)
+        emit(MagnifierFrame(bmp, cx, cy, side))
+    }
+
+    /** 松手 / 取消 / 选区消失：收起放大镜，把采样帧交回去（位图随之可回收）。 */
+    private fun releaseMagnifier() {
+        magLastX = Float.NaN
+        magLastY = Float.NaN
+        magFrameNo = 0
+        onMagnifier?.invoke(null)
+    }
+
     var pendingNewline = false
     private var cachedSelectHandle: android.graphics.drawable.Drawable? = null
     val selectHandleDrawable: android.graphics.drawable.Drawable?
@@ -4628,6 +4837,8 @@ private class BodyEditText(
                     // 松手：弹簧继续把手柄送到最后一个字上（过冲一次），自动滚停下。
                     autoScrollDir = 0
                     autoScrollSpeed = 0f
+                    // 放大镜只服务「拖选分界」这段手势：抬手即收，采样位图一起放掉。
+                    releaseMagnifier()
                     handleDrag = -1
                     draggingCaretX = null
                     parent?.requestDisallowInterceptTouchEvent(false)
