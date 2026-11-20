@@ -185,7 +185,7 @@ val LANDING_TUTORIAL: TutorialGroup = TutorialGroup(
 /** 示意图种类。真正画法在 [PptArtView]，这里只留类型，避免把 Composable lambda 放进数据。 */
 private enum class PptArt {
     Welcome, NewBook, NewChapter, Writing, Select, Ability, Symbols, Type,
-    Todo, Notes, Export, Ask, AiTools, Story, Backup, Look, Stats, Done,
+    Todo, Notes, Export, AiTools, Story, Backup, Look, Stats, Done,
 }
 
 /** 一页：大标题 + 一句说明 + 一张示意图。 */
@@ -207,9 +207,8 @@ private val PPT_PAGES: List<PptPage> = listOf(
     PptPage("待办与提醒", "笔记里以方框开头的行会变成待办，还能给它设到点提醒。", PptArt.Todo),
     PptPage("笔记夹与章节", "笔记放进笔记夹，也能关联到某一章，写作时就在正文旁边。", PptArt.Notes),
     PptPage("文字带得走", "书能导出成 EPUB 或 TXT，文件会出现在下载目录里。", PptArt.Export),
-    PptPage("问这本书", "直接提问，它会读正文和笔记，也能替你改、建章、设提醒。", PptArt.Ask),
     PptPage("校核、修饰、问", "选中一段再点 AI：校核挑错、修饰润色，问就聊这一段。", PptArt.AiTools),
-    PptPage("故事圣经", "角色、关系、时间线和大纲收在一处，AI 整理的会单独标出来。", PptArt.Story),
+    PptPage("故事圣经", "角色、关系、时间线和大纲收在一处，都能自己改。", PptArt.Story),
     PptPage("备份与恢复", "全部内容能导出成一份备份，换手机时再恢复回来。", PptArt.Backup),
     PptPage("外观由你定", "主题、点缀色、字体和玻璃材质都在外观里，改完立刻生效。", PptArt.Look),
     PptPage("写了多少，一眼看到", "数据页按天统计字数，也能看到连续写作的天数。", PptArt.Stats),
@@ -705,7 +704,6 @@ private fun PptArtView(art: PptArt, active: Boolean, modifier: Modifier = Modifi
             PptArt.Todo -> ArtTodo(active)
             PptArt.Notes -> ArtNotes(active)
             PptArt.Export -> ArtExport(active)
-            PptArt.Ask -> ArtAsk(active)
             PptArt.AiTools -> ArtAiTools(active)
             PptArt.Story -> ArtStory(active)
             PptArt.Backup -> ArtBackup(active)
@@ -1409,73 +1407,6 @@ private fun ArtExport(active: Boolean) {
                 color = p.muted,
                 modifier = Modifier.align(Alignment.CenterHorizontally),
             )
-        }
-    }
-}
-
-@Composable
-private fun ArtAsk(active: Boolean) {
-    val ui = LocalInk.current
-    val p = ui.palette
-    Column(
-        Modifier.fillMaxSize().padding(vertical = 6.dp),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        ArtPiece(active, 0, Modifier.align(Alignment.End).fillMaxWidth(.66f).height(38.dp)) {
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    .clip(SmoothCorner(14.dp))
-                    .background(dockTone(ui))
-                    .padding(horizontal = 12.dp),
-                contentAlignment = Alignment.CenterStart,
-            ) {
-                ArtBar(p.ink.copy(alpha = .34f), Modifier.fillMaxWidth(.6f))
-            }
-        }
-        Spacer(Modifier.height(12.dp))
-        ArtPiece(active, 1, Modifier.fillMaxWidth(.90f).height(78.dp)) {
-            ArtCard(Modifier.fillMaxSize(), radius = 14.dp) {
-                Column(Modifier.fillMaxSize().padding(12.dp)) {
-                    ArtBar(p.ink.copy(alpha = .26f), Modifier.fillMaxWidth(.94f))
-                    Spacer(Modifier.height(9.dp))
-                    ArtBar(p.ink.copy(alpha = .20f), Modifier.fillMaxWidth(.86f))
-                    Spacer(Modifier.height(9.dp))
-                    ArtBar(p.ink.copy(alpha = .16f), Modifier.fillMaxWidth(.6f))
-                }
-            }
-        }
-        Spacer(Modifier.height(10.dp))
-        ArtPiece(active, 2, Modifier.width(124.dp).height(22.dp)) {
-            ArtChip(
-                "用了 2 个工具",
-                p.ink.copy(alpha = .05f),
-                p.muted,
-                Modifier.fillMaxWidth(),
-                size = 9f,
-            )
-        }
-        Spacer(Modifier.height(14.dp))
-        ArtPiece(active, 3, Modifier.fillMaxWidth(.94f).height(40.dp)) {
-            Row(
-                Modifier
-                    .fillMaxSize()
-                    .clip(SmoothCorner(999.dp))
-                    .background(p.paper)
-                    .border(1.dp, p.line, SmoothCorner(999.dp))
-                    .padding(horizontal = 14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                ArtBar(p.ink.copy(alpha = .20f), Modifier.fillMaxWidth(.5f))
-                Spacer(Modifier.weight(1f))
-                Box(
-                    Modifier.size(26.dp).clip(CircleShape).background(ui.accent),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    LineIcon(Glyph.Sparkles, p.paper, 12.dp)
-                }
-            }
         }
     }
 }
