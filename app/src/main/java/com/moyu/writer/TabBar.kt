@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
@@ -293,6 +294,9 @@ internal fun MoyuTabBar(
             // 镜片：外层是整格槽位（管位置与抬起），内层是水滴本体（管速度拉伸）。
             // 3.26.66：本体固定 TAB_LENS_W_DP×TAB_LENS_H_DP（76×72dp）、槽内居中；
             // 槽宽与命中区域不变（点的时候还是整格可点），72 > 条高 64 → 上下各鼓出 4dp。
+            // 必须用 requiredSize：槽位由 fillMaxHeight / width 给出的是固定约束，
+            // 普通 width/height 会被父约束夹回 64dp（等于鼓不出来）。requiredSize
+            // 不理会传入约束，父 Box 以 Center 放置、负偏移就是那 4dp 凸出。
             Box(
                 Modifier
                     .width(lensWidth)
@@ -311,8 +315,7 @@ internal fun MoyuTabBar(
             ) {
                 Box(
                     Modifier
-                        .width(TAB_LENS_W_DP)
-                        .height(TAB_LENS_H_DP)
+                        .requiredSize(TAB_LENS_W_DP, TAB_LENS_H_DP)
                         .graphicsLayer {
                             // 速度拉伸：原点放在运动方向的前端（前端先到、后端拖尾）。
                             transformOrigin = TransformOrigin(if (lensRightward) 1f else 0f, .5f)
