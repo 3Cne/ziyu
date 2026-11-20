@@ -59,6 +59,7 @@ import kotlin.math.roundToInt
 import com.kyant.backdrop.Backdrop
 import com.kyant.backdrop.drawBackdrop
 import com.kyant.backdrop.effects.blur
+import com.kyant.backdrop.effects.effect
 import com.kyant.backdrop.effects.lens
 import com.kyant.backdrop.effects.vibrancy
 import com.kyant.backdrop.shadow.InnerShadow
@@ -336,12 +337,32 @@ internal fun MoyuTabBar(
                                         vibrancy()
                                         if (s.lensBlur > 0f) blur(s.lensBlur.dp.toPx())
                                         if (s.lensRefraction > 0f) {
-                                            lens(
-                                                refractionHeight = s.lensRefraction.dp.toPx(),
-                                                refractionAmount = (s.lensRefraction * 1.2f).dp.toPx(),
-                                                depthEffect = true,
-                                                chromaticAberration = s.lensDispersion,
-                                            )
+                                            // 3.26.59：选中镜片与玻璃条同源。API 33+ 走 GlassBar 的
+                                            // 真厚度场 AGSL（bevel 取原 lens() 的 refractionAmount =
+                                            // 1.2×折射设置，峰值位移量级不变）；31–32 或 shader 构建
+                                            // 失败仍回退 Backdrop 的 lens()，行为与之前一致。
+                                            val ags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                                runCatching {
+                                                    buildLensEffect(
+                                                        bevelDp = s.lensRefraction * 1.2f,
+                                                        edgeStrength = s.lensEdge,
+                                                        veilK = s.tabLensOpacity,
+                                                        dispersion = s.lensDispersion,
+                                                    )
+                                                }.getOrNull()
+                                            } else {
+                                                null
+                                            }
+                                            if (ags != null) {
+                                                effect(ags)
+                                            } else {
+                                                lens(
+                                                    refractionHeight = s.lensRefraction.dp.toPx(),
+                                                    refractionAmount = (s.lensRefraction * 1.2f).dp.toPx(),
+                                                    depthEffect = true,
+                                                    chromaticAberration = s.lensDispersion,
+                                                )
+                                            }
                                         }
                                     },
                                     highlight = null,
