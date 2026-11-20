@@ -90,6 +90,9 @@ import kotlin.math.roundToInt
 /**
  * 清空问书聊天记录的一次性信号（3.26.51）。
  *
+ * 3.26.64：设置页的「清空问书聊天记录」已随问书下线删除，本对象**目前没有生产者**；
+ * 保留是因为 AiTab.kt 仍以 `version` 作 LaunchedEffect key（第二波删问书时一起删）。
+ *
  * 聊天记录存在 `filesDir/ai/<bookId>.json` 的 `turns`（见 `MemoStore`）。设置页把盘上的
  * `turns` 清空后 bump 一次；问书页（AiTab.kt）用 `version` 当 LaunchedEffect key 重新读盘，
  * 这样用户从设置回到问书就是空态——否则 `AiScreen` 常驻组合、`memo` 只在首次组合时读盘，
@@ -238,11 +241,12 @@ fun SettingsScreen(store: AppStore, listState: LazyListState, onOpenPage: (Strin
             }
         }
         item {
-            SettingGroup("问书") {
+            // 3.26.64：问书下线后这里只剩「AI 服务」入口——校核 / 修饰 / 问 共用同一套
+            // 服务地址 + 模型 + Key，所以副标题只留模型名（不再有启用 / 自动整理状态）。
+            SettingGroup("AI") {
                 SettingRow(
-                    "问书 AI",
-                    if (s.aiEnabled) "${s.aiModel} · 已启用 · ${if (s.aiBibleSync) "自动整理" else "手动整理"}"
-                    else "未启用 · ${s.aiModel}",
+                    "AI 服务",
+                    s.aiModel,
                     Glyph.Sparkles,
                     onClick = { onOpenPage("ai") },
                 )
@@ -314,7 +318,7 @@ fun SettingsDetailScreen(
         "writing" -> WritingSettingsPage(store, onBack)
         "motion" -> MotionSettingsPage(store, onBack)
         "navigation" -> NavigationSettingsPage(store, onBack)
-        "ai" -> AiSettingsPage(store, onBack, onOpen)
+        "ai" -> AiSettingsPage(store, onBack)
         "data" -> DataSettingsPage(store, onBack)
         "space" -> SpaceSettingsPage(store, onBack)
         else -> AboutPage(store, onBack)
@@ -1656,11 +1660,12 @@ private fun openNotificationSettings(context: Context) {
 
 
 /**
- * 问书 settings live in the app's own settings, not inside the AI tab: the tab
- * is for asking, the settings are for wiring it up. Same controls, one home.
+ * AI 服务设置（3.26.64）：只剩「服务地址 / 模型 / API Key」三项——
+ * 校核 / 修饰 / 问 三项文本功能只用这三样，问书与自动整理下线后其余 AI 设置项全部删除
+ * （字段仍留在 Model.kt，旧备份照旧能读、键名与默认值都没动）。
  */
 @Composable
-private fun AiSettingsPage(store: AppStore, onBack: () -> Unit, onOpen: (String) -> Unit = {}) {
+private fun AiSettingsPage(store: AppStore, onBack: () -> Unit) {
     val ui = LocalInk.current
     val context = LocalContext.current
     val settings = store.settings
@@ -1669,47 +1674,10 @@ private fun AiSettingsPage(store: AppStore, onBack: () -> Unit, onOpen: (String)
     var testing by remember { mutableStateOf(false) }
     var testResult by remember { mutableStateOf<String?>(null) }
     var keyTick by remember { mutableStateOf(0) }
-    // 3.26.51：清空问书聊天记录的确认框（ConfirmDialog 自己带走场，别自己写 Dialog）。
-    var confirmClearChat by remember { mutableStateOf(false) }
     val hasKey = remember(keyTick) { AiKey.has(context) }
     val keyTail = remember(keyTick) { AiKey.load(context)?.let { AiKey.tail(it) }.orEmpty() }
 
-    SettingsPage("问书", "", onBack) {
-        item {
-            SettingGroup("开与关") {
-                SettingRow(
-                    "启用问书",
-                    glyph = Glyph.Sparkles,
-                ) {
-                    InkToggle(settings.aiEnabled) { v -> store.updateSettings { it.copy(aiEnabled = v) } }
-                }
-                RowDivider()
-                SettingRow(
-                    "自动整理故事圣经",
-                    "章节保存后，把正文里写定的人物、关系、事件、情节点补进故事圣经；3 分钟内最多一次",
-                    Glyph.Book,
-                ) {
-                    InkToggle(settings.aiBibleSync) { v -> store.updateSettings { it.copy(aiBibleSync = v) } }
-                }
-                RowDivider()
-                SettingRow(
-                    "改稿方式",
-                    when (settings.aiWriteMode) {
-                        0 -> "只读：只回答，不改正文也不改圣经"
-                        1 -> "询问：改正文前给对比，你点接受才写"
-                        else -> "自动：回答结束直接写，可一步撤销"
-                    },
-                    Glyph.Edit,
-                    stacked = true,
-                ) {
-                    Segmented(
-                        listOf("只读", "询问", "自动"),
-                        settings.aiWriteMode.coerceIn(0, 2),
-                        { i -> store.updateSettings { it.copy(aiWriteMode = i) } },
-                    )
-                }
-            }
-        }
+    SettingsPage("AI", "", onBack) {
         item {
             // 3.26.51：原来「服务」与「Key」两组都是同一条连接的信息（地址 / 模型 / 密钥），
             // 拆成两个分区找起来累；合并成「连接」一组，下面用分隔线分成两段。
@@ -1787,139 +1755,11 @@ private fun AiSettingsPage(store: AppStore, onBack: () -> Unit, onOpen: (String)
                 }
             }
         }
-        item {
-            // 3.26.51：原组名「联网与文件」里已经没有文件项，按内容改「联网与工具」。
-            SettingGroup("联网与工具") {
-                SettingRow(
-                    "联网搜索",
-                    "按次计费 · \$0.75/1000 次",
-                    Glyph.Search,
-                ) {
-                    InkToggle(settings.aiWeb) { v -> store.updateSettings { it.copy(aiWeb = v) } }
-                }
-                RowDivider()
-                SettingRow(
-                    "搜索上限",
-                    // 3.26.57：只说「一次最多几次」时，作者不知道这个数就是每次回答会被计费的最大搜索次数。
-                    "每个回答最多 ${settings.aiWebMax} 次搜索，到上限就停",
-                    Glyph.Layers,
-                    stacked = true,
-                ) {
-                    // 3.26.51：5 枚筹码原来塞在标题右侧会被挤扁，改 stacked 独占一行。
-                    androidx.compose.foundation.layout.Row(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        (1..5).forEach { n ->
-                            GlassChip(n.toString(), settings.aiWebMax == n) {
-                                store.updateSettings { it.copy(aiWebMax = n) }
-                            }
-                        }
-                    }
-                }
-                RowDivider()
-                SettingRow("工具过程", "回答下方显示每一步", Glyph.List) {
-                    InkToggle(settings.aiToolTrace) { v -> store.updateSettings { it.copy(aiToolTrace = v) } }
-                }
-            }
-        }
-        item {
-            SettingGroup("发送上限") {
-                SettingRow("自动检索", "没引用时每次带多少原文", Glyph.Search) {
-                    Txt("${settings.aiContextChars} 字 · ${settings.aiTopK} 段", size = 12f, color = ui.palette.muted)
-                }
-                RowDivider()
-                SettingRow("引用上限", "整本 / 章节 / 笔记合计最多发多少字", Glyph.Link) {
-                    Txt("${settings.aiQuoteMaxChars} 字", size = 12f, color = ui.palette.muted)
-                }
-            }
-        }
-        item {
-            SettingGroup("整理笔记") {
-                SettingRow("带上几条对话", glyph = Glyph.Note, stacked = true) {
-                    // 3.26.51：四档分段原来被 176dp 宽挤在标题右侧，改成整行铺满。
-                    val idx = when (settings.noteContextCount) {
-                        0 -> 3
-                        2 -> 0
-                        4 -> 1
-                        else -> 2
-                    }
-                    Segmented(
-                        listOf("2", "4", "8", "全部"),
-                        idx,
-                        { i ->
-                            store.updateSettings {
-                                it.copy(
-                                    noteContextCount = when (i) {
-                                        0 -> 2
-                                        1 -> 4
-                                        2 -> 8
-                                        else -> 0
-                                    },
-                                )
-                            }
-                        },
-                    )
-                }
-                RowDivider()
-                SettingRow("输出长度", glyph = Glyph.Font, stacked = true) {
-                    androidx.compose.foundation.layout.Row(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        GlassChip("标准", settings.noteMaxTokens == 4000) {
-                            store.updateSettings { it.copy(noteMaxTokens = 4000) }
-                        }
-                        GlassChip("长", settings.noteMaxTokens == 8000) {
-                            store.updateSettings { it.copy(noteMaxTokens = 8000) }
-                        }
-                    }
-                }
-            }
-        }
-        item { SectionCaption("对话") }
-        item {
-            // 3.26.51：用户点名要的「清空问书聊天记录」。
-            // 只清 MemoStore 里每本书的 turns（以及可能存在的全局 turns）；
-            // chapters（章节摘要）、facts、问书引用（内存态）和故事圣经都不动。
-            SettingGroup {
-                SettingRow(
-                    "清空问书聊天记录",
-                    "只清所有书的对话消息，章节摘要、引用和故事圣经保留",
-                    Glyph.Trash,
-                    onClick = { confirmClearChat = true },
-                )
-            }
-        }
-    }
-    if (confirmClearChat) {
-        ConfirmDialog(
-            "清空问书聊天记录？",
-            "所有书的问书对话都会清空。章节摘要、引用和故事圣经不受影响；此操作无法撤销。",
-            "清空",
-            {
-                confirmClearChat = false
-                scope.launch {
-                    val books = store.books
-                    withContext(Dispatchers.IO) {
-                        // 每本书一份 filesDir/ai/<bookId>.json；只清 turns，别的不碰。
-                        books.forEach { b ->
-                            val m = MemoStore.load(context, b.id)
-                            if (m.turns.isNotEmpty()) MemoStore.save(context, m.copy(turns = emptyList()))
-                        }
-                        val g = MemoStore.loadGlobal(context)
-                        if (g.turns.isNotEmpty()) MemoStore.saveGlobal(context, g.copy(turns = emptyList()))
-                    }
-                    // 通知常驻组合的 AiScreen 重新读盘（AiTab.kt 按这个版本号重载 memo/chat）。
-                    ChatClearSignal.bump()
-                    ToastBus.show("已清空")
-                }
-            },
-            { confirmClearChat = false },
-            destructive = true,
-        )
     }
 }
+
 /** A named slider with its live value and a one-line explanation. Used by the
- *  问书 glass section so three knobs do not need three bespoke rows. */
+ *  glass section so the knobs do not need bespoke rows. */
 @Composable
 private fun GlassSliderRow(
     title: String,

@@ -3,29 +3,20 @@ package com.moyu.writer
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ContentTransform
-import androidx.compose.animation.EnterTransition
-import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FiniteAnimationSpec
-import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.animate
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
-import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -37,7 +28,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -52,7 +42,6 @@ import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -83,13 +72,11 @@ import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalConfiguration
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Density
@@ -108,32 +95,25 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import org.json.JSONArray
-import org.json.JSONObject
 
 /**
- * 故事圣经（3.26.16；3.26.47 信息架构反转；3.26.48 双页完全对齐）。
+ * 故事圣经（3.26.16；3.26.47 信息架构反转；3.26.48 双页对齐；3.26.64 移除 AI 页）。
  *
- * 层级 = **来源 → 视图**：顶部先「我的 / AI」两段，下面再「角色 / 时间线 / 大纲」。
- * 3.26.48 起两页不再是「各写一套、看着差不多」，而是**同一份页面骨架**：
- * [StoryPageScaffold] 管滚动区 / 底部（待同意入口 + 已同步结果行 + 主按钮），
- * 待同意的 AI 改动收进底部抽屉（3.26.58，页面不再铺卡）。
- * [CharacterPane] / [TimelinePane] / [OutlinePane] 每个视图只有**一个** composable，
- * 用 `readOnly` 换行为（可编辑 / 只读）——元素清单、间距、字号、颜色、圆角、分隔线、内边距
- * 全部是同一份代码，两页之间不允许再出现第二套数值。
+ * 3.26.64：故事面板里不再有任何 AI 内容——**来源切换（我的 / AI）、待同意抽屉入口、已同步标记、
+ * 同步预览 / 一步撤销**全部删除。面板只铺**作者自己的条目**（`origin == author`），
+ * 角色 / 时间线 / 大纲三个视图各只有一个 composable（[CharacterPane] / [TimelinePane] /
+ * [OutlinePane]），全部可编辑；页面骨架 [StoryPageScaffold] 管滚动区 + 底部主按钮。
  *
  * 入口与触发方式（每页只留底部一个主操作，其余进「···」）：
- * - 点顶部「我的 / AI」：切来源，内容整幅横移（[storyPageTransform]，spring(.6, 380)；
+ * - 点「角色 / 时间线 / 大纲」：切视图，内容整幅横移（[storyPageTransform]，spring(.6, 380)；
  *   motion = none 时 tween(0) 直接落位）。
- * - 点第二行「角色 / 时间线 / 大纲」：切视图，同一套横移。
- * - 点底部主按钮：该页唯一主操作——我的页 = 新建角色 / 新建事件 / 新建大纲；
- *   AI 页 = 同步 AI 内容到我的（两页按钮同一尺寸/位置，只有文案与动作不同）。
- * - 点卡片：我的页 = 打开编辑；AI 页 = 只读详情（唯一允许的差异）。
+ * - 点底部主按钮：新建角色 / 新建事件 / 新建大纲。
+ * - 点卡片：打开对应的编辑器。
  * - 点卡片右上「···」：这张卡自己的次操作（建章 / 加关系 / 编辑 / 删除 / 清空情节点）。
- * - 点标题右侧「···」：面板级次操作（从正文生成大纲 / 按大纲建章 / 再补一次全书整理）。
+ * - 点标题右侧「···」：面板级次操作（按大纲建章）。
  * - 点 X / 系统返回：关面板。
  * - 长按：不设入口。滑动：面板内容纵向滚；角色图里单指平移、双指缩放、双击空白复位
- *   （我的图还能拖球钉住；两页都能点球换中心，AI 页只是只读）。
+ *   （可拖球钉住、点球换中心）。
  */
 @Composable
 fun StorySheet(
@@ -142,30 +122,13 @@ fun StorySheet(
     onOpenChapter: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    // 3.26.47：导航 = 来源（我的/AI）→ 视图（角色/时间线/大纲）；默认停在「我的 · 大纲」（写作前规划台）。
+    // 导航只剩「视图」一层（角色 / 时间线 / 大纲）；默认停在大纲（写作前规划台）。
     val pager = remember { StoryPagerState() }
-    // 3.26.58：待同意抽屉是页面级的一处（两侧来源 × 三个视图看到的是同一份）。
-    // 3.26.59：计数与抽屉一起下沉到 [StoryPageScaffold]（自包含），抽屉本体走可复用宿主
-    // [StoryPendingDrawerHost]（AiTab 也调它），面板这里不再持有这份状态。
 
     val ui = LocalInk.current
-    val synced = remember(book.bible, pager.syncTick) { bibleSyncedIds(book.id) }
-    val appCtx = LocalContext.current.applicationContext
-    val store = LocalStore.current
-    // 3.26.43：打开即触发「全书补齐」（受 3 分钟窗口节流）；进度显示在标题「···」菜单的副标题里。
-    LaunchedEffect(book.id) {
-        // 3.26.45：给 AiBible 的无参入口预热 Context / Store（待同意、同步预览都靠它取数据）。
-        AiBible.host(appCtx, store)
-        AiBibleSync.noteBookOpened(appCtx, store, book.id)
-    }
-    val sync = AiBibleSync.progressFor(book.id)
-    var headerMenu by remember { mutableStateOf(false) }
-    // 3.26.48：「从正文生成大纲」——面板级次操作，读正文 → AI 生成 → 预览 → 写入 bible。
-    var generating by remember { mutableStateOf(false) }
     // 3.26.56：「按大纲建章」——面板级次操作，把还没落地的章级节点一次建成空章节（预览勾选后才建）。
     var buildingChapters by remember { mutableStateOf(false) }
-    // 3.26.48：同步预览 / 一步撤销提到面板层，两页共用（切页不会把对话框打断）。
-    val syncHost = rememberStorySyncHost(book.id, pager)
+    var headerMenu by remember { mutableStateOf(false) }
 
     // 3.26.47：bleedContent = true —— 内容槽不再加两侧 20dp 的「内窗口」留白，横移能滑到面板本体边缘；
     // 每页自己用 SHEET_CONTENT_INSET 补回静止边距（3.26.46 的 storyBleed() 反向 padding 在这条路径退休）。
@@ -185,14 +148,13 @@ fun StorySheet(
                     weight = FontWeight.SemiBold,
                     letterSpacing = .3f,
                 )
-                // 3.26.48：「···」常驻。旧版只在「有整理进度」时才画，于是「从正文生成大纲」这种
-                // 面板级入口在没排版进度的新书上根本点不到。
+                // 「···」常驻：面板级次操作（按大纲建章）在这里。
                 GlassIconButton(Glyph.More, { headerMenu = true }, tint = ui.palette.muted)
                 Spacer(Modifier.width(2.dp))
                 GlassIconButton(Glyph.Close, close, tint = ui.palette.muted)
             }
             Spacer(Modifier.height(12.dp))
-            // 层级反转：来源在上、视图在下（见 [StoryNavTabs]）。
+            // 视图切换（见 [StoryNavTabs]）。
             StoryNavTabs(pager)
             Spacer(Modifier.height(4.dp))
         },
@@ -200,29 +162,17 @@ fun StorySheet(
         StoryNavBody(
             book = book,
             onBible = onBible,
-            onOpenChapter = onOpenChapter,
             pager = pager,
-            syncHost = syncHost,
-            synced = synced,
             bleed = true,
             modifier = Modifier.fillMaxSize(),
         )
     }
 
     if (headerMenu) {
-        // 「从正文生成大纲 / 按大纲建章」只在大纲视图出现：它们是这一页的次操作，不是全面板动作。
-        // 3.26.56：两者用**同一份候选判据**（[outlineNodesToBuild]）——菜单副标题的数就是对话框里的数。
+        // 「按大纲建章」只在大纲视图出现：它是这一页的次操作，不是全面板动作。
         val buildable = outlineNodesToBuild(book).size
         val actions = buildList {
             if (pager.view == STORY_VIEW_OUTLINE) {
-                add(
-                    StoryMenuAction(
-                        label = "从正文生成大纲",
-                        subtitle = "读这本书每章正文，先生成章级 / 自由大纲；预览确认后才写进故事圣经",
-                        glyph = Glyph.Sparkles,
-                        onClick = { generating = true },
-                    ),
-                )
                 add(
                     StoryMenuAction(
                         label = "按大纲建章",
@@ -236,66 +186,42 @@ fun StorySheet(
                     ),
                 )
             }
-            add(
-                StoryMenuAction(
-                    label = "再补一次全书整理",
-                    subtitle = if (sync.running) "正在整理，等这一轮跑完" else "重新扫一遍所有章节，把没整理的补进故事圣经",
-                    glyph = Glyph.Sparkles,
-                    enabled = !sync.running,
-                    onClick = { AiBibleSync.syncAll(appCtx, store, book.id, force = true) },
-                ),
-            )
         }
         StoryMenuDialog(
             title = "故事",
-            subtitle = sync.label.takeIf { it.isNotBlank() },
+            subtitle = null,
             actions = actions,
             onDismiss = { headerMenu = false },
         )
     }
-    if (generating) {
-        GenerateOutlineDialog(book = book, onBible = onBible, onDismiss = { generating = false })
-    }
     if (buildingChapters) {
         BuildChaptersFromOutlineDialog(book = book, onDismiss = { buildingChapters = false })
     }
-    StorySyncDialogs(syncHost)
 }
 
 // ───────────────────────── 角色 + 关系 ─────────────────────────
 
 /**
- * 角色页（3.26.48：**我的 / AI 共用这一个 composable**）。
+ * 角色页（3.26.64：只铺作者自己的角色 / 关系，全部可编辑）。
  *
- * `readOnly = false`（我的）：数据 = 作者条目 + 已同步的 AI 条目；卡片点开编辑、卡片「···」有次操作，
+ * 数据 = `origin == author` 的角色与关系；卡片点开编辑、卡片「···」有次操作，
  * 底部主按钮 = 新建角色；关系图可拖球钉住。
- * `readOnly = true`（AI）：数据 = 所有非作者条目；点开只读详情、没有次操作，底部主按钮 = 同步，
- * 关系图不能拖球——**除此之外和我的页是同一段代码**（图高 / 图例 / chip 行 / 角色卡 / 关系行 /
- * 内边距 / 字号 / 颜色 / 圆角 / 分隔线全部同一份）。
  *
  * 入口与触发方式：
- * - 点关系图里的球 / 点角色名 chip：换中心角色（两页都能，只读页也只读内容、不禁止换视角）。
- * - 按住球拖动：（仅我的页）钉住这颗球，其余球让位；松手解除后重新收敛（Obsidian 式拖球）。
+ * - 点关系图里的球 / 点角色名 chip：换中心角色。
+ * - 按住球拖动：钉住这颗球，其余球让位；松手解除后重新收敛（Obsidian 式拖球）。
  * - 单指按空白拖动：平移画布；双指：以双指中心为锚缩放 0.35–3×；双击空白：弹簧复位到 1×。
- * - 点角色卡：我的页 = 编辑；AI 页 = 只读详情。点角色卡「···」：仅我的页（加关系 / 编辑 / 删除）。
- * - 点关系行「···」：仅我的页（删除这条关系，确认后才删）。
- * - 点底部主按钮：我的页 = 新建角色；AI 页 = 同步 AI 内容到我的。
+ * - 点角色卡「···」：加关系 / 编辑 / 删除。点关系行「···」：删除这条关系（确认后才删）。
+ * - 点底部主按钮：新建角色。
  * - 长按：不设入口（会和拖球手势打架）。滑动：本页纵向滚。
  */
 @Composable
 private fun CharacterPane(
     book: Book,
     onBible: (BookBible) -> Unit,
-    syncHost: StorySyncHost,
-    synced: Set<String>,
-    readOnly: Boolean,
 ) {
-    // 3.26.45：作者页只放 origin == "author" 的角色/关系；AI 写进来的在「AI」页（只读）。
-    // 3.26.46：同步过的 AI 条目也铺在作者页（同步只打标记、不搬数据），否则点了同步什么都看不见。
-    val bible = if (readOnly) book.bible.aiWith() else book.bible.mineWith(synced)
-    // 3.26.59：淡化集合只在只读档生效——「我的」页铺出来的已同步条目不再整片 alpha .55；
-    // 与关系图 `dimmedIds` 同一道门（:365）。铺不铺出来仍由上面完整的 `synced` 决定。
-    val dimIds = if (readOnly) synced else emptySet()
+    // 3.26.64：故事面板只铺作者自己的条目（AI 写进来的不再出现在界面里）。
+    val bible = book.bible.mineWith(emptySet())
     var editing by remember { mutableStateOf<StoryCharacter?>(null) }
     var creating by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf<StoryCharacter?>(null) }
@@ -304,9 +230,6 @@ private fun CharacterPane(
     // 3.26.47：卡片次操作全部收进「···」菜单（旧版是卡上并排三枚 chip，和底部主按钮抢注意力）。
     var charMenu by remember { mutableStateOf(false) }
     var relationMenu by remember { mutableStateOf<StoryRelation?>(null) }
-    // 3.26.48：AI 页没有编辑，点开是只读详情。
-    var detail by remember { mutableStateOf<StoryCharacter?>(null) }
-    var relationDetail by remember { mutableStateOf<StoryRelation?>(null) }
     // 3.26.49：刚保存的关系行用同一条 spring(.6f, 380f) 长出来；保存 700ms 后清掉标记。
     var freshRelationId by remember(book.id) { mutableStateOf<String?>(null) }
     LaunchedEffect(freshRelationId) {
@@ -333,21 +256,15 @@ private fun CharacterPane(
 
     // 3.26.19：工作台模式——上半区自己滚，主按钮固定在 pane 底部，长内容不会把按钮顶出屏幕。
     StoryPageScaffold(
-        book = book,
-        syncHost = syncHost,
-        primaryLabel = if (readOnly) "同步 AI 内容到我的" else "新建角色",
-        primaryGlyph = if (readOnly) Glyph.Sparkles else Glyph.Plus,
-        onPrimary = { if (readOnly) syncHost.requestSync() else creating = true },
+        primaryLabel = "新建角色",
+        primaryGlyph = Glyph.Plus,
+        onPrimary = { creating = true },
     ) { graphH ->
         if (bible.characters.isEmpty()) {
             emptyPage(
-                glyph = if (readOnly) Glyph.Sparkles else Glyph.Note,
-                title = if (readOnly) "AI 还没写进来角色" else "还没有角色",
-                message = if (readOnly) {
-                    "问书或自动整理时，AI 记下的角色会先放在这里；同步后归到「我的」，这里仍留一条「已同步」。"
-                } else {
-                    "先记下一个名字，关系线和时间线都从这里长出来。AI 整理出来的角色在顶部「AI」里。"
-                },
+                glyph = Glyph.Note,
+                title = "还没有角色",
+                message = "先记下一个名字，关系线和时间线都从这里长出来。",
             )
         } else {
             item {
@@ -357,8 +274,6 @@ private fun CharacterPane(
                         bible = bible,
                         centerId = centerId,
                         onPick = { pick(it) },
-                        readOnly = readOnly,
-                        dimmedIds = if (readOnly) synced else emptySet(),
                         modifier = Modifier.fillMaxWidth().height(graphH),
                     )
                     if (bible.relations.isNotEmpty()) {
@@ -377,21 +292,9 @@ private fun CharacterPane(
                     }
                     if (center != null) {
                         Spacer(Modifier.height(14.dp))
-                        // 3.26.46：两页共用同一张角色卡（同外观 / 间距 / 字号 / 颜色）。
                         StoryCharacterCard(
                             character = center,
-                            synced = center.id in dimIds,
-                            originTag = center.origin.takeIf { it != BIBLE_ORIGIN_AUTHOR },
-                            onClick = if (readOnly) {
-                                { detail = center }
-                            } else {
-                                null
-                            },
-                            onMore = if (readOnly) {
-                                null
-                            } else {
-                                { charMenu = true }
-                            },
+                            onMore = { charMenu = true },
                         )
                         val links = bible.relationsOf(center.id)
                         if (links.isNotEmpty()) {
@@ -402,18 +305,7 @@ private fun CharacterPane(
                                     title = other.name.ifBlank { "未命名" },
                                     relation = r,
                                     fresh = r.id == freshRelationId,
-                                    synced = r.id in dimIds,
-                                    originTag = r.origin.takeIf { it != BIBLE_ORIGIN_AUTHOR },
-                                    onClick = if (readOnly) {
-                                        { relationDetail = r }
-                                    } else {
-                                        null
-                                    },
-                                    onMore = if (readOnly) {
-                                        null
-                                    } else {
-                                        { relationMenu = r }
-                                    },
+                                    onMore = { relationMenu = r },
                                 )
                             }
                         }
@@ -426,7 +318,7 @@ private fun CharacterPane(
 
     // 中心角色卡的「···」：加关系 / 编辑 / 删除（每页只留底部一个主操作，这些次操作不再铺在卡上）。
     center?.let { c ->
-        if (!readOnly && charMenu) {
+        if (charMenu) {
             StoryMenuDialog(
                 title = c.name.ifBlank { "未命名" },
                 subtitle = "角色 · ${bible.relationsOf(c.id).size} 条关系",
@@ -521,8 +413,7 @@ private fun CharacterPane(
     }
     linking?.let { from ->
         RelationEditor(
-            // 3.26.45：作者只能连自己的角色；AI 角色在「AI」页，同步后才出现。
-            bible = book.bible.mineWith(synced),
+            bible = book.bible.mineWith(emptySet()),
             from = from,
             onDismiss = { linking = null },
             onSave = { to, kind, kindLabel, kindColor, kindTier ->
@@ -553,30 +444,6 @@ private fun CharacterPane(
                 // 3.26.49：新行 / 改过的行落库后用 spring(.6f, 380f) 长出来。
                 freshRelationId = next.id
             },
-        )
-    }
-    // AI 页：点开的只读详情（唯一允许的差异——不可编辑）。
-    detail?.let { c ->
-        StoryReadOnlySheet(
-            title = c.name.ifBlank { "未命名角色" },
-            subtitle = "AI 角色 · ${originLabel(c.origin)}",
-            // 3.26.59：详情列出 身份 / 阵营 / 性格外貌 / 一句话；空项跳过（不占一行「（空）」）。
-            // 性格外貌只在这里展开——卡片上不铺（整段太长会把卡片撑高）。
-            rows = listOfNotNull(
-                c.role.takeIf { it.isNotBlank() }?.let { "身份" to it },
-                c.faction.takeIf { it.isNotBlank() }?.let { "阵营" to it },
-                c.traits.takeIf { it.isNotBlank() }?.let { "性格外貌" to it },
-                c.note.takeIf { it.isNotBlank() }?.let { "一句话" to it },
-            ),
-            onDismiss = { detail = null },
-        )
-    }
-    relationDetail?.let { r ->
-        StoryReadOnlySheet(
-            title = relationTitle(bible, r),
-            subtitle = "AI 关系 · ${originLabel(r.origin)}",
-            rows = listOf("类型" to r.kindText),
-            onDismiss = { relationDetail = null },
         )
     }
 }
@@ -680,12 +547,11 @@ private fun RelationLegend() {
  * ⑤ 初始位置由 `bookId + 角色 id` 派生固定种子，同一份数据每次打开的落点一致；
  *    每一步只取决于上一步（与帧率无关），所以收敛结果也确定。
  *
- * 手势（只读档 [readOnly] 关掉前两条里的编辑动作，只留视图手势，AI 页用这一档）：
+ * 手势：
  * ① 单指按在球上拖动 = 钉住这颗球（Obsidian 的拖球），其余球在模拟里让位；松手解除并重新收敛；
  * ② 单指按空白拖动 = 平移画布；双指 = 以双指中心为锚缩放（0.35–3×）；
  * ③ 单击球**立刻**换中心（不等双击超时）；双击空白复位视图；
- * ④ 换中心不清空当前坐标：模拟从当前坐标继续跑，节点是「走过去」不是闪跳；
- * ⑤ 只读档：不能拖球（按球拖动等同平移）、点球不换中心；平移 / 缩放 / 双击空白复位仍在。
+ * ④ 换中心不清空当前坐标：模拟从当前坐标继续跑，节点是「走过去」不是闪跳。
  *
  * 每帧只画一个 Canvas（不建 per-球 composable）：坐标只在绘制阶段读，模拟推进只让绘制失效、
  * 不触发重组；50 个角色也只是几十帧 O(n²) 的小循环，收敛后完全静止。
@@ -697,10 +563,6 @@ private fun RelationGraph(
     centerId: String,
     onPick: (String) -> Unit,
     modifier: Modifier = Modifier,
-    /** 3.26.47：AI 页只读——不能拖球、不能换中心，只留平移 / 缩放 / 双击复位。 */
-    readOnly: Boolean = false,
-    /** 3.26.47：已经同步到「我的」的球淡一档，和同页已同步卡片的 .55 对齐。 */
-    dimmedIds: Set<String> = emptySet(),
 ) {
     val ui = LocalInk.current
     val density = LocalDensity.current
@@ -910,8 +772,7 @@ private fun RelationGraph(
                         viewJob?.cancel()
                         gestureActive = true
                         val start = down.position
-                        // 3.26.47：只读档（AI 页）不认球上的拖拽 / 点击，只走视图手势。
-                        val startNode = if (readOnly) null else hitTest(start)
+                        val startNode = hitTest(start)
                         var pastSlop = false
                         var pin: ForceGraph.Node? = null
                         var grab = Offset.Zero
@@ -977,13 +838,10 @@ private fun RelationGraph(
                         }
                         if (!pastSlop) {
                             if (startNode != null) {
-                                if (!readOnly) {
-                                    // 单击球立刻换中心：不设双击等待。
-                                    lastTapAt = 0L
-                                    onPickState.value(startNode.id)
-                                }
+                                // 单击球立刻换中心：不设双击等待。
+                                lastTapAt = 0L
+                                onPickState.value(startNode.id)
                             } else {
-                                // 只读档里点球不换中心（startNode 恒为 null），单击球也走双击复位这一条。
                                 val now = android.os.SystemClock.uptimeMillis()
                                 val near = (start - lastTapPos).getDistance() < with(density) { 40.dp.toPx() }
                                 if (now - lastTapAt in 1L..GRAPH_DOUBLE_TAP_MS && near) {
@@ -1031,11 +889,9 @@ private fun RelationGraph(
                 fun DrawScope.ball(node: ForceGraph.Node) {
                     val p = Offset(cx + node.x, cy + node.y)
                     val color = ballColor(node.char)
-                    // 3.26.47：AI 页里已经同步到「我的」的球淡一档，和同页已同步卡片的 .55 对齐。
-                    val dim = if (node.id in dimmedIds) .55f else 1f
                     // 先铺一圈大 3dp 的纸色 halo 再画球：线与球之间留一层纸。
                     drawCircle(ui.palette.paper, radius = node.r + halo, center = p)
-                    drawCircle(color.copy(alpha = dim), radius = node.r, center = p)
+                    drawCircle(color, radius = node.r, center = p)
                     if (node.isCenter) {
                         // 3.26.46：选中环带弹簧长出来（半径从「贴球」扩到 +1dp，同时淡入）。
                         val sel = selectPulse.value.coerceIn(0f, 1f)
@@ -1047,14 +903,14 @@ private fun RelationGraph(
                         )
                     }
                     drawCircle(
-                        ui.palette.ink.copy(alpha = (if (node.isCenter) .16f else .20f) * dim),
+                        ui.palette.ink.copy(alpha = if (node.isCenter) .16f else .20f),
                         radius = node.r,
                         center = p,
                         style = Stroke(width = .8.dp.toPx()),
                     )
                     val paint = if (node.isCenter) centerBallPaint else ballPaint
                     paint.color = inkOnBall(color, ui.palette).toArgb()
-                    paint.alpha = (255 * dim).toInt()
+                    paint.alpha = 255
                     drawContext.canvas.nativeCanvas.drawText(
                         ballLabel(node.char.name),
                         p.x,
@@ -1442,57 +1298,40 @@ private fun unitDirection(from: Offset, to: Offset): Offset? {
 // ───────────────────────── 时间线 ─────────────────────────
 
 /**
- * 时间线页（3.26.48：**我的 / AI 共用这一个 composable**）。
+ * 时间线页（3.26.64：只铺作者自己记的事件，全部可编辑）。
  *
- * 两页同一根竖轴 [TimelineAxis]、同一套事件卡 [EventCard]、同一份卡片间距与空态位置；
- * 只有「不可编辑」这一项不同：我的页点卡开编辑器、卡上有「···」删除菜单；
- * AI 页点卡是只读详情、卡上没有次操作。
+ * 一根竖轴 [TimelineAxis]、一套事件卡 [EventCard]、同一份卡片间距与空态位置。
  *
  * 入口与触发方式：
- * - 点事件卡：我的页 = 打开事件编辑器（故事时间 / 发生了什么 / 章归属 / 出场角色）；
- *   AI 页 = 只读详情。
- * - 点事件卡右上「···」：仅我的页，菜单里只有「删除这个事件」，确认后才删。
- * - 点底部主按钮：我的页 = 新建事件；AI 页 = 同步 AI 内容到我的。
+ * - 点事件卡：打开事件编辑器（故事时间 / 发生了什么 / 章归属 / 出场角色）。
+ * - 点事件卡右上「···」：菜单里只有「删除这个事件」，确认后才删。
+ * - 点底部主按钮：新建事件。
  * - 长按：不设入口。滑动：时间线纵向滚；轴是一条连续的竖线，事件按故事时间挂在轴上。
  */
 @Composable
 private fun TimelinePane(
     book: Book,
     onBible: (BookBible) -> Unit,
-    onOpenChapter: (String) -> Unit,
-    syncHost: StorySyncHost,
-    synced: Set<String>,
-    readOnly: Boolean,
 ) {
     var editing by remember { mutableStateOf<StoryEvent?>(null) }
     var creating by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf<StoryEvent?>(null) }
     // 3.26.47：删除收进卡片「···」菜单（旧版卡头常驻一个垃圾桶）。
     var menuEvent by remember { mutableStateOf<StoryEvent?>(null) }
-    var detail by remember { mutableStateOf<StoryEvent?>(null) }
-    // 3.26.45：作者页只放自己记的事件；AI / 正文提取的在「AI」页（只读）。
-    // 3.26.46：同步过的 AI 事件也铺在作者页（同步只打标记，不搬数据）。
-    val events = (if (readOnly) book.bible.aiWith() else book.bible.mineWith(synced)).events
-    // 3.26.59：淡化集合只在只读档生效（与关系图 dimmedIds 同一道门）；铺不铺仍用完整 `synced`。
-    val dimIds = if (readOnly) synced else emptySet()
+    // 3.26.64：故事面板只铺作者自己的条目（AI 写进来的不再出现在界面里）。
+    val events = book.bible.mineWith(emptySet()).events
 
     // 3.26.19：工作台模式——上半区自己滚，主按钮固定在 pane 底部。
     StoryPageScaffold(
-        book = book,
-        syncHost = syncHost,
-        primaryLabel = if (readOnly) "同步 AI 内容到我的" else "新建事件",
-        primaryGlyph = if (readOnly) Glyph.Sparkles else Glyph.Plus,
-        onPrimary = { if (readOnly) syncHost.requestSync() else creating = true },
+        primaryLabel = "新建事件",
+        primaryGlyph = Glyph.Plus,
+        onPrimary = { creating = true },
     ) { _ ->
         if (events.isEmpty()) {
             emptyPage(
-                glyph = if (readOnly) Glyph.Sparkles else Glyph.Clock,
-                title = if (readOnly) "AI 还没写进来事件" else "时间线还空着",
-                message = if (readOnly) {
-                    "AI 整理出来的事件会先放在这里；同步后归到「我的」，这里仍留一条「已同步」。"
-                } else {
-                    "把「哪天发生了什么」记下来，写后面的章节时就不会撞时间。AI 整理出来的事件在顶部「AI」里。"
-                },
+                glyph = Glyph.Clock,
+                title = "时间线还空着",
+                message = "把「哪天发生了什么」记下来，写后面的章节时就不会撞时间。",
             )
         } else {
             item {
@@ -1500,10 +1339,8 @@ private fun TimelinePane(
                     TimelineAxis(
                         events = events,
                         book = book,
-                        syncedIds = dimIds,
-                        showOrigin = true,
-                        onOpen = { if (readOnly) detail = it else editing = it },
-                        onMore = if (readOnly) null else ({ e -> menuEvent = e }),
+                        onOpen = { editing = it },
+                        onMore = { e -> menuEvent = e },
                     )
                     Spacer(Modifier.height(8.dp))
                 }
@@ -1553,37 +1390,17 @@ private fun TimelinePane(
             },
         )
     }
-
-    // AI 页：点开的只读详情（唯一允许的差异——不可编辑）。
-    detail?.let { e ->
-        StoryReadOnlySheet(
-            title = e.title.ifBlank { "未命名事件" },
-            subtitle = "AI 事件 · ${originLabel(e.origin)}",
-            rows = listOf(
-                "故事时间" to e.whenText,
-                "备注" to e.note,
-                "章节" to e.chapterIds.mapNotNull { id -> book.chapters.firstOrNull { it.id == id }?.title }
-                    .joinToString("、"),
-                "出场角色" to e.characterIds.mapNotNull { id -> book.bible.character(id)?.name }
-                    .joinToString(" · "),
-            ),
-            onDismiss = { detail = null },
-        )
-    }
 }
 
 /**
- * 时间线主轴（3.26.47 提到共用）：竖线 + 刻度点 + 事件挂在轴上。
+ * 时间线主轴：竖线 + 刻度点 + 事件挂在轴上。
  *
- * 我的页与 AI 页共用同一套画法：能解析出故事时间的按时间升序，解析不出的收进
- * 「时间不详」分组放最后（3.26.20 规约）；两页只差卡片的点击回调与来源标签。
+ * 能解析出故事时间的按时间升序，解析不出的收进「时间不详」分组放最后（3.26.20 规约）。
  */
 @Composable
 private fun TimelineAxis(
     events: List<StoryEvent>,
     book: Book,
-    syncedIds: Set<String> = emptySet(),
-    showOrigin: Boolean = false,
     onOpen: (StoryEvent) -> Unit,
     onMore: ((StoryEvent) -> Unit)? = null,
 ) {
@@ -1599,8 +1416,6 @@ private fun TimelineAxis(
             event = e,
             book = book,
             isLast = drawn == total - 1,
-            synced = e.id in syncedIds,
-            originTag = if (showOrigin) e.origin else null,
             onOpen = { onOpen(e) },
             onMore = onMore?.let { more -> { more(e) } },
         )
@@ -1614,8 +1429,6 @@ private fun TimelineAxis(
                 event = e,
                 book = book,
                 isLast = drawn == total - 1,
-                synced = e.id in syncedIds,
-                originTag = if (showOrigin) e.origin else null,
                 onOpen = { onOpen(e) },
                 onMore = onMore?.let { more -> { more(e) } },
             )
@@ -1630,8 +1443,6 @@ private fun TimelineEventRow(
     event: StoryEvent,
     book: Book,
     isLast: Boolean,
-    synced: Boolean = false,
-    originTag: String? = null,
     onOpen: (StoryEvent) -> Unit,
     onMore: (() -> Unit)? = null,
 ) {
@@ -1664,8 +1475,6 @@ private fun TimelineEventRow(
                     .mapNotNull { id -> book.chapters.firstOrNull { it.id == id }?.title }
                     .joinToString("、")
                     .ifBlank { "未关联" },
-                synced = synced,
-                originTag = originTag,
                 onOpen = { onOpen(event) },
                 onMore = onMore,
             )
@@ -1691,22 +1500,19 @@ private fun TimelineSectionLabel(label: String) {
 }
 
 /**
- * 事件卡：作者页点卡编辑、点「···」弹删除菜单；AI 页复用同一张卡，点卡只读详情、没有「···」。
+ * 事件卡：点卡编辑、点「···」弹删除菜单。
  */
 @Composable
 private fun EventCard(
     event: StoryEvent,
     book: Book,
     chapterLabel: String,
-    synced: Boolean = false,
-    originTag: String? = null,
     onOpen: () -> Unit,
     onMore: (() -> Unit)? = null,
 ) {
     val ui = LocalInk.current
-    val alpha = storySyncedAlpha(synced)
     MoyuSurface(
-        Modifier.fillMaxWidth().graphicsLayer { this.alpha = alpha },
+        Modifier.fillMaxWidth(),
         radius = 18f,
         flat = true,
     ) {
@@ -1727,15 +1533,6 @@ private fun EventCard(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                if (originTag != null) {
-                    // 3.26.48：来源标签与章名之间 ≥12dp（用户报「标签贴着章名」）。
-                    Spacer(Modifier.width(12.dp))
-                    AiOriginTag(originTag)
-                }
-                if (synced) {
-                    Spacer(Modifier.width(6.dp))
-                    SyncedTag(true)
-                }
                 if (onMore != null) {
                     Spacer(Modifier.width(6.dp))
                     Box(
@@ -1765,7 +1562,7 @@ private fun EventCard(
 // ───────────────────────── 大纲 ─────────────────────────
 
 /**
- * 大纲页（3.26.48：**我的 / AI 共用这一个 composable**）。
+ * 大纲页（3.26.64：只铺作者自己的大纲，全部可编辑）。
  *
  * 用户拍板「大纲两种卡」：
  * - **章级卡**：卡头是章名（已建章带 01/02 序号，未落地带「章」图标 + 状态），下面一条分隔线再列情节点；
@@ -1775,25 +1572,16 @@ private fun EventCard(
  * 情节点两种卡都是**行内列表**（沿用 [StoryBeatRow]），不是卡；两种卡的区别靠结构
  * （卡头 + 分隔线 vs 标题直领 + 竖线），不靠卡内小字标签。
  *
- * 3.26.48：两页同一段循环、同一套卡、同一份间距——我的页铺「计划里的章级卡 + 每一章 + 自由大纲」，
- * AI 页铺同一份循环但只留下有 AI 节点的章；`readOnly` 只改「点开是编辑还是只读详情」和
- * 「卡上有没有次操作」，不改任何结构或数值。
- *
  * 入口与触发方式：
- * - 点卡：我的页 = 打开情节点编辑器（章级卡编辑这一章 / 这条计划；自由卡编辑这条自由大纲）；
- *   AI 页 = 只读详情。
- * - 点卡右上「···」：我的页 = 次操作菜单（建章 / 清空情节点 / 删除整条大纲）；
- *   AI 页 = 只有未落地节点的「建章」（其余修改走「我的」）。
- * - 点底部主按钮：我的页 = 新建大纲（弹窗里选章级节点 / 自由节点）；AI 页 = 同步 AI 内容到我的。
+ * - 点卡：打开情节点编辑器（章级卡编辑这一章 / 这条计划；自由卡编辑这条自由大纲）。
+ * - 点卡右上「···」：次操作菜单（建章 / 清空情节点 / 删除整条大纲）。
+ * - 点底部主按钮：新建大纲（弹窗里选章级节点 / 自由节点）。
  * - 长按：不设入口。滑动：列表纵向滚。
  */
 @Composable
 private fun OutlinePane(
     book: Book,
     onBible: (BookBible) -> Unit,
-    syncHost: StorySyncHost,
-    synced: Set<String>,
-    readOnly: Boolean,
 ) {
     val ui = LocalInk.current
     val store = LocalStore.current
@@ -1807,13 +1595,11 @@ private fun OutlinePane(
     var creating by remember { mutableStateOf(false) }
     var newKind by remember { mutableIntStateOf(0) }
     var newTitle by remember { mutableStateOf("") }
-    var detail by remember { mutableStateOf<OutlineNode?>(null) }
     // 新建后等数据真的落库，再开情节点编辑器；直接开会用旧 bible 的 onSave 再插一条（重复）。
     var pendingBeatId by remember { mutableStateOf<String?>(null) }
     val bible = book.bible
-    val mine = if (readOnly) bible.aiWith() else bible.mineWith(synced)
-    // 3.26.59：淡化集合只在只读档生效（与关系图 dimmedIds 同一道门）；铺不铺仍用完整 `synced`。
-    val dimIds = if (readOnly) synced else emptySet()
+    // 3.26.64：故事面板只铺作者自己的条目（AI 写进来的不再出现在界面里）。
+    val mine = bible.mineWith(emptySet())
     val freeNodes = mine.outline.filter { isFreeOutlineNode(it) }
     val chapterLoose = mine.outline.filter {
         !isFreeOutlineNode(it) && book.chapters.none { c -> c.id == it.chapterId }
@@ -1840,21 +1626,15 @@ private fun OutlinePane(
 
     // 3.26.19：工作台模式——列表自己滚，主按钮固定在 pane 底部。
     StoryPageScaffold(
-        book = book,
-        syncHost = syncHost,
-        primaryLabel = if (readOnly) "同步 AI 内容到我的" else "新建大纲",
-        primaryGlyph = if (readOnly) Glyph.Sparkles else Glyph.Plus,
-        onPrimary = { if (readOnly) syncHost.requestSync() else creating = true },
+        primaryLabel = "新建大纲",
+        primaryGlyph = Glyph.Plus,
+        onPrimary = { creating = true },
     ) { _ ->
         if (mine.outline.isEmpty()) {
             emptyPage(
-                glyph = if (readOnly) Glyph.Sparkles else Glyph.List,
-                title = if (readOnly) "AI 还没写大纲" else "还没有大纲，先写一条",
-                message = if (readOnly) {
-                    "AI 整理出来的情节点会先放在这里；同步后归到「我的」，这里仍留一条「已同步」。"
-                } else {
-                    "大纲先于章节：先立一条章级大纲，以后按它「建章」；也可以写自由大纲，只做剧情规划。"
-                },
+                glyph = Glyph.List,
+                title = "还没有大纲，先写一条",
+                message = "大纲先于章节：先立一条章级大纲，以后按它「建章」；也可以写自由大纲，只做剧情规划。",
             )
         } else {
             item {
@@ -1865,69 +1645,37 @@ private fun OutlinePane(
                             seq = null,
                             chapterTitle = node.title.ifBlank { "未命名大纲" },
                             beats = node.beats,
-                            statusText = if (node.id in synced) "已同步" else "未建章",
-                            statusAccent = node.id in synced,
-                            synced = node.id in dimIds,
-                            originTag = node.origin.takeIf { it != BIBLE_ORIGIN_AUTHOR },
-                            onCardClick = { if (readOnly) detail = node else beatTarget = node },
+                            statusText = "未建章",
+                            onCardClick = { beatTarget = node },
                             onMore = { menuNode = node to OutlineCardKind.ChapterPlanned },
-                            onToggleBeat = if (readOnly) {
-                                null
-                            } else {
-                                { b -> onBible(toggleOutlineBeat(bible, node, b)) }
-                            },
-                            onDeleteBeat = if (readOnly) {
-                                null
-                            } else {
-                                { b -> deletingBeat = node to b }
-                            },
+                            onToggleBeat = { b -> onBible(toggleOutlineBeat(bible, node, b)) },
+                            onDeleteBeat = { b -> deletingBeat = node to b },
                         )
                         Spacer(Modifier.height(10.dp))
                     }
-                    // ② 章级卡（已建章）：章名用章节标题，序号 01/02…（含已同步的 AI 节点）。
-                    // 3.26.48：这一段两页共用——我的页给「还没有节点的章」铺一张「待写」卡；
-                    // AI 页跳过它（AI 页只铺 AI 自己写出来的东西，不为空章占位）。
+                    // ② 章级卡（已建章）：章名用章节标题，序号 01/02…；还没有节点的章铺一张「待写」卡。
                     book.chapters.forEachIndexed { index, chapter ->
                         // 3.26.20：空大纲节点按「待写」显示，不再报 0/0；编辑时仍复用这条空节点，避免越堆越多。
-                        // 3.26.46：已同步的 AI 节点也铺在作者页（同步只打标记），点开编辑即视为作者接手。
-                        val authorNode = bible.outline.firstOrNull {
-                            it.chapterId == chapter.id && it.origin == BIBLE_ORIGIN_AUTHOR
-                        }
-                        val anyNode = bible.outline.firstOrNull { it.chapterId == chapter.id }
-                        val node = authorNode ?: anyNode
-                        if (readOnly && node == null) return@forEachIndexed
+                        val node = bible.outline.firstOrNull { it.chapterId == chapter.id }
                         val plainTarget = OutlineNode(chapterId = chapter.id, title = chapter.title)
                         ChapterOutlineCard(
                             seq = index + 1,
                             chapterTitle = chapter.title,
                             beats = node?.beats ?: emptyList(),
-                            statusText = when {
-                                node == null -> "待写"
-                                node.id in synced -> "已同步"
-                                node.origin != BIBLE_ORIGIN_AUTHOR -> "AI 待同步"
-                                else -> "${node.beats.count { it.done }}/${node.beats.size}"
-                            },
+                            statusText = if (node == null) "待写" else "${node.beats.count { it.done }}/${node.beats.size}",
                             statusAccent = node != null,
-                            synced = node != null && node.id in dimIds,
-                            originTag = node?.origin?.takeIf { it != BIBLE_ORIGIN_AUTHOR },
-                            onCardClick = {
-                                if (readOnly) {
-                                    node?.let { detail = it }
-                                } else {
-                                    beatTarget = node ?: plainTarget
-                                }
-                            },
-                            onMore = if (node == null || readOnly) {
+                            onCardClick = { beatTarget = node ?: plainTarget },
+                            onMore = if (node == null) {
                                 null
                             } else {
                                 { menuNode = node to OutlineCardKind.ChapterAttached }
                             },
-                            onToggleBeat = if (node != null && !readOnly) {
+                            onToggleBeat = if (node != null) {
                                 { b -> onBible(toggleOutlineBeat(bible, node, b)) }
                             } else {
                                 null
                             },
-                            onDeleteBeat = if (node != null && !readOnly) {
+                            onDeleteBeat = if (node != null) {
                                 { b -> deletingBeat = node to b }
                             } else {
                                 null
@@ -1944,20 +1692,10 @@ private fun OutlinePane(
                             FreeOutlineCard(
                                 title = node.title.ifBlank { "未命名大纲" },
                                 beats = node.beats,
-                                synced = node.id in dimIds,
-                                originTag = node.origin.takeIf { it != BIBLE_ORIGIN_AUTHOR },
-                                onCardClick = { if (readOnly) detail = node else beatTarget = node },
+                                onCardClick = { beatTarget = node },
                                 onMore = { menuNode = node to OutlineCardKind.Free },
-                                onToggleBeat = if (readOnly) {
-                                    null
-                                } else {
-                                    { b -> onBible(toggleOutlineBeat(bible, node, b)) }
-                                },
-                                onDeleteBeat = if (readOnly) {
-                                    null
-                                } else {
-                                    { b -> deletingBeat = node to b }
-                                },
+                                onToggleBeat = { b -> onBible(toggleOutlineBeat(bible, node, b)) },
+                                onDeleteBeat = { b -> deletingBeat = node to b },
                             )
                             Spacer(Modifier.height(10.dp))
                         }
@@ -2041,7 +1779,6 @@ private fun OutlinePane(
 
     // 3.26.47：整条大纲的次操作（建章 / 清空情节点 / 删除）统一收到卡片「···」菜单里；
     // 动作先关菜单、再开目标 Dialog，两个 Dialog 不同时出现在同一帧（3.26.9 的老规矩）。
-    // 3.26.48：AI 页只留「建章」——其余修改属于「不可编辑」，走「我的」。
     menuNode?.let { (node, kind) ->
         val actions = ArrayList<StoryMenuAction>()
         if (kind == OutlineCardKind.ChapterPlanned) {
@@ -2051,24 +1788,22 @@ private fun OutlinePane(
                 glyph = Glyph.Book,
             ) { buildChapterFromOutline(store, book.id, node) }
         }
-        if (!readOnly) {
-            if (node.beats.isNotEmpty()) {
-                actions += StoryMenuAction(
-                    label = "清空情节点",
-                    subtitle = "${node.beats.size} 个情节点会移除，章节正文不动",
-                    glyph = Glyph.Trash,
-                ) { confirmNode = node to true }
-            }
+        if (node.beats.isNotEmpty()) {
             actions += StoryMenuAction(
-                label = "删除整条大纲",
-                subtitle = if (kind == OutlineCardKind.ChapterAttached) {
-                    "这一章回到「待写」，章节正文不动"
-                } else {
-                    "这条大纲会移除，章节正文不动"
-                },
+                label = "清空情节点",
+                subtitle = "${node.beats.size} 个情节点会移除，章节正文不动",
                 glyph = Glyph.Trash,
-            ) { confirmNode = node to false }
+            ) { confirmNode = node to true }
         }
+        actions += StoryMenuAction(
+            label = "删除整条大纲",
+            subtitle = if (kind == OutlineCardKind.ChapterAttached) {
+                "这一章回到「待写」，章节正文不动"
+            } else {
+                "这条大纲会移除，章节正文不动"
+            },
+            glyph = Glyph.Trash,
+        ) { confirmNode = node to false }
         StoryMenuDialog(
             title = when (kind) {
                 OutlineCardKind.ChapterAttached -> "本章大纲"
@@ -2125,19 +1860,6 @@ private fun OutlinePane(
                     ),
                 )
             },
-        )
-    }
-    // AI 页：点开的只读详情（唯一允许的差异——不可编辑）。
-    detail?.let { node ->
-        val title = book.chapters.firstOrNull { it.id == node.chapterId }?.title
-            ?: node.title.ifBlank { "未命名大纲" }
-        StoryReadOnlySheet(
-            title = title,
-            subtitle = "AI 大纲 · ${originLabel(node.origin)}",
-            rows = listOf(
-                "情节点" to node.beats.joinToString("；") { (if (it.done) "✓ " else "") + it.text },
-            ),
-            onDismiss = { detail = null },
         )
     }
 }
@@ -2731,15 +2453,16 @@ private fun chineseNumber(text: String): Int? {
 }
 /**
  * 3.26.23：编辑页能力栏里的悬浮故事圣经（与故事面板同一套 pane，单一事实源，可原地编辑）。
- * 3.26.47：层级同步反转为「我的 / AI → 角色 / 时间线 / 大纲」；标题栏的「撤销最近一次 AI 改动」
- * 与「AI 改动记录」收进「···」菜单（顶部不再并排三枚图标）。
+ * 3.26.64：与故事面板同步摘掉 AI 内容——只剩「角色 / 时间线 / 大纲」三视图，
+ * 标题栏不再有「AI 改动记录 / 撤销最近一次 AI 改动」。
  *
  * 入口与触发方式：
- * - 点「我的 / AI」「角色 / 时间线 / 大纲」：切页，内容整幅横移（与故事面板同一套 spring）。
- * - 点卡片 / 卡片「···」：与故事面板完全同一套（编辑 / 只读详情 / 次操作菜单）。
- * - 点标题栏「···」：撤销最近一次 AI 改动 / AI 改动记录（两个次操作收在这里）。
- * - 点 Chevron：从「AI 改动记录」返回故事页；点 X：关浮层。
+ * - 点「角色 / 时间线 / 大纲」：切页，内容整幅横移（与故事面板同一套 spring）。
+ * - 点卡片 / 卡片「···」：与故事面板完全同一套（编辑 / 次操作菜单）。
+ * - 点 X：关浮层。
  * - 滑动：面板内容纵向滚；角色图同故事面板手势。
+ *
+ * [journal] / [onUndo]：Editor.kt 仍按名传这两个参数（那边下一波随问书一起删），本面板已不再使用。
  *
  * TODO(bleedContent): ModalSheet 还没有 bleedContent（3.26.47 只有 InlineModalSheet 有），
  * 悬浮故事页暂时保留 [storyBleed] 反向多量；Design.kt 给 ModalSheet 补上后删掉这层、
@@ -2755,19 +2478,7 @@ internal fun StoryBibleFloatSheet(
 ) {
     val ui = LocalInk.current
     val pager = remember { StoryPagerState() }
-    var showLog by remember { mutableStateOf(false) }
-    // 3.26.47：标题栏的撤销 / 改动记录两个次操作收进「···」菜单。
-    var menu by remember { mutableStateOf(false) }
-    val appCtx = LocalContext.current.applicationContext
-    val store = LocalStore.current
-    LaunchedEffect(book.id) {
-        // 3.26.45：预热 AiBible 的无参入口（同步预览 / 待同意抽屉都靠它取数据）。
-        AiBible.host(appCtx, store)
-    }
-    val synced = remember(book.bible, pager.syncTick) { bibleSyncedIds(book.id) }
     val sheetH = (LocalConfiguration.current.screenHeightDp * .60f).dp
-    // 3.26.48：同步预览 / 撤销的对话框状态跟着面板走（与故事面板同一份实现）。
-    val syncHost = rememberStorySyncHost(book.id, pager)
     // 3.26.48：右上 X 走面板自己的 close()——先播退场、idle 后才回调 onDismiss。
     // 旧版直接调 onDismiss，宿主 `if(flag)` 当帧就把面板卸掉，退场被跳过（Design.kt 3.26.47 已给
     // ModalSheet 补上 closeableContent）。
@@ -2777,220 +2488,75 @@ internal fun StoryBibleFloatSheet(
         closeableContent = { close ->
             Column(Modifier.fillMaxWidth().height(sheetH)) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    if (showLog) {
-                        Box(
-                            Modifier.size(30.dp).clip(CircleShape).clickable { showLog = false },
-                            contentAlignment = Alignment.Center,
-                        ) { LineIcon(Glyph.Chevron, ui.palette.muted, 15.dp) }
-                        Spacer(Modifier.width(6.dp))
-                    }
-                    Txt(if (showLog) "AI 改动" else "故事", size = 20f, weight = FontWeight.SemiBold)
+                    Txt("故事", size = 20f, weight = FontWeight.SemiBold)
                     Spacer(Modifier.weight(1f))
-                    if (!showLog && (onUndo != null || journal.isNotEmpty())) {
-                        Box(
-                            Modifier.size(30.dp).clip(CircleShape).clickable { menu = true },
-                            contentAlignment = Alignment.Center,
-                        ) { LineIcon(Glyph.More, ui.palette.muted, 15.dp) }
-                    }
-                    Spacer(Modifier.width(4.dp))
                     Box(
                         Modifier.size(30.dp).clip(CircleShape).clickable { close() },
                         contentAlignment = Alignment.Center,
                     ) { LineIcon(Glyph.Close, ui.palette.muted, 15.dp) }
                 }
                 Spacer(Modifier.height(10.dp))
-                if (showLog) {
-                    Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
-                        if (journal.isEmpty()) {
-                            Txt("还没有 AI 改动", size = 12f, color = ui.palette.muted)
-                        } else {
-                            journal.forEach { (label, time) ->
-                                Txt(storyStamp(time), size = 10f, color = ui.palette.muted)
-                                Spacer(Modifier.height(2.dp))
-                                Txt(label, size = 13f, lineHeight = 19f)
-                                Spacer(Modifier.height(10.dp))
-                            }
-                        }
-                    }
-                } else {
-                    // 3.26.47：层级反转——来源在上、视图在下；内容层与故事面板共用 [StoryNavBody]。
-                    StoryNavTabs(pager)
-                    Spacer(Modifier.height(8.dp))
-                    StoryNavBody(
-                        book = book,
-                        onBible = onBible,
-                        onOpenChapter = {},
-                        pager = pager,
-                        syncHost = syncHost,
-                        synced = synced,
-                        bleed = false,
-                        modifier = Modifier.weight(1f).fillMaxWidth(),
-                    )
-                }
+                // 内容层与故事面板共用 [StoryNavBody]。
+                StoryNavTabs(pager)
+                Spacer(Modifier.height(8.dp))
+                StoryNavBody(
+                    book = book,
+                    onBible = onBible,
+                    pager = pager,
+                    bleed = false,
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                )
             }
         },
     )
-    if (menu) {
-        StoryMenuDialog(
-            title = "故事",
-            subtitle = "AI 改动",
-            actions = buildList {
-                if (onUndo != null) {
-                    add(StoryMenuAction("撤销最近一次 AI 改动", "回到 AI 改之前的那一版", Glyph.Undo) { onUndo() })
-                }
-                if (journal.isNotEmpty()) {
-                    add(StoryMenuAction("AI 改动记录", "最近 ${journal.size} 条", Glyph.Clock) { showLog = true })
-                }
-            },
-            onDismiss = { menu = false },
-        )
-    }
-    StorySyncDialogs(syncHost)
 }
 
-/** mm-dd hh:mm for the AI change log lines. */
-private fun storyStamp(ms: Long): String {
-    if (ms <= 0L) return ""
-    val c = java.util.Calendar.getInstance().apply { timeInMillis = ms }
-    fun two(v: Int) = if (v < 10) "0$v" else v.toString()
-    return "${two(c.get(java.util.Calendar.MONTH) + 1)}-${two(c.get(java.util.Calendar.DAY_OF_MONTH))} " +
-        "${two(c.get(java.util.Calendar.HOUR_OF_DAY))}:${two(c.get(java.util.Calendar.MINUTE))}"
-}
-
-// ───────────── 来源 / 视图两层 + 同意卡 + 同步（3.26.45；3.26.47 层级反转） ─────────────
+// ───────────── 视图导航（3.26.45；3.26.47 层级反转；3.26.64 只剩视图） ─────────────
 //
-// 数据层不加字段：`origin` 早就有（author / text / ai）。工作台先按「来源」分页——
-// 「我的」只放 origin == "author"；「AI」放其余，只读；每页再按「视图」分角色 / 时间线 / 大纲。
-// AI 想改作者条目要经过「待同意」抽屉（同意 / 拒绝）；AI 写的新东西走「同步 AI 内容到我的」整批并入
-// 作者页，做完一步可撤销。
+// 数据层不加字段：`origin` 早就有（author / text / ai）。故事面板只铺 origin == "author" 的条目
+// （[BookBible.mineWith] 传空集 = 软隐藏旧 AI 条目；数据本身第二波再删）。
 
 private const val BIBLE_ORIGIN_AUTHOR = "author"
-private const val BIBLE_SECTION_CHARACTER = 0
-private const val BIBLE_SECTION_TIMELINE = 1
-private const val BIBLE_SECTION_OUTLINE = 2
 
-/** 来源：0 = 我的，1 = AI。 */
-private const val STORY_SOURCE_MINE = 0
-private const val STORY_SOURCE_AI = 1
 /** 视图：0 = 角色，1 = 时间线，2 = 大纲。 */
 private const val STORY_VIEW_CHARACTER = 0
 private const val STORY_VIEW_TIMELINE = 1
 private const val STORY_VIEW_OUTLINE = 2
 
-/**
- * 故事面板的导航与同步状态（3.26.47 层级反转后）。
- *
- * 旧版是「三个视图 tab 各记自己的我的/AI 页码」；反转后**来源在视图之上**，来源只有一份：
- * 切视图不换来源（先选看谁的，再看哪一块），所以不再需要每个 tab 一份页码。
- */
+/** 故事面板的导航状态：只剩「视图」一层（我的 / AI 来源切换已在 3.26.64 删除）。 */
 private class StoryPagerState {
-    /** 来源：我的 / AI。 */
-    var source by mutableIntStateOf(STORY_SOURCE_MINE)
     /** 视图：角色 / 时间线 / 大纲。3.26.19：默认停在大纲（写作前规划台）。 */
     var view by mutableIntStateOf(STORY_VIEW_OUTLINE)
-    /** 上次同步实际落地的处数；0 = 没有可撤销的同步（撤销条不出现）。 */
-    var synced by mutableIntStateOf(0)
-    /** 3.26.46：同步 / 撤销后自增，用来重读「已同步」侧车标记（bible 本身可能没变）。 */
-    var syncTick by mutableIntStateOf(0)
 }
 
-/** AI 对作者条目提出的一处改动——待同意抽屉里的一条。 */
-private data class StoryPendingChange(
-    val id: String,
-    /** [BIBLE_SECTION_CHARACTER] / [BIBLE_SECTION_TIMELINE] / [BIBLE_SECTION_OUTLINE] */
-    val section: Int,
-    /** AI 条目的原始类型：character / relation / event / outline（抽屉行的类型图标用它）。 */
-    val kind: String,
-    /** 名称：角色「李四」/ 关系「李四—王五」/ 事件「雨夜」/ 大纲「第三章」。 */
-    val title: String,
-    /** 哪个字段：身份 / 一句话 / 关系 / 故事时间 / 情节点 */
-    val field: String,
-    val before: String,
-    val after: String,
-)
-
-/** AI 条目类型 → 中文（同步预览、待同意抽屉的老侧车兜底同用）。 */
-private fun bibleKindLabel(kind: String): String = when (kind) {
-    "character" -> "角色"
-    "relation" -> "关系"
-    "event" -> "事件"
-    "outline" -> "大纲"
-    else -> "设定"
-}
+/** 导航位置：视图（角色 / 时间线 / 大纲）。 */
+private data class StoryNav(val view: Int)
 
 /**
- * 待同意的 AI 改动：把 AiBible 的字段级差异 [BibleChange] 映射成待同意抽屉的一条。
- * 角色 / 关系归角色 tab，事件归时间线，大纲归大纲；三个视图看到的是**同一份**列表
- * （3.26.58：不再按视图过滤，抽屉是页面级的一处，计数也按全书待同意算）。
- * 3.26.59：读取方只有 [StoryPageScaffold]（footer 计数）与 [StoryPendingDrawerHost]（抽屉）。
- */
-private fun storyPendingChanges(bookId: String): List<StoryPendingChange> =
-    pendingChanges(bookId).map { c ->
-        StoryPendingChange(
-            id = c.id,
-            section = when (c.kind) {
-                "event" -> BIBLE_SECTION_TIMELINE
-                "outline" -> BIBLE_SECTION_OUTLINE
-                else -> BIBLE_SECTION_CHARACTER
-            },
-            kind = c.kind,
-            title = c.title.ifBlank { bibleKindLabel(c.kind) },
-            field = c.field,
-            before = c.before,
-            after = c.after,
-        )
-    }
-
-/** 同意 / 拒绝一条 AI 改动；同意才写 bible。 */
-private fun storyResolveChange(bookId: String, changeId: String, accept: Boolean) {
-    if (!resolveChange(changeId, accept)) ToastBus.show("这条改动已经不在了")
-}
-
-/** 导航位置：来源 + 视图（[StoryNavTabs] 的两段）。 */
-private data class StoryNav(val source: Int, val view: Int)
-
-/**
- * 工作台导航：**上来源、下视图**（3.26.47 层级反转）。
+ * 工作台导航：只剩「角色 / 时间线 / 大纲」一行。
  *
- * 入口与触发方式：点「我的 / AI」切来源、点「角色 / 时间线 / 大纲」切视图，两段都只有点击；
- * 内容横移由 [StoryNavBody] 统一处理，导航条本身固定、不跟手横滑。
+ * 入口与触发方式：点这一行切视图；内容横移由 [StoryNavBody] 统一处理，导航条本身固定、不跟手横滑。
  */
 @Composable
 private fun StoryNavTabs(pager: StoryPagerState) {
-    Segmented(listOf("我的", "AI"), pager.source, { pager.source = it }, Modifier.fillMaxWidth())
-    Spacer(Modifier.height(8.dp))
     Segmented(listOf("角色", "时间线", "大纲"), pager.view, { pager.view = it }, Modifier.fillMaxWidth())
 }
 
-/**
- * 来源 / 视图切换的方向：先看来源变没变（我的在左、AI 在右），没变再看视图往哪边。
- * 只滑不淡；motion = none 时 [storyPageTransform] 里是 tween(0)。
- */
+/** 视图切换的方向：往右切就右进左出。只滑不淡；motion = none 时 [storyPageTransform] 里是 tween(0)。 */
 private fun storyNavTransform(
     motion: Boolean,
     initial: StoryNav,
     target: StoryNav,
-): ContentTransform {
-    val forward = if (target.source != initial.source) {
-        target.source > initial.source
-    } else {
-        target.view > initial.view
-    }
-    return storyPageTransform(motion, forward)
-}
+): ContentTransform = storyPageTransform(motion, target.view > initial.view)
 
 /**
- * 工作台内容层：来源 → 视图 → 页（3.26.47；3.26.48 两页共用同一份 pane）。整幅横移、只滑不淡，
- * 页自己补静止边距。
+ * 工作台内容层：视图 → 页。整幅横移、只滑不淡，页自己补静止边距。
  *
  * 入口与触发方式（「点 / 长按 / 滑动各管什么」的唯一清单）：
- * - 点导航两段：切来源 / 视图，见 [StoryNavTabs]。
- * - 点卡片 / 卡片「···」：编辑 / 只读详情 / 卡片次操作（各 pane 自己的 KDoc 写明）。
+ * - 点导航行：切视图，见 [StoryNavTabs]。
+ * - 点卡片 / 卡片「···」：编辑 / 卡片次操作（各 pane 自己的 KDoc 写明）。
  * - 点底部主按钮：每页唯一主操作；次操作不铺在页面上，只在卡片「···」菜单里。
  * - 长按：不设入口。滑动：纵向滚内容；角色图内单指平移 / 双指缩放 / 双击复位。
- *
- * 3.26.48：**`source` 只决定 `readOnly` 与数据源**，三个视图各只有一段调用，不再有第二套
- * 「AI 版 pane」。这样两页的元素、间距、字号、颜色、圆角、分隔线、内边距天然同源。
  *
  * [bleed]：true = 所在 [InlineModalSheet] 已传 `bleedContent = true`，内容槽已是面板全宽，
  * 这里只裁切、不再反向多量；false = 悬浮故事页的 [ModalSheet]（还没有 bleedContent），
@@ -3000,15 +2566,12 @@ private fun storyNavTransform(
 private fun StoryNavBody(
     book: Book,
     onBible: (BookBible) -> Unit,
-    onOpenChapter: (String) -> Unit,
     pager: StoryPagerState,
-    syncHost: StorySyncHost,
-    synced: Set<String>,
     bleed: Boolean,
     modifier: Modifier = Modifier,
 ) {
     val motion = LocalInk.current.settings.motion != "none"
-    val nav = StoryNav(pager.source, pager.view)
+    val nav = StoryNav(pager.view)
     val layer = if (bleed) modifier.clipToBounds() else modifier.storyBleed().clipToBounds()
     Box(layer) {
         AnimatedContent(
@@ -3017,307 +2580,23 @@ private fun StoryNavBody(
             transitionSpec = { storyNavTransform(motion, initialState, targetState) },
             label = "storyNav",
         ) { state ->
-            val readOnly = state.source == STORY_SOURCE_AI
             // 页自己补回 content 槽的 20dp 静止边距：bleedContent 生效时槽里已经没有这段留白。
             Column(Modifier.fillMaxSize().padding(horizontal = SHEET_CONTENT_INSET)) {
                 when (state.view) {
-                    STORY_VIEW_CHARACTER -> CharacterPane(
-                        book = book,
-                        onBible = onBible,
-                        syncHost = syncHost,
-                        synced = synced,
-                        readOnly = readOnly,
-                    )
-                    STORY_VIEW_TIMELINE -> TimelinePane(
-                        book = book,
-                        onBible = onBible,
-                        onOpenChapter = onOpenChapter,
-                        syncHost = syncHost,
-                        synced = synced,
-                        readOnly = readOnly,
-                    )
-                    else -> OutlinePane(
-                        book = book,
-                        onBible = onBible,
-                        syncHost = syncHost,
-                        synced = synced,
-                        readOnly = readOnly,
-                    )
+                    STORY_VIEW_CHARACTER -> CharacterPane(book = book, onBible = onBible)
+                    STORY_VIEW_TIMELINE -> TimelinePane(book = book, onBible = onBible)
+                    else -> OutlinePane(book = book, onBible = onBible)
                 }
             }
         }
     }
 }
 
-// ───────────────────────── 待同意抽屉（两页共用 · 3.26.58；3.26.59 提成可复用宿主） ─────────────────────────
-//
-// 3.26.48：AI 页不再是「另一套 pane」——角色 / 时间线 / 大纲三页各只有**一个** composable
-// （[CharacterPane] / [TimelinePane] / [OutlinePane]），我的页与 AI 页用同一段代码、同一个
-// [StoryPageScaffold]，只用 `readOnly` 换行为（唯一允许的差异：点开是编辑还是只读详情）。
-//
-// 3.26.58：AI 想改的条目不再逐张铺在页面上（3.26.57 是页面顶上 28% 高的卡区，用户仍读作
-// 「都堆一起」），统一收进底部抽屉 [StoryPendingDrawer]：页面只留 footer 里一行「待同意 · N」，
-// 抽屉里**一条一行**，点行展开字段级差异（[PendingChangeDetail]）。
-// 差异的呈现只有这一份、落库仍只有 [storyResolveChange]/`resolveChange` 一条路径。
-//
-// 3.26.59：抽屉对外只有 [StoryPendingDrawerHost] 一个入口（故事页 + AiTab 共用）。宿主自包含
-// 读侧车 / 落库 / 刷新，[StoryPendingDrawer] 只负责画（标题 + 列表 + 行组件），不做数据决策。
-
-/** 待同意一行的类型图标：角色 / 关系 / 事件 / 大纲。 */
-private fun pendingKindGlyph(change: StoryPendingChange): Glyph = when (change.kind) {
-    "character" -> Glyph.Note
-    "relation" -> Glyph.Link
-    "event" -> Glyph.Clock
-    "outline" -> Glyph.List
-    // 老侧车缺 kind 时回落到它归属的视图，至少不给出错误类型。
-    else -> when (change.section) {
-        BIBLE_SECTION_TIMELINE -> Glyph.Clock
-        BIBLE_SECTION_OUTLINE -> Glyph.List
-        else -> Glyph.Note
-    }
-}
-
-/** 一条一行的字段摘要：旧 → 新，压成一行（值里的换行换成空格，空值写「空」）。 */
-private fun pendingFieldSummary(change: StoryPendingChange): String {
-    fun oneLine(s: String) = s.replace('\n', ' ').replace('\r', ' ').trim().ifBlank { "空" }
-    return "${change.field}：${oneLine(change.before)} → ${oneLine(change.after)}"
-}
-
 /**
- * 字段级差异：改「哪个字段」+ 原文（划掉）→ 新文。
+ * 空兼容壳（3.26.64）：问书页 AiTab 仍按名调用 `StoryPendingDrawerHost(book, store, shown, onDismiss)`，
+ * 而「待同意 AI 改动」的整块 UI（抽屉 / 行组件 / 字段级差异 / 侧车读取）已随故事面板的 AI 一起删除。
  *
- * 3.26.58 从旧 `PendingChangeCard` 原样抽出：抽屉行的展开态直接复用这一段，
- * 差异的呈现全项目只有这一份。
- */
-@Composable
-private fun PendingChangeDetail(change: StoryPendingChange) {
-    val ui = LocalInk.current
-    Txt("改「${change.field}」", size = 10.5f, color = ui.palette.muted)
-    Spacer(Modifier.height(10.dp))
-    Txt("原", size = 9.5f, color = ui.palette.muted)
-    Spacer(Modifier.height(2.dp))
-    Txt(
-        change.before,
-        size = 12f,
-        color = ui.palette.muted,
-        lineHeight = 18f,
-        decoration = TextDecoration.LineThrough,
-    )
-    Spacer(Modifier.height(8.dp))
-    Txt("新", size = 9.5f, color = ui.palette.muted)
-    Spacer(Modifier.height(2.dp))
-    Txt(change.after, size = 12.5f, lineHeight = 19f)
-}
-
-/** 抽屉行右侧的小胶囊按钮（同意 / 拒绝）：纸色调底、按下跟手；同意用点缀色。 */
-@Composable
-private fun PendingRowAction(
-    label: String,
-    primary: Boolean,
-    enabled: Boolean,
-    onClick: () -> Unit,
-) {
-    val ui = LocalInk.current
-    Box(
-        Modifier
-            .clip(CircleShape)
-            .background(if (primary) accentTint(ui.palette, ui.accent) else dockTone(ui))
-            .bouncy(enabled = enabled) { onClick() }
-            .padding(horizontal = 11.dp, vertical = 6.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Txt(
-            label,
-            size = 11f,
-            color = if (primary) ui.accent else ui.palette.muted,
-            weight = FontWeight.Medium,
-            maxLines = 1,
-        )
-    }
-}
-
-/**
- * 待同意抽屉里的一条（3.26.58，一条一行）。
- *
- * 收起态 = 类型图标 + 名称 + 字段摘要（旧 → 新，单行截断）+ 右侧「拒绝 / 同意」；
- * 点左侧这一行展开字段级差异（[PendingChangeDetail]），再点收起。
- *
- * 动效：点同意/拒绝先让这一行淡出（`MutableTransitionState` 空闲后）再落库——与旧差异卡
- * 「先退场再同意」同一条规则；行真的从列表里消失时，下面的行由 `animateItem` 的落位弹簧补上。
- * `motion = none` 时全部 tween(0)。
- */
-@Composable
-private fun PendingChangeRow(
-    change: StoryPendingChange,
-    resolve: (StoryPendingChange, Boolean) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val ui = LocalInk.current
-    val motion = ui.settings.motion != "none"
-    val vt = remember { MutableTransitionState(false).apply { targetState = true } }
-    var decision by remember { mutableStateOf<Boolean?>(null) }
-    var expanded by remember { mutableStateOf(false) }
-    AnimatedVisibility(
-        visibleState = vt,
-        modifier = modifier,
-        enter = fadeIn(if (motion) tween(140) else tween(0)),
-        exit = fadeOut(if (motion) tween(120) else tween(0)),
-    ) {
-        Column(Modifier.fillMaxWidth()) {
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 7.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Row(
-                    Modifier
-                        .weight(1f)
-                        .clip(SmoothCorner(10.dp))
-                        .bouncy(enabled = decision == null) { expanded = !expanded },
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Box(
-                        Modifier.size(24.dp).clip(CircleShape).background(dockTone(ui)),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        LineIcon(pendingKindGlyph(change), ui.palette.muted, 13.dp, 1.6f)
-                    }
-                    Spacer(Modifier.width(9.dp))
-                    Column(Modifier.weight(1f)) {
-                        Txt(
-                            change.title,
-                            size = 12.5f,
-                            weight = FontWeight.Medium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Spacer(Modifier.height(2.dp))
-                        Txt(
-                            pendingFieldSummary(change),
-                            size = 10.5f,
-                            color = ui.palette.muted,
-                            lineHeight = 15f,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                }
-                Spacer(Modifier.width(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    val locked = decision != null
-                    PendingRowAction("拒绝", primary = false, enabled = !locked) {
-                        if (decision == null) {
-                            decision = false
-                            vt.targetState = false
-                        }
-                    }
-                    PendingRowAction("同意", primary = true, enabled = !locked) {
-                        if (decision == null) {
-                            decision = true
-                            vt.targetState = false
-                        }
-                    }
-                }
-            }
-            MoyuExpand(expand = expanded) {
-                Column(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(start = 39.dp, end = 10.dp, bottom = 12.dp),
-                ) { PendingChangeDetail(change) }
-            }
-        }
-    }
-    LaunchedEffect(vt.currentState, vt.isIdle) {
-        if (!vt.currentState && vt.isIdle) {
-            decision?.let { resolve(change, it) }
-        }
-    }
-}
-
-/**
- * 「待同意 AI 改动」抽屉的**呈现层**（3.26.58；3.26.59 提成可复用宿主，见 [StoryPendingDrawerHost]）。
- *
- * 入口：故事页 footer 的「待同意 · N」行（只在有待同意时出现，见 [StoryPageFooter]）；
- * 抽屉里：顶部「待同意 N 处改动」+「全部同意」+ 关闭；下面一条一行（[PendingChangeRow]）。
- * 行右侧同意/拒绝后该行移除、计数减一；全部处理完（pending 空）抽屉自己收起。
- *
- * 本函数只画、不做数据决策：待同意从哪来、同意/拒绝怎么落库、收起后怎么刷新，全在
- * [StoryPendingDrawerHost] 里（故事页与 AiTab 同一个入口，避免复制一份 UI）。
- *
- * 进出场复用 [ModalSheet]（滑入 + 遮罩淡入，退场播完才回调 onDismiss）；
- * 行移除后的落位用 `animateItem`（见 [storyPlacementSpec]）——`motion = none` 全 tween(0)。
- */
-@Composable
-private fun StoryPendingDrawer(
-    pending: List<StoryPendingChange>,
-    resolve: (StoryPendingChange, Boolean) -> Unit,
-    onDismiss: () -> Unit,
-) {
-    val ui = LocalInk.current
-    val itemSpec = storyPlacementSpec()
-    ModalSheet(
-        onDismiss = onDismiss,
-        closeableContent = { close ->
-            // 处理完最后一条 = 没有待同意了：抽屉自己收起（走 ModalSheet 的退场，不硬卸）。
-            LaunchedEffect(pending.size) { if (pending.isEmpty()) close() }
-            // 收起过程中 pending 已经空了：标题留最后一个非零数，不在滑出的那一帧闪「0 处」。
-            var shownCount by remember { mutableIntStateOf(pending.size) }
-            LaunchedEffect(pending.size) { if (pending.isNotEmpty()) shownCount = pending.size }
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Txt(
-                    "待同意 $shownCount 处改动",
-                    size = 17f,
-                    weight = FontWeight.Medium,
-                    maxLines = 1,
-                    modifier = Modifier.weight(1f),
-                )
-                Box(
-                    Modifier
-                        .clip(CircleShape)
-                        .background(accentTint(ui.palette, ui.accent))
-                        .bouncy { pending.toList().forEach { resolve(it, true) } }
-                        .padding(horizontal = 12.dp, vertical = 6.dp),
-                    contentAlignment = Alignment.Center,
-                ) { Txt("全部同意", size = 11.5f, color = ui.accent, weight = FontWeight.Medium) }
-                Spacer(Modifier.width(2.dp))
-                Box(
-                    Modifier.size(30.dp).clip(CircleShape).bouncy { close() },
-                    contentAlignment = Alignment.Center,
-                ) { LineIcon(Glyph.Close, ui.palette.muted, 15.dp, 1.8f) }
-            }
-            Spacer(Modifier.height(8.dp))
-            // 抽屉面板本身可滚（ModalSheet 内容槽），这里给列表一个上限，长列表在抽屉内自己滚。
-            LazyColumn(Modifier.fillMaxWidth().heightIn(max = 380.dp)) {
-                items(pending, key = { it.id }) { change ->
-                    PendingChangeRow(
-                        change = change,
-                        resolve = resolve,
-                        modifier = Modifier.animateItem(
-                            fadeInSpec = null,
-                            placementSpec = itemSpec,
-                            fadeOutSpec = null,
-                        ),
-                    )
-                }
-            }
-            Spacer(Modifier.height(4.dp))
-        },
-    )
-}
-
-/**
- * 待同意抽屉的**可复用宿主**（3.26.59）：故事页 footer 与 AiTab 共用这一个入口。
- *
- * 自包含三件事：
- * ① 读：先 [AiBible.host] 补上静态 ctx / store（AiTab 里没有故事页那段预热），
- *    再从侧车读待同意（[storyPendingChanges]）；开着抽屉时 AI 侧又写了新改动也跟着 `book.bible` 刷新；
- * ② 写：同意 / 拒绝只走既有唯一路径 [storyResolveChange] → `AiBible.resolveChange`
- *    （同意才写 bible；拒绝只记 journal）——**不复制解析、不复制写入**；
- * ③ 画：直接复用抽屉的既有呈现（[StoryPendingDrawer] → [PendingChangeRow] / [PendingChangeDetail]），
- *    不复制一套 UI。
- *
- * 调用方只需要 `shown` 与 `onDismiss` 两个外部状态；[shown] = false 时这个宿主不组合任何东西，
- * 所以可以像故事页那样常驻在页面树里、由状态控制显隐。
+ * 这里只保留签名、不渲染任何东西——第二波删问书（AiTab）时连这个壳一起删。
  */
 @Composable
 internal fun StoryPendingDrawerHost(
@@ -3326,133 +2605,12 @@ internal fun StoryPendingDrawerHost(
     shown: Boolean,
     onDismiss: () -> Unit,
 ) {
-    if (!shown) return
-    val appCtx = LocalContext.current.applicationContext
-    // 首次组合就把 AiBible 的宿主补上（幂等）：少了这一步读不到侧车，resolveChange 也会返回 false。
-    var pending by remember(book.id) {
-        AiBible.host(appCtx, store)
-        mutableStateOf(storyPendingChanges(book.id))
-    }
-    // AI 整理 / 工具在抽屉开着时又排队了新的待同意：跟着 bible 变化重读侧车。
-    // 同意会改 bible（本行会跑一次，此时侧车里的那条已被移除）；拒绝不改 bible，靠 onDismiss 后的
-    // 宿主页面补读对齐计数——抽屉里的行自己已经从本地列表移除了。
-    LaunchedEffect(book.bible) { pending = storyPendingChanges(book.id) }
-    StoryPendingDrawer(
-        pending = pending,
-        resolve = { change, accept ->
-            storyResolveChange(book.id, change.id, accept)
-            pending = pending.filterNot { it.id == change.id }
-            ToastBus.show(if (accept) "已同意这一处 AI 改动" else "已拒绝这一处 AI 改动")
-        },
-        onDismiss = onDismiss,
-    )
+    // 无 UI：待同意机制已下线（见上方注释）。
 }
 
-// ───────────────────────── 同步 AI 内容到我的 + 一步撤销 ─────────────────────────
+// ───────────────────── 三个视图共用的页面骨架（3.26.48） ─────────────────────
 
-// ───────────────────── 两页共用的页面骨架 / 底部 / 同步（3.26.48） ─────────────────────
-
-/**
- * 同步 AI 内容 → 预览 → 落地 / 一步撤销（3.26.48 提到面板层）。
- *
- * 3.26.47 以前这套状态长在 AI 页的 footer 里：切页就没了，而两页底部又是各画各的。
- * 现在两页共用同一根底部（[StoryPageFooter]），状态必须跟着面板走，否则切一次「我的 / AI」
- * 预览框就被重组掉。
- */
-private class StorySyncHost(val bookId: String, val pager: StoryPagerState) {
-    /** 非 null = 同步预览面板开着（先看字段级差异再落地）。 */
-    var previewRows by mutableStateOf<List<BibleChange>?>(null)
-
-    /**
-     * 3.26.50：预览里勾中的 merge id。每次 [requestSync] 打开预览时**默认全选**，
-     * 点条目可以逐条取消；全不选时确认按钮禁用（`applyMerge` 只收勾中的那一部分）。
-     */
-    var pickedIds by mutableStateOf<Set<String>>(emptySet())
-
-    /** 撤销这次同步的「···」菜单。 */
-    var undoMenu by mutableStateOf(false)
-
-    fun requestSync() {
-        // 先出预览再确认：预览里列的是字段级差异，确认后一次 applyMerge 落地。
-        val rows = previewMerge(bookId)
-        if (rows.isEmpty()) {
-            ToastBus.show("没有可同步的 AI 内容")
-        } else {
-            previewRows = rows
-            // 默认全选（保持旧行为：点「同步」再确认就是整批并入）。
-            pickedIds = rows.mapTo(LinkedHashSet()) { it.id }
-        }
-    }
-
-    /** 预览里点一行 = 切换这一条的勾选。 */
-    fun togglePick(id: String) {
-        pickedIds = if (id in pickedIds) pickedIds - id else pickedIds + id
-    }
-
-    /** 落地预览里**勾中**的这批改动；对话框自己播完退场再关。 */
-    fun apply() {
-        val rows = previewRows ?: return
-        val ids = rows.filter { it.id in pickedIds }.map { it.id }
-        if (ids.isEmpty()) {
-            ToastBus.show("还没有勾选要同步的改动")
-            return
-        }
-        val n = applyMerge(bookId, ids)
-        if (n > 0) {
-            pager.synced = n
-            pager.syncTick++
-            ToastBus.show("已同步 $n 条到「我的」")
-        } else {
-            ToastBus.show("没有可同步的 AI 内容")
-        }
-    }
-
-    fun undo() {
-        // 3.26.45：撤销走 AiBible 的 merge journal（取最近一次同步的 before 写回）。
-        // 3.26.46：同时清掉这一批「已同步」标记，AI 页的淡一档一起收回去。
-        if (undoLastMerge(bookId)) {
-            pager.synced = 0
-            pager.syncTick++
-            ToastBus.show("已撤销同步")
-        } else {
-            ToastBus.show("没有可撤销的同步")
-        }
-    }
-}
-
-@Composable
-private fun rememberStorySyncHost(bookId: String, pager: StoryPagerState): StorySyncHost =
-    remember(bookId) { StorySyncHost(bookId, pager) }
-
-/** 同步预览 / 一步撤销的对话框：两页共用，画在面板层（切页不打断）。 */
-@Composable
-private fun StorySyncDialogs(host: StorySyncHost) {
-    host.previewRows?.let { rows ->
-        SyncPreviewDialog(
-            rows = rows,
-            picked = host.pickedIds,
-            onToggle = { host.togglePick(it) },
-            onDismiss = { host.previewRows = null },
-            onConfirm = { host.apply() },
-        )
-    }
-    if (host.undoMenu) {
-        StoryMenuDialog(
-            title = "这次同步",
-            subtitle = "已同步 ${host.pager.synced} 条到「我的」",
-            actions = listOf(
-                StoryMenuAction(
-                    label = "撤销这次同步",
-                    subtitle = "把这一批 AI 改动从「我的」收回（AI 条目仍留在 AI 页）",
-                    glyph = Glyph.Undo,
-                ) { host.undo() },
-            ),
-            onDismiss = { host.undoMenu = false },
-        )
-    }
-}
-
-/** LazyColumn 里的一整屏空态：两页同一个定位（可视区正中，不是列表顶部）。 */
+/** LazyColumn 里的一整屏空态：可视区正中（不是列表顶部）。 */
 private fun LazyListScope.emptyPage(glyph: Glyph, title: String, message: String) {
     item {
         Box(Modifier.fillParentMaxSize(), contentAlignment = Alignment.Center) {
@@ -3462,41 +2620,20 @@ private fun LazyListScope.emptyPage(glyph: Glyph, title: String, message: String
 }
 
 /**
- * 两页共用的页面骨架（3.26.48；3.26.58 待同意卡改成底部抽屉；3.26.59 计数 + 抽屉自包含）。
+ * 三个视图共用的页面骨架。
  *
- * 结构固定成三层，任何一页都不许自己再拼：
- * ① 可滚动内容区（[BoxWithConstraints] 给关系图算高度，两页同一个「30% 夹 150–240dp」规则；
+ * 结构两层，任何一页都不许自己再拼：
+ * ① 可滚动内容区（[BoxWithConstraints] 给关系图算高度，「30% 夹 150–240dp」；
  *    关系图是该列表的**第一个 item**，所以永远在首屏）；
- * ② 底部：待同意入口行（有待同意时才长出来）+ 已同步结果行 + 主按钮（见 [StoryPageFooter]）；
- * ③ 待同意抽屉 [StoryPendingDrawerHost]——点②的入口才出现，页面本身不再铺任何卡。
- *
- * 3.26.59：待同意的**计数与抽屉**都住在骨架里——计数从侧车读（[storyPendingChanges]），
- * 抽屉本体走可复用的 [StoryPendingDrawerHost]（AiTab 也调它），故事页不再自己维护一份列表。
- *
- * 3.26.57 的「页面顶上 28% 卡区 + 卡区内部滚」整个撤掉：卡一多那一段竖拖是死区、一次操作后
- * 下面的卡瞬时上移（用户原话「都堆一起，太乱」）。收进抽屉后页面只剩一行入口。
+ * ② 底部主按钮（每页唯一主操作）。
  */
 @Composable
 private fun StoryPageScaffold(
-    book: Book,
-    syncHost: StorySyncHost,
     primaryLabel: String,
     primaryGlyph: Glyph,
     onPrimary: () -> Unit,
     content: LazyListScope.(graphHeight: Dp) -> Unit,
 ) {
-    val appCtx = LocalContext.current.applicationContext
-    val store = LocalStore.current
-    // 3.26.59：首次组合先读一次侧车；AiBible 还没预热时读不到，预热后无条件再读一次
-    // （与旧版面板层的刷新口径一致），之后跟着 `book.bible` 变化刷新。
-    var pending by remember(book.id) { mutableStateOf(storyPendingChanges(book.id)) }
-    LaunchedEffect(book.id) {
-        AiBible.host(appCtx, store)
-        pending = storyPendingChanges(book.id)
-    }
-    LaunchedEffect(book.bible) { pending = storyPendingChanges(book.id) }
-    // 抽屉开关住在骨架里——三个视图 / 两个宿主（故事面板 + 悬浮故事页）共用这一份。
-    var drawer by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize()) {
         BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
             val graphH = (maxHeight * .30f).coerceIn(150.dp, 240.dp)
@@ -3509,217 +2646,11 @@ private fun StoryPageScaffold(
             }
         }
         Spacer(Modifier.height(8.dp))
-        StoryPageFooter(
-            syncHost = syncHost,
-            pendingCount = pending.size,
-            onOpenPending = { drawer = true },
-            primaryLabel = primaryLabel,
-            primaryGlyph = primaryGlyph,
-            onPrimary = onPrimary,
-        )
-    }
-    // 3.26.59：抽屉本体统一走可复用宿主。收起后再补读一次侧车——拒绝不写 bible，
-    // 靠这一下把 footer 的「待同意 · N」与侧车对齐（旧版是页面列表当场 filter，表现一致）。
-    StoryPendingDrawerHost(
-        book = book,
-        store = store,
-        shown = drawer,
-        onDismiss = {
-            drawer = false
-            pending = storyPendingChanges(book.id)
-        },
-    )
-}
-
-/**
- * 两页共用的底部（3.26.48；3.26.58 加「待同意 · N」入口行）。
- *
- * 旧版两页的底部不是同一份：我的页 = Spacer(8) + 主按钮；AI 页 = Spacer(8) +「已同步 N 条」行
- * + **无条件** Spacer(8) + 主按钮——没同步时按钮就比我的页高 8dp。现在只有一份：
- * 两行状态（待同意 / 已同步，有哪行算哪行，各行含自己的 8dp 尾距）整块进出，
- * 主按钮位置在「有 / 没有状态行」的任意组合下都由同一段代码决定。
- */
-@Composable
-private fun StoryPageFooter(
-    syncHost: StorySyncHost,
-    pendingCount: Int,
-    onOpenPending: () -> Unit,
-    primaryLabel: String,
-    primaryGlyph: Glyph,
-    onPrimary: () -> Unit,
-) {
-    val ui = LocalInk.current
-    val motion = ui.settings.motion != "none"
-    // 两行状态共用同一套进出场：同一根 spring + 淡入淡出；motion=none → tween(0)。
-    val enter: EnterTransition = if (motion) {
-        slideInVertically(spring(dampingRatio = .6f, stiffness = 380f)) { it } + fadeIn(tween(140))
-    } else {
-        slideInVertically(tween(0)) { it } + fadeIn(tween(0))
-    }
-    val exit: ExitTransition = if (motion) {
-        slideOutVertically(spring(dampingRatio = .6f, stiffness = 380f)) { it } + fadeOut(tween(120))
-    } else {
-        slideOutVertically(tween(0)) { it } + fadeOut(tween(0))
-    }
-    Column(Modifier.fillMaxWidth()) {
-        // 3.26.58：AI 想改的条目只在 footer 露一行入口，点开才是抽屉——页面不再堆卡。
-        AnimatedVisibility(visible = pendingCount > 0, enter = enter, exit = exit) {
-            Column(Modifier.fillMaxWidth()) {
-                StoryFooterRow(
-                    text = "待同意 · $pendingCount",
-                    leading = Glyph.Sparkles,
-                    onClick = onOpenPending,
-                ) {
-                    LineIcon(Glyph.Chevron, ui.palette.muted, 13.dp)
-                }
-                Spacer(Modifier.height(8.dp))
-            }
-        }
-        AnimatedVisibility(visible = syncHost.pager.synced > 0, enter = enter, exit = exit) {
-            Column(Modifier.fillMaxWidth()) {
-                StoryFooterRow(text = "已同步 ${syncHost.pager.synced} 条到「我的」") {
-                    Box(
-                        Modifier
-                            .size(26.dp)
-                            .clip(CircleShape)
-                            .clickable { syncHost.undoMenu = true },
-                        contentAlignment = Alignment.Center,
-                    ) { LineIcon(Glyph.More, ui.palette.muted, 14.dp) }
-                }
-                Spacer(Modifier.height(8.dp))
-            }
-        }
         PrimaryButton(primaryLabel, onPrimary, Modifier.fillMaxWidth(), glyph = primaryGlyph)
     }
 }
 
-/**
- * 底部状态行（待同意 / 已同步共用）：同一圆角、底色、行高与左右内边距，只有右侧小操作不同。
- * `onClick = null` 时整行不可点（只有 [trailing] 里的按钮可点）。
- */
-@Composable
-private fun StoryFooterRow(
-    text: String,
-    leading: Glyph? = null,
-    onClick: (() -> Unit)? = null,
-    trailing: @Composable () -> Unit,
-) {
-    val ui = LocalInk.current
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .clip(SmoothCorner(14.dp))
-            .background(dockTone(ui))
-            .then(if (onClick != null) Modifier.bouncy { onClick() } else Modifier)
-            .padding(horizontal = 14.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        if (leading != null) {
-            LineIcon(leading, ui.accent, 12.dp)
-            Spacer(Modifier.width(6.dp))
-        }
-        Txt(
-            text,
-            size = 11f,
-            color = ui.palette.muted,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f),
-        )
-        trailing()
-    }
-}
-
-/**
- * 同步前先出预览：字段级差异逐条列出来（谁 · 哪个字段 · 原文 → 新文），确认才落地。
- *
- * 3.26.50：每条带全局 [SelectMark]，打开时默认全选；点条目切换这一条的勾选。
- * 确认只把**勾中**的 id 交给 `applyMerge`，全不选时按钮禁用。
- */
-@Composable
-private fun SyncPreviewDialog(
-    rows: List<BibleChange>,
-    picked: Set<String>,
-    onToggle: (String) -> Unit,
-    onDismiss: () -> Unit,
-    onConfirm: () -> Unit,
-) {
-    val ui = LocalInk.current
-    GlassDialog(onDismiss, dismissOnOutsideClick = false) {
-        // 3.26.48：内容里的按钮一律走 close（见 [storyClose] 的 TODO）。
-        val close = storyClose(onDismiss)
-        DialogTitle(
-            "同步 AI 内容到我的",
-            subtitle = "共 ${rows.size} 处差异，已勾选 ${picked.size} 处；同步后归到「我的」，AI 页保留并标「已同步」",
-        )
-        Spacer(Modifier.height(12.dp))
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .heightIn(max = 300.dp)
-                .verticalScroll(rememberScrollState()),
-        ) {
-            rows.forEach { c ->
-                val checked = c.id in picked
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .clip(SmoothCorner(12.dp))
-                        // 一行 = 一条勾选：标记只画不点，点击交给整行（同「章节抽屉」的写法）。
-                        .bouncy { onToggle(c.id) }
-                        .padding(horizontal = 6.dp, vertical = 5.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Txt(
-                            "${bibleKindLabel(c.kind)}「${c.title}」· ${c.field}",
-                            size = 12f,
-                            weight = FontWeight.Medium,
-                        )
-                        Spacer(Modifier.height(2.dp))
-                        Txt(
-                            "${c.before} → ${c.after}",
-                            size = 10.5f,
-                            color = ui.palette.muted,
-                            lineHeight = 16f,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                    Spacer(Modifier.width(10.dp))
-                    SelectMark(
-                        checked = checked,
-                        onToggle = { onToggle(c.id) },
-                        size = 20.dp,
-                        interactive = false,
-                    )
-                }
-            }
-        }
-        Spacer(Modifier.height(10.dp))
-        Txt(
-            "只把勾中的字段并进「我的」，不删 AI 条目；同步完可以一步撤销。",
-            size = 10.5f,
-            color = ui.palette.muted,
-            lineHeight = 17f,
-        )
-        Spacer(Modifier.height(18.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-            GlassButton("取消", close, Modifier.weight(1f))
-            PrimaryButton(
-                if (picked.isEmpty()) "同步" else "同步 ${picked.size} 处",
-                {
-                    onConfirm()
-                    close()
-                },
-                Modifier.weight(1f),
-                enabled = picked.isNotEmpty(),
-            )
-        }
-    }
-}
-
-// ───────────────────────── 共用卡片 / 「···」菜单 / 滑动骨架 / 「我的」页数据 ─────────────────────────
+// ───────────────────────── 共用卡片 / 「···」菜单 / 滑动骨架 / 作者条目过滤 ─────────────────────────
 //
 // 3.26.47：按钮收敛——每页只留底部一个主操作；卡片上的次操作（建章 / 加关系 / 编辑 / 删除 /
 // 清空情节点）统一收进卡片右上「···」菜单（[StoryMenuDialog]），页面上不再摆第二份。
@@ -3822,65 +2753,6 @@ private fun storyPlacementSpec(): FiniteAnimationSpec<IntOffset> {
     return if (motion) spring(dampingRatio = .6f, stiffness = 380f) else tween(0)
 }
 
-/** 已同步：整张卡片淡一档（.55）；同步 / 撤销都走同一根弹簧，不硬切。 */
-@Composable
-private fun storySyncedAlpha(synced: Boolean): Float {
-    val motion = LocalInk.current.settings.motion != "none"
-    val alpha by animateFloatAsState(
-        targetValue = if (synced) .55f else 1f,
-        animationSpec = if (motion) spring(dampingRatio = .6f, stiffness = 380f) else tween(0),
-        label = "storySyncedAlpha",
-    )
-    return alpha
-}
-
-/** 卡片右上角「已同步」角标：淡入淡出 + 轻微缩放。 */
-@Composable
-private fun SyncedTag(visible: Boolean) {
-    val ui = LocalInk.current
-    val motion = ui.settings.motion != "none"
-    AnimatedVisibility(
-        visible = visible,
-        enter = if (motion) {
-            fadeIn(tween(160)) +
-                scaleIn(initialScale = .82f, animationSpec = spring(dampingRatio = .6f, stiffness = 380f))
-        } else {
-            fadeIn(tween(0))
-        },
-        exit = if (motion) {
-            fadeOut(tween(120)) +
-                scaleOut(targetScale = .9f, animationSpec = spring(dampingRatio = .6f, stiffness = 380f))
-        } else {
-            fadeOut(tween(0))
-        },
-    ) {
-        Row(
-            Modifier
-                .clip(CircleShape)
-                .background(accentTint(ui.palette, ui.accent))
-                .padding(horizontal = 7.dp, vertical = 2.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            LineIcon(Glyph.Check, ui.accent, 9.dp, 1.4f)
-            Spacer(Modifier.width(3.dp))
-            Txt("已同步", size = 9.5f, color = ui.accent, weight = FontWeight.Medium)
-        }
-    }
-}
-
-/** AI 内容来源：ai = 问书/工具写入，text = 章节保存后自动整理提取。 */
-private fun originLabel(origin: String): String = when (origin) {
-    "text" -> "正文提取"
-    "ai" -> "AI 整理"
-    else -> if (origin.isBlank()) "AI" else origin
-}
-
-/** AI 内容来源小标签（卡片右上角，与作者页卡片只差这一枚小字 + 已同步角标）。 */
-@Composable
-private fun AiOriginTag(origin: String) {
-    Txt(originLabel(origin), size = 9.5f, color = LocalInk.current.palette.muted.copy(alpha = .8f))
-}
-
 /**
  * 角色卡第一行的富文本（3.26.59）：**名字 → 身份 ·（阵营，弱化）**。
  *
@@ -3917,33 +2789,27 @@ private fun characterIdentityLine(c: StoryCharacter, ui: InkUi): AnnotatedString
 }
 
 /**
- * 角色卡：作者页的「中心角色」与 AI 页的角色列表共用同一套外观
- * （20dp 圆角 / 16dp 内边距 / 18f 名字 / 11f 身份 / 11.5f 一句话）。
+ * 角色卡（20dp 圆角 / 16dp 内边距 / 18f 名字 / 11f 身份 / 11.5f 一句话）。
  *
  * 3.26.59：第一行 = 名字 → 身份 · 阵营（阵营弱化，见 [characterIdentityLine]）；
  * 性格外貌**不铺在卡上**（会长），只在详情里看。
  *
- * 右上「···」= 卡片次操作（作者页：加关系 / 编辑 / 删除）；AI 页只读，不传 [onMore] 就不画。
+ * 右上「···」= 卡片次操作（加关系 / 编辑 / 删除）；不传 [onMore] 就不画。
  */
 @Composable
 private fun StoryCharacterCard(
     character: StoryCharacter,
-    synced: Boolean = false,
-    originTag: String? = null,
-    onClick: (() -> Unit)? = null,
     onMore: (() -> Unit)? = null,
 ) {
     val ui = LocalInk.current
-    val alpha = storySyncedAlpha(synced)
     MoyuSurface(
-        Modifier.fillMaxWidth().graphicsLayer { this.alpha = alpha },
+        Modifier.fillMaxWidth(),
         radius = 20f,
         flat = true,
     ) {
         Column(
             Modifier
                 .fillMaxWidth()
-                .then(if (onClick != null) Modifier.bouncy(scale = .98f) { onClick() } else Modifier)
                 .padding(16.dp),
         ) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -3957,12 +2823,6 @@ private fun StoryCharacterCard(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                if (originTag != null) {
-                    Spacer(Modifier.width(6.dp))
-                    AiOriginTag(originTag)
-                    Spacer(Modifier.width(6.dp))
-                }
-                SyncedTag(synced)
                 if (onMore != null) {
                     Spacer(Modifier.width(6.dp))
                     Box(
@@ -3980,7 +2840,7 @@ private fun StoryCharacterCard(
 }
 
 /**
- * 关系行：作者页点「···」删这条关系（确认后才删）；AI 页只读（点开详情）+ 来源标签 / 已同步角标。
+ * 关系行：点「···」删这条关系（确认后才删）。
  *
  * 3.26.49：圆点与类型名都读 [StoryRelation.kindText] / [StoryRelation.kindColor]——自定义类型
  * 显示作者起的名字，圆点用自定义色（没设色按内置三档）；刚保存的那一行 `fresh = true`，
@@ -3992,15 +2852,11 @@ private fun StoryCharacterCard(
 private fun StoryRelationRow(
     title: String,
     relation: StoryRelation,
-    synced: Boolean = false,
     fresh: Boolean = false,
-    originTag: String? = null,
-    onClick: (() -> Unit)? = null,
     onMore: (() -> Unit)? = null,
 ) {
     val ui = LocalInk.current
     val motion = ui.settings.motion != "none"
-    val syncedAlpha = storySyncedAlpha(synced)
     val enter = remember { Animatable(if (fresh) 0f else 1f) }
     LaunchedEffect(fresh) {
         if (fresh) {
@@ -4014,10 +2870,9 @@ private fun StoryRelationRow(
         Modifier
             .fillMaxWidth()
             .graphicsLayer {
-                alpha = syncedAlpha * enter.value
+                alpha = enter.value
                 translationX = (1f - enter.value) * 10.dp.toPx()
             }
-            .then(if (onClick != null) Modifier.bouncy(scale = .98f) { onClick() } else Modifier)
             .padding(vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -4027,11 +2882,6 @@ private fun StoryRelationRow(
         Spacer(Modifier.width(8.dp))
         Txt(relation.kindText, size = 11f, color = ui.palette.muted)
         Spacer(Modifier.weight(1f))
-        if (originTag != null) {
-            AiOriginTag(originTag)
-            Spacer(Modifier.width(6.dp))
-        }
-        SyncedTag(synced)
         if (onMore != null) {
             Spacer(Modifier.width(6.dp))
             Box(
@@ -4068,17 +2918,14 @@ private fun ChapterOutlineCard(
     beats: List<OutlineBeat>,
     statusText: String? = null,
     statusAccent: Boolean = false,
-    synced: Boolean = false,
-    originTag: String? = null,
     onCardClick: (() -> Unit)? = null,
     onMore: (() -> Unit)? = null,
     onToggleBeat: ((OutlineBeat) -> Unit)? = null,
     onDeleteBeat: ((OutlineBeat) -> Unit)? = null,
 ) {
     val ui = LocalInk.current
-    val alpha = storySyncedAlpha(synced)
     MoyuSurface(
-        Modifier.fillMaxWidth().graphicsLayer { this.alpha = alpha },
+        Modifier.fillMaxWidth(),
         radius = 18f,
         flat = true,
     ) {
@@ -4117,15 +2964,6 @@ private fun ChapterOutlineCard(
                         color = if (statusAccent) ui.accent else ui.palette.muted,
                         maxLines = 1,
                     )
-                }
-                if (originTag != null) {
-                    // 状态 + 来源 + 已同步是一簇：簇内 6dp，簇与章名之间 ≥12dp（见上方标题的注释）。
-                    Spacer(Modifier.width(if (statusText == null) 12.dp else 6.dp))
-                    AiOriginTag(originTag)
-                }
-                if (synced) {
-                    Spacer(Modifier.width(6.dp))
-                    SyncedTag(true)
                 }
                 if (onMore != null) {
                     Spacer(Modifier.width(6.dp))
@@ -4168,17 +3006,14 @@ private fun ChapterOutlineCard(
 private fun FreeOutlineCard(
     title: String,
     beats: List<OutlineBeat>,
-    synced: Boolean = false,
-    originTag: String? = null,
     onCardClick: (() -> Unit)? = null,
     onMore: (() -> Unit)? = null,
     onToggleBeat: ((OutlineBeat) -> Unit)? = null,
     onDeleteBeat: ((OutlineBeat) -> Unit)? = null,
 ) {
     val ui = LocalInk.current
-    val alpha = storySyncedAlpha(synced)
     MoyuSurface(
-        Modifier.fillMaxWidth().graphicsLayer { this.alpha = alpha },
+        Modifier.fillMaxWidth(),
         radius = 18f,
         flat = true,
     ) {
@@ -4210,14 +3045,6 @@ private fun FreeOutlineCard(
                         // 右侧标签固定在最右、与标题之间 ≥12dp（旧版标签贴着标题）。
                         modifier = Modifier.weight(1f),
                     )
-                    if (originTag != null) {
-                        Spacer(Modifier.width(12.dp))
-                        AiOriginTag(originTag)
-                    }
-                    if (synced) {
-                        Spacer(Modifier.width(if (originTag == null) 12.dp else 6.dp))
-                        SyncedTag(true)
-                    }
                     if (onMore != null) {
                         Spacer(Modifier.width(6.dp))
                         Box(
@@ -4281,37 +3108,13 @@ private fun StoryBeatRow(
     }
 }
 
-/** AI 页点开卡片：只读详情（GlassDialog 的进出沿用全局动画）。 */
-@Composable
-private fun StoryReadOnlySheet(
-    title: String,
-    subtitle: String?,
-    rows: List<Pair<String, String>>,
-    onDismiss: () -> Unit,
-) {
-    val ui = LocalInk.current
-    GlassDialog(onDismiss) {
-        // 3.26.48：关闭走 close（见 [storyClose] 的 TODO）；点遮罩关闭走框架自己的退场。
-        val close = storyClose(onDismiss)
-        DialogTitle(title, subtitle = subtitle)
-        Spacer(Modifier.height(12.dp))
-        rows.forEach { (label, value) ->
-            Txt(label, size = 10f, color = ui.palette.muted)
-            Spacer(Modifier.height(3.dp))
-            Txt(value.ifBlank { "（空）" }, size = 13f, lineHeight = 20f)
-            Spacer(Modifier.height(12.dp))
-        }
-        Spacer(Modifier.height(6.dp))
-        GlassButton("关闭", close, Modifier.fillMaxWidth())
-    }
-}
-
 /**
- * 「我的」页数据（3.26.46）：作者自己的条目 + 已同步的 AI 条目。
+ * 故事面板的数据过滤（3.26.46；3.26.64 只剩软隐藏语义）。
  *
- * 同步只打标记、不搬数据，所以「我的」页要按标记把同步过的 AI 条目也铺出来；
- * 有同名 / 同标题 / 同章作者条目的 AI 条目不重复铺（内容已经并过去了），
- * 关系两端按同名角色换成作者 id，避免图里出现两个同名球。
+ * 3.26.64：「同步 AI 内容到我的」整条链路已删，三个 pane 一律调 `mineWith(emptySet())`——
+ * 传空集 = 只铺作者条目，旧 AI 条目（origin = text / ai）**先不上屏**但数据仍在盘上，
+ * 第二波再真删。带非空集合的分支保留：它按标记把 AI 条目并进作者页，是旧备份 / 后续清洗的
+ * 现成工具，删掉会丢一层语义。
  */
 private fun BookBible.mineWith(synced: Set<String>): BookBible {
     val authors = characters.filter { it.origin == BIBLE_ORIGIN_AUTHOR }
@@ -4372,19 +3175,6 @@ private fun BookBible.mineWith(synced: Set<String>): BookBible {
 }
 
 /**
- * 「AI」页数据（3.26.48）：所有非作者条目。
- *
- * 与 [mineWith] 对称——两页各拿一份「同一形状」的 bible，页面代码因此可以完全共用。
- * 同步过的条目**不**在这里移除：同步只打标记（[AiBible.syncedIds]），AI 页靠标记淡一档 + 角标。
- */
-private fun BookBible.aiWith(): BookBible = copy(
-    characters = characters.filter { it.origin != BIBLE_ORIGIN_AUTHOR },
-    relations = relations.filter { it.origin != BIBLE_ORIGIN_AUTHOR },
-    events = events.filter { it.origin != BIBLE_ORIGIN_AUTHOR },
-    outline = outline.filter { it.origin != BIBLE_ORIGIN_AUTHOR },
-)
-
-/**
  * 3.26.48：GlassDialog 内容里的「取消 / 保存 / 删除 / 关闭」按钮统一走这里。
  *
  * 背景：Design.kt 3.26.47 给 GlassDialog 补了退场（内部 `close()`：先播 exit、AnimatedVisibility
@@ -4412,350 +3202,21 @@ private fun storyClose(onClose: () -> Unit): () -> Unit {
     }
 }
 
-// ───────────────────────── 从正文生成大纲（3.26.48） ─────────────────────────
-//
-// 用户要「大纲页『···』里加一条从正文生成大纲」。链路：
-// 收集本书各章正文 → 走现有 AI 调用（[AiClient.chat]，与 [AiBibleSync] 同一个网络层，
-// 不新造请求路径 / 不新造 provider）→ 严格 JSON → **预览确认后**才写进 bible。
-//
-// 结果分两种节点：章级节点（挂在已有章节上，标题 = 章名）+ 自由节点（free_ 前缀，不绑章）。
-// 写入时同章已有节点就**追加**情节点、不新开第二条；origin = author（作者确认过，AI 之后不再覆盖）。
-
-private const val OUTLINE_GEN_MAX_TOKENS = 2600
-
-/** 送进 prompt 的正文总预算；超了按章均分截断并注明。 */
-private const val OUTLINE_GEN_BUDGET = 14_000
-private const val OUTLINE_GEN_MIN_PER_CHAPTER = 400
-
-/** 一次「从正文生成大纲」的结果：章级（章下标 + 情节点）+ 自由大纲（标题 + 情节点）。 */
-private data class OutlineGenPlan(
-    val chapters: List<Pair<Int, List<String>>>,
-    val free: List<Pair<String, List<String>>>,
-) {
-    val isEmpty: Boolean get() = chapters.isEmpty() && free.isEmpty()
-}
-
-private val OUTLINE_GEN_SYSTEM = """
-你是一个小说编辑，负责把已经写好的正文整理成大纲。作者会给你这本书的章节正文。
-
-只输出一个 JSON 对象，不要解释，不要 Markdown 代码块，不要前后缀文字。格式：
-{"chapters":[{"index":1,"beats":["…","…"]}],"free":[{"title":"…","beats":["…","…"]}]}
-
-规则：
-- chapters 按章节顺序给出这一章**已经发生**的情节，每章 2–5 条；index 是章节序号（从 1 开始）。
-- free 是 0–3 条贯穿全书的主线 / 伏笔 / 还没落地的剧情规划；没有就给空数组。
-- 每条情节点一句话（15–40 字），写「发生了什么」，不要评价文笔、不要写「本章讲述」。
-- 只依据正文，不许编造正文里没有的剧情、人名、时间。
-- 某一章实在没有可归纳的情节，就不写这一章的条目，不要硬凑。
-- 最多 40 条情节点。
-""".trim()
-
-/** 拼 user 消息：书名 + 每章标题 / 字数 / 正文（按总预算均分截断，截断处注明）。 */
-private fun buildOutlineGenUser(book: Book, chapters: List<Chapter>): String = buildString {
-    append("书名：")
-    append(book.title)
-    append("\n有正文的章节共 ")
-    append(chapters.size)
-    append(" 章。\n")
-    val per = (OUTLINE_GEN_BUDGET / chapters.size.coerceAtLeast(1))
-        .coerceAtLeast(OUTLINE_GEN_MIN_PER_CHAPTER)
-    chapters.forEach { chapter ->
-        val index = book.chapters.indexOfFirst { it.id == chapter.id } + 1
-        append("\n第 ")
-        append(index)
-        append(" 章：")
-        append(chapter.title)
-        append("（")
-        append(countWords(chapter.content))
-        append(" 字）\n")
-        val content = chapter.content.trim()
-        val clipped = content.length > per
-        append(if (clipped) content.take(per) else content)
-        if (clipped) append("\n（后文省略）")
-        append("\n")
-    }
-}
-
-/** 从模型输出里抠 JSON（同 AiBibleSync 的口径：第一个 `{` 到最后一个 `}`）。 */
-private fun parseOutlineGen(raw: String, chapterCount: Int): OutlineGenPlan? {
-    val start = raw.indexOf('{')
-    val end = raw.lastIndexOf('}')
-    if (start < 0 || end <= start) return null
-    val root = runCatching { JSONObject(raw.substring(start, end + 1)) }.getOrNull() ?: return null
-    // 同一章出现两次（模型偶尔把一章拆成两段）就并起来，别生成两条大纲。
-    val merged = LinkedHashMap<Int, MutableList<String>>()
-    root.optJSONArray("chapters")?.let { arr ->
-        for (i in 0 until arr.length()) {
-            val o = arr.optJSONObject(i) ?: continue
-            val index = (o.optInt("index", i + 1) - 1)
-                .coerceIn(0, (chapterCount - 1).coerceAtLeast(0))
-            val beats = readOutlineGenBeats(o.optJSONArray("beats"))
-            if (beats.isNotEmpty()) merged.getOrPut(index) { ArrayList() }.addAll(beats)
-        }
-    }
-    val free = ArrayList<Pair<String, List<String>>>()
-    root.optJSONArray("free")?.let { arr ->
-        for (i in 0 until arr.length()) {
-            val o = arr.optJSONObject(i) ?: continue
-            val title = o.optString("title").trim().takeIf { it.isNotBlank() && it != "null" } ?: continue
-            val beats = readOutlineGenBeats(o.optJSONArray("beats"))
-            if (beats.isNotEmpty()) free += title.take(40) to beats
-        }
-    }
-    return OutlineGenPlan(
-        chapters = merged.map { (index, beats) -> index to beats.distinct().take(6) },
-        free = free.map { (title, beats) -> title to beats.distinct().take(6) },
-    )
-}
-
-private fun readOutlineGenBeats(arr: JSONArray?): List<String> {
-    if (arr == null) return emptyList()
-    val out = ArrayList<String>(arr.length())
-    for (i in 0 until arr.length()) {
-        val text = when (val item = arr.opt(i)) {
-            is String -> item.trim()
-            is JSONObject -> item.optString("text").trim()
-            else -> ""
-        }
-        if (text.isNotBlank() && text != "null") out += text.take(90)
-    }
-    return out
-}
-
-/** 把生成结果并进 bible：同章已有节点就追加情节点，不新开第二条；自由节点用 free_ 前缀。 */
-private fun applyOutlineGen(book: Book, plan: OutlineGenPlan): BookBible {
-    var outline = book.bible.outline
-    plan.chapters.forEach { (index, texts) ->
-        val chapter = book.chapters.getOrNull(index) ?: return@forEach
-        val existing = outline.firstOrNull { it.chapterId == chapter.id }
-        if (existing != null) {
-            val have = existing.beats.map { it.text.trim() }.toHashSet()
-            val added = texts.filter { it.trim() !in have }.map { OutlineBeat(text = it) }
-            if (added.isNotEmpty()) {
-                outline = outline.map {
-                    if (it.id == existing.id) {
-                        it.copy(beats = it.beats + added, origin = BIBLE_ORIGIN_AUTHOR)
-                    } else {
-                        it
-                    }
-                }
-            }
-        } else {
-            outline = outline + OutlineNode(
-                chapterId = chapter.id,
-                title = chapter.title,
-                beats = texts.map { OutlineBeat(text = it) },
-                origin = BIBLE_ORIGIN_AUTHOR,
-            )
-        }
-    }
-    plan.free.forEach { (title, texts) ->
-        outline = outline + OutlineNode(
-            id = FREE_OUTLINE_PREFIX + uuid(),
-            chapterId = null,
-            title = title,
-            beats = texts.map { OutlineBeat(text = it) },
-            origin = BIBLE_ORIGIN_AUTHOR,
-        )
-    }
-    return book.bible.copy(outline = outline)
-}
-
-/**
- * 「从正文生成大纲」对话框（3.26.48）：
- * 读正文 → AI → 预览 → 写入。「运行中 / 失败 / 预览」三态都在这一个对话框里，
- * 不另开一层页面；失败可重试，预览里逐章列出将要写入的情节点，确认才写进 bible。
- */
-@Composable
-private fun GenerateOutlineDialog(
-    book: Book,
-    onBible: (BookBible) -> Unit,
-    onDismiss: () -> Unit,
-) {
-    val ctx = LocalContext.current.applicationContext
-    val store = LocalStore.current
-    val ui = LocalInk.current
-    var running by remember { mutableStateOf(true) }
-    var error by remember { mutableStateOf<String?>(null) }
-    var plan by remember { mutableStateOf<OutlineGenPlan?>(null) }
-    var attempt by remember { mutableIntStateOf(1) }
-    // 只算有正文的章：没正文 AI 没东西可读。
-    val chapters = remember(book.chapters) { book.chapters.filter { it.content.isNotBlank() } }
-
-    LaunchedEffect(attempt) {
-        running = true
-        error = null
-        plan = null
-        if (chapters.isEmpty()) {
-            error = "这本书还没有正文，先写几章再来"
-            running = false
-            return@LaunchedEffect
-        }
-        val settings = store.data.settings
-        if (!settings.aiEnabled) {
-            error = "先在设置里打开「问书 AI」"
-            running = false
-            return@LaunchedEffect
-        }
-        val key = AiKey.load(ctx)
-        if (key.isNullOrBlank()) {
-            error = "还没填 AI Key（设置 → 问书 AI）"
-            running = false
-            return@LaunchedEffect
-        }
-        val user = buildOutlineGenUser(book, chapters)
-        var reply = AiClient.chat(
-            baseUrl = settings.aiBaseUrl,
-            model = settings.aiModel,
-            key = key,
-            temperature = .2f,
-            system = OUTLINE_GEN_SYSTEM,
-            user = user,
-            maxTokens = OUTLINE_GEN_MAX_TOKENS,
-            disableThinking = true,
-        )
-        var parsed = if (reply.text.isNotBlank()) {
-            parseOutlineGen(reply.text, book.chapters.size)
-        } else {
-            null
-        }
-        // 第一次不是合法 JSON：沿用 AiBibleSync 的做法再试一次，这次把「只输出 JSON」说死。
-        if (parsed == null && reply.error == null) {
-            reply = AiClient.chat(
-                baseUrl = settings.aiBaseUrl,
-                model = settings.aiModel,
-                key = key,
-                temperature = .1f,
-                system = OUTLINE_GEN_SYSTEM + "\n上一轮输出不是合法 JSON。这次只输出 JSON 对象本身，不要任何其它文字。",
-                user = user,
-                maxTokens = OUTLINE_GEN_MAX_TOKENS,
-                disableThinking = true,
-            )
-            parsed = if (reply.text.isNotBlank()) {
-                parseOutlineGen(reply.text, book.chapters.size)
-            } else {
-                null
-            }
-        }
-        when {
-            parsed == null -> error = reply.error ?: "模型没有返回可用的 JSON，再试一次"
-            parsed.isEmpty -> error = "AI 没从正文里归纳出大纲，再试一次或先补正文"
-            else -> plan = parsed
-        }
-        running = false
-    }
-
-    GlassDialog(onDismiss, dismissOnOutsideClick = false) {
-        val close = storyClose(onDismiss)
-        DialogTitle(
-            "从正文生成大纲",
-            subtitle = "读 ${chapters.size} 章正文；先生成，预览确认后才写进故事圣经",
-        )
-        Spacer(Modifier.height(12.dp))
-        val current = plan
-        when {
-            running -> {
-                Txt("正在读正文、整理大纲……", size = 12f, lineHeight = 19f)
-                Spacer(Modifier.height(6.dp))
-                Txt(
-                    "一次请求最多带 $OUTLINE_GEN_BUDGET 字正文；章多时每章取开头部分。",
-                    size = 10.5f,
-                    color = ui.palette.muted,
-                    lineHeight = 17f,
-                )
-            }
-            current != null -> {
-                Column(
-                    Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 320.dp)
-                        .verticalScroll(rememberScrollState()),
-                ) {
-                    current.chapters.forEach { (index, beats) ->
-                        val chapter = book.chapters.getOrNull(index) ?: return@forEach
-                        Txt(chapter.title, size = 13f, weight = FontWeight.Medium)
-                        Spacer(Modifier.height(2.dp))
-                        Txt(
-                            "${beats.size} 个情节点 · 正文 ${countWords(chapter.content)} 字",
-                            size = 10f,
-                            color = ui.palette.muted,
-                        )
-                        beats.take(2).forEach { text ->
-                            Spacer(Modifier.height(2.dp))
-                            Txt("· $text", size = 11f, color = ui.palette.muted, lineHeight = 17f)
-                        }
-                        Spacer(Modifier.height(10.dp))
-                    }
-                    if (current.free.isNotEmpty()) {
-                        Txt("自由大纲", size = 11f, color = ui.palette.muted)
-                        Spacer(Modifier.height(6.dp))
-                        current.free.forEach { (title, beats) ->
-                            Txt(title, size = 13f, weight = FontWeight.Medium)
-                            Spacer(Modifier.height(2.dp))
-                            Txt("${beats.size} 个情节点", size = 10f, color = ui.palette.muted)
-                            beats.take(2).forEach { text ->
-                                Spacer(Modifier.height(2.dp))
-                                Txt("· $text", size = 11f, color = ui.palette.muted, lineHeight = 17f)
-                            }
-                            Spacer(Modifier.height(10.dp))
-                        }
-                    }
-                }
-                Spacer(Modifier.height(6.dp))
-                Txt(
-                    "写入后归到「我的 · 大纲」；这一章已经有大纲就追加情节点，不新开一条。",
-                    size = 10.5f,
-                    color = ui.palette.muted,
-                    lineHeight = 17f,
-                )
-            }
-            else -> Txt(error ?: "出错了", size = 12f, color = ui.palette.muted, lineHeight = 19f)
-        }
-        Spacer(Modifier.height(18.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-            GlassButton("关闭", close, Modifier.weight(1f))
-            if (!running && current == null) {
-                PrimaryButton(
-                    "重试",
-                    {
-                        error = null
-                        attempt++
-                    },
-                    Modifier.weight(1f),
-                    glyph = Glyph.Sparkles,
-                )
-            } else if (current != null) {
-                PrimaryButton(
-                    "写入大纲",
-                    {
-                        onBible(applyOutlineGen(book, current))
-                        ToastBus.show(
-                            "已写入 ${current.chapters.size} 章大纲" +
-                                if (current.free.isEmpty()) "" else " · ${current.free.size} 条自由大纲",
-                        )
-                        close()
-                    },
-                    Modifier.weight(1f),
-                    glyph = Glyph.Check,
-                )
-            }
-        }
-    }
-}
-
 // ───────────────────────── 按大纲建章（3.26.45；3.26.56 批量入口） ─────────────────────────
 
 /**
  * 「按大纲建章」的候选：**章级且还没落地**的节点。
  *
- * 判据与 AI 工具 `chapters_from_outline` / [OutlinePane] 卡片「建章」同口径：
+ * 判据与 [OutlinePane] 卡片「建章」同口径：
  * - `free_` 前缀的自由节点不绑章、不参与（自由大纲只做剧情规划）；
- * - `chapterId` 已经指向某一章的算已落地，不再建。
+ * - `chapterId` 已经指向某一章的算已落地，不再建；
+ * - 3.26.64：只在**作者自己的**条目里找（与页面铺出来的那份同一过滤），
+ *   否则会出现「副标题说有 N 条、列表里却看不到」的不一致。
  *
  * 标题「···」菜单的副标题与 [BuildChaptersFromOutlineDialog] 共用这一条判据，别在两处各写一份。
  */
 private fun outlineNodesToBuild(book: Book): List<OutlineNode> =
-    book.bible.outline.filter { n ->
+    book.bible.mineWith(emptySet()).outline.filter { n ->
         !n.id.startsWith(FREE_OUTLINE_PREFIX) && book.chapters.none { it.id == n.chapterId }
     }
 
