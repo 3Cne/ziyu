@@ -3249,6 +3249,11 @@ private fun ChatPane(
             suppressBar(menuAnchor != null)
             onDispose { suppressBar(false) }
         }
+        // 3.26.59：菜单开着时系统返回先关菜单，不把整页一起切走。根 tab 页是
+        // 常驻组合的（TabPager 每页都留着），离开 AI 页时菜单不会 dispose；
+        // 若根返回先把 stack 压回书架，suppressBar 就停在 true、TabBar 再也不出现。
+        // 关闭复用 closeMenu()：suppress 由上面的 onDispose 复位，这里不手动写。
+        BackHandler(enabled = menuAnchor != null) { closeMenu() }
         val menuRect = menuAnchor?.let { rowRects[it] }
         if (menuAnchor != null && menuRect != null && menuRect.height > 0f) {
             val gap = with(density) { 8.dp.toPx() }
