@@ -353,7 +353,22 @@ private const val LENS_DISPERSION = .06f
 private const val LENS_RIM_BASE = .55f
 private const val LENS_SHADER_KEY = "moyu.liquid.lens"
 
-private const val AGSL_LIQUID_LENS = """
+// 3.26.62: 亮环随背景自适应（参考实现口径）——只让 Fresnel 亮环与赤道线的
+// 「强度 + 颜色」跟随背景；光向 Lp / Ls 与两个高光指数（29.5 / 20.0）保持固定，
+// 因为用背景梯度去转光向会在凹面上产生斜向撕裂。
+// 这四个口径直接以 `$` 插值进 AGSL 源码（与 LENS_* 常量同一处管理），
+// 下一轮只改下面几行即可，不必进 shader 正文。
+/** 颜色染色比：rim 色从背景色里取多少（0 = 纯白，1 = 全用背景色）。 */
+private const val LENS_RIM_TINT = .42f
+/** 亮度基线：背景接近全黑时亮环仍保留的强度（0.55 = 保住一半多）。 */
+private const val LENS_RIM_GAIN_BASE = .55f
+/** 亮度增益：背景变亮时亮环最多再涨多少（0 = 完全不随亮度）。 */
+private const val LENS_RIM_GAIN = .45f
+/** 背景亮度的过渡区间（smoothstep 起止）：0.06 以下取基线，0.62 以上取满。 */
+private const val LENS_RIM_ENV_LO = .06f
+private const val LENS_RIM_ENV_HI = .62f
+
+private val AGSL_LIQUID_LENS = """
 uniform shader content;
 
 uniform float2 size;         // surface size, px (node without padding)
@@ -443,6 +458,16 @@ half4 main(float2 coord) {
         col = float3(c0.r, c0.g, c0.b);
     }
 
+    // 3b. environment probe: the rim follows the background's brightness and
+    //     hue. `col` above is already the sampled backdrop, so no second
+    //     content.eval is needed. Only intensity and tint adapt on purpose:
+    //     deriving the light direction from the background gradient tears the
+    //     rim diagonally on the concave surface, so Lp / Ls stay fixed.
+    float envLum = dot(col, float3(0.2126, 0.7152, 0.0722));
+    float3 envTint = clamp(col / max(envLum, 0.12), 0.35, 2.2);
+    float3 rimTint = mix(float3(1.0), envTint, $LENS_RIM_TINT);
+    float rimGain = $LENS_RIM_GAIN_BASE + $LENS_RIM_GAIN * smoothstep($LENS_RIM_ENV_LO, $LENS_RIM_ENV_HI, envLum);
+
     // 5. Fresnel (Schlick, F0 = 0.04) + key specular + opposite fill light.
     float nz = clamp(n.z, 0.0, 1.0);
     float F = 0.04 + 0.96 * pow(1.0 - nz, 5.0);
@@ -455,7 +480,7 @@ half4 main(float2 coord) {
     float specS = 0.48 * pow(max(dot(n, Hs), 0.0), 20.0);
     float rimMask = 1.0 - smoothstep(0.05, 0.92, t);
     float highlight = (F * 0.62 + specP + specS) * rimMask * edgeK;
-    col += float3(0.97, 0.985, 1.0) * min(highlight, 1.2) * 0.62;
+    col += rimTint * min(highlight * rimGain, 1.2) * 0.62;
 
     // 6. equator line: one bright hairline just inside the upper bevel.
     //    Nothing dark is painted at the top edge any more: the old dark-top
@@ -463,11 +488,14 @@ half4 main(float2 coord) {
     //    is pinned at a fixed ny (a few dp under the top edge, independent of
     //    the bevel ratio) instead of tracking b0, so a bevel change cannot move
     //    it. Width is a narrow Gaussian (~1px); its strength keeps the
-    //    edgeStrength boost like the Fresnel rim.
+    //    edgeStrength boost like the Fresnel rim, and it follows the same
+    //    background gain / tint as the rim. No extra veil multiply: the paper
+    //    veil layer already damps it, a second one would erase the ring.
     float ny = -p.y / max(b.y, 1.0);
     float eq = (ny - 0.89) / 0.022;
     float equator = exp(-eq * eq);
-    col += float3(0.78, 0.82, 0.90) * equator * 0.42 * edgeK * (1.0 - 0.72 * veil);
+    float3 eqTint = mix(float3(0.78, 0.82, 0.90), envTint, 0.18);
+    col += eqTint * equator * 0.42 * edgeK * rimGain * (1.0 - 0.72 * veil);
 
     return half4(
         clamp(col.r, 0.0, 1.0),
