@@ -135,6 +135,15 @@ data class StoryCharacter(
     val updatedAt: Long = 0L,
     /** 3.26.24: #RRGGBB set by the writer; null = derive a stable colour from the id. */
     val color: String? = null,
+    /**
+     * 3.26.59: 性格 + 外貌概述，自由文本，空表示没填。
+     *
+     * 旧备份没有这两个键，解码按空串兜底（见 [decodeBible]），所以老数据一条不丢；
+     * 编码时**空串也照写**，与 [role] / [note] 的口径一致（空 = 没填，不靠缺键表达）。
+     */
+    val traits: String = "",
+    /** 3.26.59: 阵营 / 所属，自由文本，空表示没填。兼容口径同 [traits]。 */
+    val faction: String = "",
 )
 
 /**
@@ -1290,7 +1299,12 @@ internal fun encodeBible(b: BookBible): JSONObject = JSONObject().apply {
     val cs = JSONArray()
     b.characters.forEach { c ->
         cs.put(JSONObject().apply {
-            put("id", c.id); put("name", c.name); put("role", c.role); put("note", c.note); put("origin", c.origin); put("updatedAt", c.updatedAt) ; put("color", c.color ?: JSONObject.NULL)
+            put("id", c.id); put("name", c.name); put("role", c.role); put("note", c.note)
+            put("origin", c.origin); put("updatedAt", c.updatedAt)
+            put("color", c.color ?: JSONObject.NULL)
+            // 3.26.59：traits / faction 空串也照写（与 role / note 同口径：空 = 没填，不靠缺键表达）。
+            // 旧版本 / 旧备份会忽略这两个键，不会读坏已有字段。
+            put("traits", c.traits); put("faction", c.faction)
         })
     }
     val rs = JSONArray()
@@ -1349,6 +1363,9 @@ internal fun decodeBible(o: JSONObject?): BookBible {
             color = if (c.isNull("color")) null else c.optString("color").takeIf { it.isNotBlank() },
             origin = c.optString("origin", "author"),
             updatedAt = c.optLong("updatedAt", 0L),
+            // 3.26.59：老备份没有这两个键 —— optString 按空串兜底，不抛异常、不丢整条角色。
+            traits = c.optString("traits", ""),
+            faction = c.optString("faction", ""),
         )
     }
     val rels = mutableListOf<StoryRelation>()
