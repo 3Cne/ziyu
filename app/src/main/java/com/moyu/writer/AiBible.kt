@@ -24,6 +24,20 @@ object AiBible {
 
     // ───────────────────────── 读 ─────────────────────────
 
+    /**
+     * 3.26.59：角色行尾追加「性格 / 所属」（非空才拼）。
+     *
+     * 圣经摘要（[summary]）、`read_section`（[readSection]）、`read_chapter` 深读（[deepChapter]）
+     * 三处共用同一口径，AI 后续读到的人设不再只剩身份和一句话动机。
+     * 返回空串 = 两个字段都没填，调用方直接拼在行尾也不会多出分隔符。
+     */
+    private fun characterDetail(c: StoryCharacter): String {
+        val parts = ArrayList<String>(2)
+        if (c.traits.isNotBlank()) parts += "性格：" + c.traits
+        if (c.faction.isNotBlank()) parts += "所属：" + c.faction
+        return if (parts.isEmpty()) "" else "；" + parts.joinToString("；")
+    }
+
     fun summary(book: Book): String {
         val b = book.bible
         if (b.isEmpty) return "《${book.title}》的故事圣经还空着（没有角色、关系、事件、大纲）。"
@@ -34,6 +48,7 @@ object AiBible {
                 sb.append("- ${c.name}")
                 if (c.role.isNotBlank()) sb.append("（${c.role}）")
                 if (c.note.isNotBlank()) sb.append("：${c.note}")
+                sb.append(characterDetail(c))
                 sb.append(if (c.origin == "author") " [作者设定]" else " [${c.origin}]")
                 sb.append('\n')
             }
@@ -76,7 +91,8 @@ object AiBible {
         "characters" -> if (book.bible.characters.isEmpty()) "没有角色"
         else book.bible.characters.joinToString("\n") { c ->
             "${c.name}" + (if (c.role.isNotBlank()) "（${c.role}）" else "") +
-                (if (c.note.isNotBlank()) "：${c.note}" else "")
+                (if (c.note.isNotBlank()) "：${c.note}" else "") +
+                characterDetail(c)
         }
         "relations" -> if (book.bible.relations.isEmpty()) "没有关系"
         else book.bible.relations.joinToString("\n") { r ->
@@ -125,6 +141,7 @@ object AiBible {
                 sb.append("- ").append(c.name)
                 if (c.role.isNotBlank()) sb.append("（").append(c.role).append("）")
                 if (c.note.isNotBlank()) sb.append("：").append(c.note)
+                sb.append(characterDetail(c))
                 sb.append('\n')
             }
         }
@@ -188,6 +205,10 @@ object AiBible {
                         name = name,
                         role = args.optString("role", old?.role ?: "").ifBlank { old?.role ?: "" },
                         note = args.optString("note", old?.note ?: "").ifBlank { old?.note ?: "" },
+                        // 3.26.59：性格+外貌 / 阵营+所属，键名与 Model 编码一致（traits / faction）。
+                        // 空值安全口径同 role / note：入参空串不覆盖已有值（旧备份 / 没填 = 保留原样）。
+                        traits = args.optString("traits", old?.traits ?: "").ifBlank { old?.traits ?: "" },
+                        faction = args.optString("faction", old?.faction ?: "").ifBlank { old?.faction ?: "" },
                         color = if (args.has("color")) args.optString("color").trim().ifBlank { null } else old?.color,
                         origin = source,
                         updatedAt = now(),
@@ -306,15 +327,27 @@ object AiBible {
                             book.chapters.firstOrNull { it.title == arr.optString(i) }?.id
                         }
                     } ?: old?.chapterIds ?: emptyList()
-                    val charIds = args.optJSONArray("characters")?.let { arr ->
-                        (0 until arr.length()).mapNotNull { i ->
-                            book.bible.characters.firstOrNull { it.name == arr.optString(i) }?.id
-                        }
-                    } ?: old?.characterIds ?: emptyList()
+                    // 3.26.59：事件出场角色。
+                    // - 对得上现有角色的名字换成 id，`characterIds` 只放**已解析到的 id**（不塞名字 / 不塞空串）；
+                    // - 对不上的名字**不再静默丢弃**：拼进 note 尾部的「（提及：A、B）」，重复整理不会叠第二段；
+                    // - 没给 characters 参数时保留原有 characterIds；给了空数组 = 明确清空。
+                    val rawCast = args.optJSONArray("characters")?.let { arr ->
+                        (0 until arr.length()).map { i -> arr.optString(i).trim() }.filter { it.isNotBlank() }
+                    }
+                    val charIds = if (rawCast == null) {
+                        old?.characterIds ?: emptyList()
+                    } else {
+                        rawCast.mapNotNull { n ->
+                            book.bible.characters.firstOrNull { it.name.isNotBlank() && it.name == n }?.id
+                        }.distinct()
+                    }
+                    val unknownCast = if (rawCast == null) emptyList()
+                    else rawCast.filter { n -> book.bible.characters.none { it.name == n } }.distinct()
+                    val nextNote = withMentions(args.optString("note", old?.note ?: ""), unknownCast)
                     val next = (old ?: StoryEvent(id = uuid())).copy(
                         whenText = whenText.ifBlank { old?.whenText ?: "" },
                         title = title.ifBlank { old?.title ?: "" },
-                        note = args.optString("note", old?.note ?: ""),
+                        note = nextNote,
                         chapterIds = chapterIds.distinct(),
                         characterIds = charIds.distinct(),
                         origin = source,
@@ -769,6 +802,9 @@ object AiBible {
                         "name" -> old.copy(name = value)
                         "role" -> old.copy(role = value)
                         "note" -> old.copy(note = value)
+                        // 3.26.59：性格 / 阵营也走这条「同意才落库」的唯一路径（键名同 Model 编码）。
+                        "traits" -> old.copy(traits = value)
+                        "faction" -> old.copy(faction = value)
                         "color" -> old.copy(color = value.ifBlank { null })
                         else -> return false
                     }.copy(origin = "author", updatedAt = now())
@@ -910,7 +946,7 @@ object AiBible {
 
     private fun characterDrafts(old: StoryCharacter, next: StoryCharacter): List<PendingDraft> {
         val title = old.name.ifBlank { "未命名角色" }
-        val out = ArrayList<PendingDraft>(4)
+        val out = ArrayList<PendingDraft>(6)
         if (old.name != next.name) {
             out += PendingDraft("character", "update", old.id, title, "name", "名字", old.name, next.name, JSONObject().put("value", next.name))
         }
@@ -919,6 +955,13 @@ object AiBible {
         }
         if (old.note != next.note) {
             out += PendingDraft("character", "update", old.id, title, "note", "备注", blankShow(old.note), blankShow(next.note), JSONObject().put("value", next.note))
+        }
+        // 3.26.59：性格 / 阵营也进字段级待同意——否则 AI 改这两项会被判「没有变化」，等于白改。
+        if (old.traits != next.traits) {
+            out += PendingDraft("character", "update", old.id, title, "traits", "性格", blankShow(old.traits), blankShow(next.traits), JSONObject().put("value", next.traits))
+        }
+        if (old.faction != next.faction) {
+            out += PendingDraft("character", "update", old.id, title, "faction", "阵营", blankShow(old.faction), blankShow(next.faction), JSONObject().put("value", next.faction))
         }
         if (old.color != next.color) {
             out += PendingDraft("character", "update", old.id, title, "color", "颜色", old.color ?: "自动", next.color ?: "自动", JSONObject().put("value", next.color ?: ""))
@@ -1117,6 +1160,13 @@ object AiBible {
                 if (c.note.isNotBlank() && c.note != mine.note) {
                     add("character", c.id, "note", title, "备注", blankShow(mine.note), c.note)
                 }
+                // 3.26.59：性格 / 阵营一并预览——AI 非空且与我的不同才列出（空值不提议覆盖作者已有值）。
+                if (c.traits.isNotBlank() && c.traits != mine.traits) {
+                    add("character", c.id, "traits", title, "性格", blankShow(mine.traits), c.traits)
+                }
+                if (c.faction.isNotBlank() && c.faction != mine.faction) {
+                    add("character", c.id, "faction", title, "阵营", blankShow(mine.faction), c.faction)
+                }
                 if (c.color != null && c.color != mine.color) {
                     add("character", c.id, "color", title, "颜色", mine.color ?: "自动", c.color)
                 }
@@ -1258,6 +1308,15 @@ object AiBible {
                 target = target.copy(note = current.note, updatedAt = now())
                 applied++
             }
+            // 3.26.59：性格 / 阵营同「AI 非空才合并」口径——空值不覆盖作者已有设定。
+            if ("traits" in keys && current.traits.isNotBlank()) {
+                target = target.copy(traits = current.traits, updatedAt = now())
+                applied++
+            }
+            if ("faction" in keys && current.faction.isNotBlank()) {
+                target = target.copy(faction = current.faction, updatedAt = now())
+                applied++
+            }
             if ("color" in keys && current.color != null) {
                 target = target.copy(color = current.color, updatedAt = now())
                 applied++
@@ -1266,6 +1325,9 @@ object AiBible {
                 target = target.copy(
                     role = current.role.ifBlank { target.role },
                     note = current.note.ifBlank { target.note },
+                    // 3.26.59：并入时性格 / 阵营也按「AI 非空才覆盖」合并。
+                    traits = current.traits.ifBlank { target.traits },
+                    faction = current.faction.ifBlank { target.faction },
                     color = current.color ?: target.color,
                     updatedAt = now(),
                 )
@@ -1475,6 +1537,27 @@ object AiBible {
     }
 
     private fun blankShow(text: String?): String = if (text.isNullOrBlank()) "（空）" else text
+
+    /** note 尾部的「（提及：…）」段，按名字合并去重；不认识的写法（全角/半角混用）不在这里兜。 */
+    private val mentionPattern = Regex("（提及：([^）]*)）")
+
+    /**
+     * 3.26.59：事件里对不上现有角色的人名不再静默丢掉——并进 note 尾部的「（提及：A、B）」。
+     *
+     * 同一段已存在时按名字合并去重（不重复追加、不叠第二段）；note 为空就只留这一段。
+     * 只做文本标注：这些名字**不会**进 `characterIds`（那里只放能在圣经里解析到的角色 id）。
+     */
+    private fun withMentions(note: String, names: List<String>): String {
+        if (names.isEmpty()) return note
+        val found = mentionPattern.find(note)
+        val existing = found?.groupValues?.getOrNull(1)
+            ?.split('、')
+            ?.map { it.trim() }
+            ?.filter { it.isNotBlank() }
+            ?: emptyList()
+        val segment = "（提及：" + (existing + names).distinct().joinToString("、") + "）"
+        return if (found == null) note + segment else note.replaceRange(found.range, segment)
+    }
 
     private fun chapterTitleText(book: Book, ids: List<String>): String {
         val titles = ids.mapNotNull { id -> book.chapters.firstOrNull { it.id == id }?.title }
