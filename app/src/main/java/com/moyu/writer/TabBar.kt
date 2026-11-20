@@ -161,6 +161,12 @@ internal fun MoyuTabBar(
     // 3.26.60：镜片的专属填充（选中薄涂 selectedTint + tabLensOpacity 纸色覆层）
     // 整段删掉。镜片与栏只剩同一套材质（同一 AGSL 厚度场 / 同一 veil / 同一
     // 基础模糊），选中感只由图标与文字的墨色承担（见下方 fg）。
+    // 3.26.60：镜片补上栏的两层表面料。栏在 liquidGlassBar().onDrawSurface 里
+    // 先画 tint、再画 paperVeil；这里按同一顺序、同一表达式、同一取值来源补：
+    // tint 与栏同一个表达式，veil 取栏的 s.tabBarOpacity，公式同为 veil*.94。
+    val glassTint = if (p.isDark) Color.White.copy(alpha = .06f) else p.ink.copy(alpha = .045f)
+    val glassVeil = s.tabBarOpacity.coerceIn(0f, 1f)
+    val glassPaperVeil = p.paper.copy(alpha = glassVeil * .94f)
 
     // 镜片只在「切页」和「拖动」时抬起；按住不抬（2026-11-15 用户报：按住别的格也抬）。
     val liftTarget = if (dragging || clickLift) 1f else 0f
@@ -343,15 +349,16 @@ internal fun MoyuTabBar(
                                             // 真厚度场 AGSL；31–32 或 shader 构建失败仍回退 Backdrop
                                             // 的 lens()，不崩、不画空。
                                             // 3.26.60：bevel 不再取 1.2×镜片折射，直接与栏同值
-                                            // tabRefraction；veilK 取栏的 tabBarOpacity。镜片只保留
-                                            // lensEdge / lensDispersion 两个「边缘带/色散」设置。
+                                            // tabRefraction；veilK 取栏的 tabBarOpacity。亮环
+                                            // edgeStrength 与色散 dispersion 也改成栏的两个设置
+                                            // tabEdge / tabDispersion——镜片不再有第二套光照参数。
                                             val ags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                                                 runCatching {
                                                     buildLensEffect(
                                                         bevelDp = s.tabRefraction,
-                                                        edgeStrength = s.lensEdge,
+                                                        edgeStrength = s.tabEdge,
                                                         veilK = s.tabBarOpacity,
-                                                        dispersion = s.lensDispersion,
+                                                        dispersion = s.tabDispersion,
                                                     )
                                                 }.getOrNull()
                                             } else {
@@ -364,7 +371,7 @@ internal fun MoyuTabBar(
                                                     refractionHeight = s.tabRefraction.dp.toPx(),
                                                     refractionAmount = s.tabRefraction.dp.toPx(),
                                                     depthEffect = true,
-                                                    chromaticAberration = s.lensDispersion,
+                                                    chromaticAberration = s.tabDispersion,
                                                 )
                                             }
                                         }
@@ -384,9 +391,10 @@ internal fun MoyuTabBar(
                                         scaleY = 1f
                                     },
                                     onDrawSurface = {
-                                        // 3.26.60：镜片不再画自己的填充（原 selectedTint +
-                                        // tabLensOpacity 纸色覆层）；栏的 tint / paperVeil 只在
-                                        // liquidGlassBar 里画一份，镜片没有第二套料。
+                                        // 3.26.60：与栏完全同材质——先 tint、再 paperVeil、最后
+                                        // 边缘带，三层顺序与取值和 liquidGlassBar 一致。
+                                        drawRect(glassTint)
+                                        if (glassVeil > 0f) drawRect(glassPaperVeil)
                                         glassEdgeBand(
                                             lensShape,
                                             p,
@@ -398,7 +406,8 @@ internal fun MoyuTabBar(
                                                 // 与 GlassBar 同口径：AGSL 生效时跳过宽边带。
                                                 0f
                                             } else {
-                                                s.lensEdge
+                                                // 3.26.60：非 AGSL 回退路径的亮环也改用栏的 tabEdge。
+                                                s.tabEdge
                                             },
                                         )
                                     },
