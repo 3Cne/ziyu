@@ -2210,9 +2210,13 @@ fun InlineModalSheet(
                     initialOffsetY = { it },
                     animationSpec = spring(MOYU_DAMPING, 420f),
                 ),
+                // 3.26.59：退场弹簧 460→1600（ζ=1，ω 21.4→40）。
+                // 460 时视觉上 ~220ms 就退干净，但 isIdle 要 ~415ms；
+                // 删除确认框要等这个 idle 才开，中间约 200ms 是纯空档。
+                // 1600 把 idle 压到 ~222ms，进场 spring 与门控逻辑都不动。
                 exit = slideOutVertically(
                     targetOffsetY = { it },
-                    animationSpec = spring(MOYU_DAMPING, 460f),
+                    animationSpec = spring(MOYU_DAMPING, 1600f),
                 ),
             ) {
                 // Consume taps that land on the sheet itself so the scrim behind
