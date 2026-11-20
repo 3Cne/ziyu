@@ -299,6 +299,9 @@ private fun CharacterPane(
     // 3.26.45：作者页只放 origin == "author" 的角色/关系；AI 写进来的在「AI」页（只读）。
     // 3.26.46：同步过的 AI 条目也铺在作者页（同步只打标记、不搬数据），否则点了同步什么都看不见。
     val bible = if (readOnly) book.bible.aiWith() else book.bible.mineWith(synced)
+    // 3.26.59：淡化集合只在只读档生效——「我的」页铺出来的已同步条目不再整片 alpha .55；
+    // 与关系图 `dimmedIds` 同一道门（:365）。铺不铺出来仍由上面完整的 `synced` 决定。
+    val dimIds = if (readOnly) synced else emptySet()
     var editing by remember { mutableStateOf<StoryCharacter?>(null) }
     var creating by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf<StoryCharacter?>(null) }
@@ -384,7 +387,7 @@ private fun CharacterPane(
                         // 3.26.46：两页共用同一张角色卡（同外观 / 间距 / 字号 / 颜色）。
                         StoryCharacterCard(
                             character = center,
-                            synced = center.id in synced,
+                            synced = center.id in dimIds,
                             originTag = center.origin.takeIf { it != BIBLE_ORIGIN_AUTHOR },
                             onClick = if (readOnly) {
                                 { detail = center }
@@ -406,7 +409,7 @@ private fun CharacterPane(
                                     title = other.name.ifBlank { "未命名" },
                                     relation = r,
                                     fresh = r.id == freshRelationId,
-                                    synced = r.id in synced,
+                                    synced = r.id in dimIds,
                                     originTag = r.origin.takeIf { it != BIBLE_ORIGIN_AUTHOR },
                                     onClick = if (readOnly) {
                                         { relationDetail = r }
@@ -1457,6 +1460,8 @@ private fun TimelinePane(
     // 3.26.45：作者页只放自己记的事件；AI / 正文提取的在「AI」页（只读）。
     // 3.26.46：同步过的 AI 事件也铺在作者页（同步只打标记，不搬数据）。
     val events = (if (readOnly) book.bible.aiWith() else book.bible.mineWith(synced)).events
+    // 3.26.59：淡化集合只在只读档生效（与关系图 dimmedIds 同一道门）；铺不铺仍用完整 `synced`。
+    val dimIds = if (readOnly) synced else emptySet()
 
     // 3.26.19：工作台模式——上半区自己滚，主按钮固定在 pane 底部。
     StoryPageScaffold(
@@ -1483,7 +1488,7 @@ private fun TimelinePane(
                     TimelineAxis(
                         events = events,
                         book = book,
-                        syncedIds = synced,
+                        syncedIds = dimIds,
                         showOrigin = true,
                         onOpen = { if (readOnly) detail = it else editing = it },
                         onMore = if (readOnly) null else ({ e -> menuEvent = e }),
@@ -1797,6 +1802,8 @@ private fun OutlinePane(
     var pendingBeatId by remember { mutableStateOf<String?>(null) }
     val bible = book.bible
     val mine = if (readOnly) bible.aiWith() else bible.mineWith(synced)
+    // 3.26.59：淡化集合只在只读档生效（与关系图 dimmedIds 同一道门）；铺不铺仍用完整 `synced`。
+    val dimIds = if (readOnly) synced else emptySet()
     val freeNodes = mine.outline.filter { isFreeOutlineNode(it) }
     val chapterLoose = mine.outline.filter {
         !isFreeOutlineNode(it) && book.chapters.none { c -> c.id == it.chapterId }
@@ -1851,7 +1858,7 @@ private fun OutlinePane(
                             beats = node.beats,
                             statusText = if (node.id in synced) "已同步" else "未建章",
                             statusAccent = node.id in synced,
-                            synced = node.id in synced,
+                            synced = node.id in dimIds,
                             originTag = node.origin.takeIf { it != BIBLE_ORIGIN_AUTHOR },
                             onCardClick = { if (readOnly) detail = node else beatTarget = node },
                             onMore = { menuNode = node to OutlineCardKind.ChapterPlanned },
@@ -1892,7 +1899,7 @@ private fun OutlinePane(
                                 else -> "${node.beats.count { it.done }}/${node.beats.size}"
                             },
                             statusAccent = node != null,
-                            synced = node != null && node.id in synced,
+                            synced = node != null && node.id in dimIds,
                             originTag = node?.origin?.takeIf { it != BIBLE_ORIGIN_AUTHOR },
                             onCardClick = {
                                 if (readOnly) {
@@ -1928,7 +1935,7 @@ private fun OutlinePane(
                             FreeOutlineCard(
                                 title = node.title.ifBlank { "未命名大纲" },
                                 beats = node.beats,
-                                synced = node.id in synced,
+                                synced = node.id in dimIds,
                                 originTag = node.origin.takeIf { it != BIBLE_ORIGIN_AUTHOR },
                                 onCardClick = { if (readOnly) detail = node else beatTarget = node },
                                 onMore = { menuNode = node to OutlineCardKind.Free },
