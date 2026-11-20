@@ -1,10 +1,12 @@
 package com.moyu.writer
 
+import android.os.Build
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -34,14 +36,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.TransformOrigin
-import androidx.compose.ui.graphics.addOutline
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
@@ -61,28 +57,12 @@ import kotlin.math.abs
 import kotlin.math.pow
 import kotlin.math.roundToInt
 import com.kyant.backdrop.Backdrop
-
-// ── 3.26.62：整条玻璃的参数 ──────────────────────────────────────────────
-// 条整体的背景模糊（dp）。3.26.61 为了只看厚度场把基础模糊压到 0，条其实是
-// 「不糊的玻璃」；Apple 的 regular 变体本身带 background blur，纸色罩降到 30%
-// 之后，条的可读性就靠这层模糊撑住（不再靠加厚纸底）。下一轮只调这一个数。
-private const val TAB_BAR_BLUR_DP = 10f
-
-// 选中镜片不再是第二层玻璃（不 drawBackdrop / 不 lens() / 不 AGSL）：只在镜片
-// 位置叠一层「提亮」的点缀色 + 一圈内缘亮线。alpha 落在 0.10–0.18 的轻量区间。
-// 白 78% + accent 22%：浅色主题下也要「提亮」而不是压暗（纸色在深色主题里是
-// 暗的，直接用 paper 会把镜片压成凹坑）。
-private const val TAB_LENS_TINT_ALPHA = .16f
-private const val TAB_LENS_TINT_ACCENT_MIX = .22f
-// 点缀色胶囊相对镜片本体四周的内缩（dp）：贴边会读成第二层玻璃自己的边缘
-// （用户报过的「外圈还有一层线」）。
-private const val TAB_LENS_INSET_DP = 2f
-// 内缘亮线：1dp、alpha .12，只负责「更清晰」，不构成第二层玻璃。
-private const val TAB_LENS_RIM_DP = 1f
-private const val TAB_LENS_RIM_ALPHA = .12f
-// 镜片没有白底之后，选中感全靠图标/文字墨色：选中 p.ink（α1.0）+ Medium，
-// 未选中 p.muted 再收一档到 .85，把两者差距拉大一档。
-private const val TAB_UNSELECTED_INK_ALPHA = .85f
+import com.kyant.backdrop.drawBackdrop
+import com.kyant.backdrop.effects.blur
+import com.kyant.backdrop.effects.lens
+import com.kyant.backdrop.effects.vibrancy
+import com.kyant.backdrop.shadow.InnerShadow
+import com.kyant.backdrop.shadow.Shadow
 
 /** 镜片落下：阻尼 .78、刚度 380，比页面（pageStiffness ≈321）略快，读作「镜片领着页面走」。 */
 private val LensSettle = spring<Float>(dampingRatio = .78f, stiffness = 380f, visibilityThreshold = 1e-3f)
@@ -152,6 +132,7 @@ internal fun MoyuTabBar(
     )
     val lensTargetW = 65.55.dp
     val lensTargetH = 57.dp
+    val glassEnabled = backdrop != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
     val count = names.size.coerceAtLeast(1)
     val scope = rememberCoroutineScope()
     val haptic = LocalHaptic.current
@@ -176,19 +157,9 @@ internal fun MoyuTabBar(
     // 连点两个 tab 只执行最后一次。
     var selectJob by remember { mutableStateOf<Job?>(null) }
 
-    // ── 3.26.61：整块玻璃只有一套材质 ────────────────────────────────────
-    // 条与选中镜片读同一组值（GlassMaterial），设置里不再有「条一套、镜片一套」。
-    // 3.26.60 的镜片 5 个倍率（lensRefraction / lensBlur / tabLensOpacity /
-    // lensEdge / lensDispersion）整段删除：镜片与条同源后它们没有语义。
-    // 3.26.62：镜片更彻底——连玻璃都不再是一块（见下方 drawBehind），所以
-    // lensShadow 在真镜片上也不再被读；选中感只由图标与文字的墨色承担。
-    val glass = s.glassMaterial()
-
-    // 3.26.62：镜片只剩一层「不采样背景」的提亮叠色。颜色在组合期算好，
-    // 绘制阶段只读捕获值（不在 draw 里读主题快照）。
-    val lensTint = lerp(Color.White, ui.accent, TAB_LENS_TINT_ACCENT_MIX)
-        .copy(alpha = TAB_LENS_TINT_ALPHA)
-    val lensRim = Color.White.copy(alpha = TAB_LENS_RIM_ALPHA)
+    val lensAlpha = .08f * s.tabLensOpacity.coerceIn(0f, 1f)
+    // 3.26.53：镜片内的选中薄涂随昼夜连续从墨色走到白色（原来 if (isDark) 中点硬翻）。
+    val selectedTint = lerp(p.ink, Color.White, p.darkAmount).copy(alpha = lensAlpha)
 
     // 镜片只在「切页」和「拖动」时抬起；按住不抬（2026-11-15 用户报：按住别的格也抬）。
     val liftTarget = if (dragging || clickLift) 1f else 0f
@@ -296,7 +267,7 @@ internal fun MoyuTabBar(
             // 页面（TabPager）同样改成绘制阶段读同一个 State，所以两者仍同帧，
             // 不会回到 3.24.2 那种「镜片领先页面一帧」。
 
-            // 玻璃底：整条胶囊。六项玻璃设置全部落在这里（见 GlassMaterial）。
+            // 玻璃底：整条胶囊。
             Box(
                 Modifier
                     .fillMaxSize()
@@ -304,23 +275,13 @@ internal fun MoyuTabBar(
                         backdrop = backdrop,
                         shape = capsule,
                         palette = p,
-                        // 3.26.62：真实按下状态传下去。drawBackdrop 的 layerBlock 会把
-                        // 采样层按 press 放大（指尖处向外张），这就是 Apple「按下时
-                        // 材质由指尖向外回应」的既有通路，不新造动画组件。
-                        press = press,
-                        // 3.26.62：补真模糊（常量集中），旧 tabBlur 设置项不再被读。
-                        blurDp = TAB_BAR_BLUR_DP,
-                        refractionDp = glass.bevelDp,
-                        dispersion = glass.dispersion,
-                        // 阴影沿用旧字段与旧值（不动阴影参数）。
+                        press = 0f,
+                        blurDp = s.tabBlur,
+                        refractionDp = s.tabRefraction,
+                        dispersion = s.tabDispersion,
                         shadowAlpha = s.tabShadow,
-                        veil = glass.veil,
-                        // 31–32 回退路径的宽边带强度；AGSL 生效时 shader 自带亮环、
-                        // 这里不画（与 3.26.59 同口径）。
-                        edgeStrength = glass.rim,
-                        meniscus = glass.meniscus,
-                        rimBlurPx = glass.edgeBlurPx,
-                        rimK = glass.rim,
+                        veil = s.tabBarOpacity,
+                        edgeStrength = s.tabEdge,
                     )
             )
 
@@ -366,29 +327,50 @@ internal fun MoyuTabBar(
                             ),
                             lensShape,
                         )
-                        // 3.26.62：镜片与条**合成一层玻璃**——镜片不再采样背景
-                        // （原 glassLens = drawBackdrop + vibrancy + AGSL 厚度场）。
-                        // 那是第二层玻璃：用户报过「玻璃叠玻璃」，也是 TabBar 外圈
-                        // 双边缘的候选来源（第二个 rim / Fresnel / 宽边带都画在镜片上）。
-                        // 现在只叠两层不采样的东西：内缩胶囊的点缀色（提亮）+ 1dp
-                        // 内缘亮线（更清晰）。尺寸 / 位置 / 弹簧动画全部没动。
-                        .drawBehind {
-                            val inset = TAB_LENS_INSET_DP.dp.toPx()
-                            val w = size.width - inset * 2f
-                            val h = size.height - inset * 2f
-                            if (w <= 0f || h <= 0f) return@drawBehind
-                            // 形状仍用 lensShape（65.55×57 上它正好是胶囊）。
-                            val outline = lensShape.createOutline(Size(w, h), layoutDirection, this)
-                            val path = Path().apply { addOutline(outline) }
-                            translate(inset, inset) {
-                                drawPath(path, lensTint)
-                                drawPath(
-                                    path = path,
-                                    color = lensRim,
-                                    style = Stroke(TAB_LENS_RIM_DP.dp.toPx()),
+                        .then(
+                            if (glassEnabled) {
+                                Modifier.drawBackdrop(
+                                    backdrop = backdrop!!,
+                                    shape = { lensShape },
+                                    effects = {
+                                        vibrancy()
+                                        if (s.lensBlur > 0f) blur(s.lensBlur.dp.toPx())
+                                        if (s.lensRefraction > 0f) {
+                                            lens(
+                                                refractionHeight = s.lensRefraction.dp.toPx(),
+                                                refractionAmount = (s.lensRefraction * 1.2f).dp.toPx(),
+                                                depthEffect = true,
+                                                chromaticAberration = s.lensDispersion,
+                                            )
+                                        }
+                                    },
+                                    highlight = null,
+                                    shadow = {
+                                        Shadow(
+                                            radius = 12.dp,
+                                            alpha = s.lensShadow,
+                                        )
+                                    },
+                                    innerShadow = { InnerShadow(radius = 6.dp, alpha = s.lensShadow + .07f) },
+                                    layerBlock = {
+                                        scaleX = 1f
+                                        scaleY = 1f
+                                    },
+                                    onDrawSurface = {
+                                        drawRect(selectedTint)
+                                        val v = s.tabLensOpacity.coerceIn(0f, 1f)
+                                        if (v > 0f) drawRect(p.paper.copy(alpha = v * .94f))
+                                        glassEdgeBand(lensShape, p, s.lensEdge)
+                                    },
                                 )
+                            } else {
+                                Modifier
+                                    .clip(lensShape)
+                                    // 3.26.53：非玻璃回退底色：墨 88%（浅色）→ 墨 18%（深色），
+                                    // 透明度随 darkAmount 连续过渡，不再在中点硬翻。
+                                    .background(p.ink.copy(alpha = .88f - .70f * p.darkAmount))
                             }
-                        }
+                        )
                 )
             }
 
@@ -399,10 +381,8 @@ internal fun MoyuTabBar(
             ) {
                 names.forEachIndexed { index, name ->
                     val active = index == current
-                    // 3.26.62：镜片没有白底了，选中感全靠图标/文字墨色——
-                    // 选中 p.ink 实色（α1.0）+ Medium，未选中 p.muted 收到 .85。
                     val fg by animateColorAsState(
-                        targetValue = if (active) p.ink else p.muted.copy(alpha = TAB_UNSELECTED_INK_ALPHA),
+                        targetValue = if (active) p.ink else p.muted,
                         animationSpec = tween(220),
                         label = "tabFg",
                     )
