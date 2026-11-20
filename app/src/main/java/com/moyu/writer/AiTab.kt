@@ -556,6 +556,11 @@ fun AiScreen(
     var quoteSheet by remember { mutableStateOf(false) }
     var bookPicker by remember { mutableStateOf(false) }
     var suggestions by remember(bookId) { mutableStateOf<List<String>>(emptyList()) }
+    // 3.26.59：故事圣经「待同意」入口。AI 改作者名下的条目只进 `bible-pending.json`，
+    // 回复里让作者「到待同意里点同意」；问书页以前只有正文补丁确认卡，按字面找不到。
+    // 这里只存计数 + 抽屉开关，抽屉本体复用故事页的 [StoryPendingDrawerHost]，不复制 UI / 落库。
+    var biblePending by remember(bookId) { mutableIntStateOf(0) }
+    var biblePendingOpen by remember { mutableStateOf(false) }
     val chatList = rememberLazyListState()
     LaunchedEffect(bookId) {
         chat.load(memo.turns)
@@ -567,6 +572,14 @@ fun AiScreen(
             delay(70)
             runCatching { chatList.scrollBy(1_000_000f) }
         }
+    }
+    // 3.26.59：读侧车前先给 AiBible 补上静态 ctx / store（问书页没有故事页那段预热），
+    // 计数沿用故事页同一口径 `AiBible.pendingChanges(bookId)`，不另写一套解析。
+    // 侧车没有变化信号，所以按「切书 / bible 变化 / 回答落定」重读；拒绝不改 bible，
+    // 抽屉收起时再补读一次（见下面 StoryPendingDrawerHost 的 onDismiss）。
+    LaunchedEffect(book.id, book.bible, sending) {
+        AiBible.host(ctx.applicationContext, store)
+        biblePending = pendingChanges(book.id).size
     }
     // 3.26.51 设置里「清空问书聊天记录」：盘上已清空，这里把内存会话同步换掉，
     // 否则本进程里还会显示旧消息、下一次 persist 又会把旧对话写回盘。
@@ -1251,10 +1264,22 @@ fun AiScreen(
                 // 3.26.29：改稿方式必须让模型知道，否则它会照着「已经改好」的口吻回话。
                 when (settings.aiWriteMode) {
                     0 -> "\n现在是只读档：只回答，不改正文、不改圣经，也不排任何写入。"
-                    1 -> "\n现在是询问档：正文改动只会排成补丁，作者点「接受」才写进正文；" +
-                        "不要说「已经改好了」，说「改好了，等你在下面确认」。"
+                    1 -> "\n现在是询问档：正文改动只会排成补丁，作者点「接受」才写进正文。"
                     else -> "\n现在是自动档：正文改动在你答完就写入，作者可以一步撤销。"
-                } + "\n\n" +
+                } +
+                // 3.26.59：写入有三种落点，回复必须按工具实际返回的结果分开说。以前不管落在哪
+                // 都统一说「改好了，等你在下面确认」——问书页只给正文补丁确认卡，故事圣经的
+                // 改动进的是「待同意」（问书页输入框上方、故事页底部都有入口），照旧说会让
+                // 作者按字面在问书页找不到可以点的地方。
+                "\n\n回复作者时，按这次写入实际落在哪里选说法，别笼统说都改好了、也别笼统说" +
+                "都在下面等确认：" +
+                "\n① 正文排成补丁（工具返回「已排成补丁」）：说「已排成补丁，作者点下方" +
+                "『接受』才写进正文」；" +
+                "\n② 故事圣经改动排队（write_story_bible 返回「已提交待同意」）：说「已记下，" +
+                "需作者在『待同意』里点同意」（问书页输入框上方、故事页底部都有入口），" +
+                "不同意就一直没写进圣经；" +
+                "\n③ 已经直接写入成功（工具返回「已写入」「已新建」「已修改」等）：说「已经改好了」。" +
+                "\n\n" +
                 bible,
         )
         lastPrompt = prompt
@@ -1757,6 +1782,9 @@ fun AiScreen(
                     onDropPending = { pending = emptyList() },
                     onUndoDirect = { undoDirect() },
                     undoCount = undoCount,
+                    // 3.26.59：故事圣经「待同意」入口（只在有待同意时出现；点开复用故事页抽屉）。
+                    biblePending = biblePending,
+                    onOpenBiblePending = { biblePendingOpen = true },
                     onUndoEdit = { msgId, edit ->
                         if (undoEdit(edit)) {
                             chat.markEditUndone(msgId, edit.id)
@@ -1949,6 +1977,20 @@ fun AiScreen(
             onDismiss = { confirmDanger = false },
         )
     }
+
+    // 3.26.59：故事圣经「待同意」抽屉——与故事页同一个宿主（[StoryPendingDrawerHost]），
+    // 列表、同意/拒绝的落库、开时的刷新都在宿主内部，这里只给 shown / onDismiss。
+    // 收起后补读一次侧车：拒绝不改 bible，靠这一下把入口行的计数与侧车对齐
+    // （与故事页 footer 的「待同意 · N」同口径）。
+    StoryPendingDrawerHost(
+        book = book,
+        store = store,
+        shown = biblePendingOpen,
+        onDismiss = {
+            biblePendingOpen = false
+            biblePending = pendingChanges(book.id).size
+        },
+    )
 }
 
 /** 长消息判定：气泡超过列表可视高度的这个比例就不做 1.02 缩放。 */
@@ -2123,6 +2165,9 @@ private fun ChatPane(
     onDropPending: () -> Unit,
     onUndoDirect: () -> Unit,
     undoCount: Int,
+    /** 3.26.59：故事圣经待同意条数；>0 时输入区上方露一行入口（点开复用故事页抽屉）。 */
+    biblePending: Int,
+    onOpenBiblePending: () -> Unit,
     /** 逐条撤销一处正文改动（msgId, edit）。 */
     onUndoEdit: (String, ChatEdit) -> Unit,
     /** 3.26.29：接受 / 拒绝一张待确认补丁（msgId, edit[, 理由]）。 */
@@ -2362,6 +2407,19 @@ private fun ChatPane(
         },
         label = "quoteRowBottom",
     )
+    // 3.26.59：故事圣经「待同意」入口行的让位。入口只在有待同意时出现，出现 / 消失
+    // 与列表尾让位共用同一条 spring，列表尾、输入区、工具气泡落点不会在同一帧上跳。
+    // 30dp = 行高（上下各 2dp 外边距 + 5dp 内边距 + 11f 字号）——改行样式时同步改这里。
+    val bibleRowShown = biblePending > 0
+    val bibleRowBottom by animateDpAsState(
+        targetValue = if (bibleRowShown) 30.dp else 0.dp,
+        animationSpec = if (ui.settings.motion == "none") {
+            tween(0)
+        } else {
+            spring(dampingRatio = .6f, stiffness = 380f)
+        },
+        label = "biblePendingRowBottom",
+    )
     // 3.26.48：空态推荐清单在发出第一条时淡出。LazyColumn 的 item 一删就没退场，
     // 所以整块先留着、淡完再拆；退场比飞行气泡晚 100ms 起步，两块不抢同一段时间。
     // 这段状态必须放在 LazyColumn 的 LazyListScope 外面——里面不是 composable 上下文，
@@ -2438,7 +2496,8 @@ private fun ChatPane(
                 // it. 12dp put the last line under the glass; 62dp left a hole.
                 // 3.26.47：54dp 是基准，引用/附件行显示时多让 38dp（即 92dp），
                 // 这个让位跟那一行的展开/收起同一条 spring，不再同帧跳变。
-                bottom = bottomGap + tailRoom + quoteRowBottom,
+                // 3.26.59：故事圣经待同意入口行同理（bibleRowBottom 0 ↔ 30dp）。
+                bottom = bottomGap + tailRoom + quoteRowBottom + bibleRowBottom,
             ),
             // A short conversation leaves the rows stuck to the TOP with a hole
             // under them, and then no scroll can fix it: the content is shorter
@@ -2981,6 +3040,56 @@ private fun ChatPane(
         // 这里 enter/exit 与列表 contentPadding 的让位共用 spring(.6, 380)；
         // motion=none 时降级成 tween(0)，跟本文件其它动效的写法一致。
         val rowMoves = ui.settings.motion != "none"
+        // 3.26.59：故事圣经「待同意」入口。AI 改作者条目只进 `bible-pending.json`，
+        // 回复里让「到待同意里点同意」；问书页原先只有正文补丁确认卡，按字面找不到。
+        // 只在有待同意时出现一行，点开复用故事页的抽屉（StoryPendingDrawerHost）——
+        // 不复制另一份列表，也不复制落库路径。外观 = 本页轻量状态行（Txt + Chevron，
+        // 底色 dockTone，与故事页 footer 的「待同意 · N」同一套读法）。
+        AnimatedVisibility(
+            visible = bibleRowShown,
+            enter = expandVertically(
+                animationSpec = if (rowMoves) {
+                    spring(dampingRatio = .6f, stiffness = 380f)
+                } else {
+                    tween(0)
+                },
+                expandFrom = Alignment.Bottom,
+            ) + fadeIn(tween(if (rowMoves) 140 else 0)),
+            exit = shrinkVertically(
+                animationSpec = if (rowMoves) {
+                    spring(dampingRatio = .6f, stiffness = 380f)
+                } else {
+                    tween(0)
+                },
+                shrinkTowards = Alignment.Bottom,
+            ) + fadeOut(tween(if (rowMoves) 120 else 0)),
+        ) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    // 上下 2dp 外边距 + 内部 5dp 内边距 + 11f 字号 = 30dp，
+                    // 与上方的 bibleRowBottom 让位值同源；改样式要两边一起改。
+                    .padding(horizontal = 20.dp, vertical = 2.dp)
+                    .clip(SmoothCorner(12.dp))
+                    .background(dockTone(ui))
+                    .bouncy { onOpenBiblePending() }
+                    .padding(horizontal = 12.dp, vertical = 5.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                LineIcon(Glyph.Sparkles, ui.accent, 12.dp, 1.7f)
+                Spacer(Modifier.width(6.dp))
+                Txt(
+                    "故事圣经 · $biblePending 处待同意",
+                    size = 11f,
+                    color = p.muted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(Modifier.width(6.dp))
+                LineIcon(Glyph.Chevron, p.muted, 11.dp, 1.8f)
+            }
+        }
         AnimatedVisibility(
             visible = quoteRowShown,
             enter = expandVertically(
