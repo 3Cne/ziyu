@@ -419,7 +419,7 @@ fun WritingScreen(
     val settings = ui.settings
     val context = LocalContext.current
     // 3.26.64：AI 总开关 settings.aiEnabled 随问书一起下线（设置里不再有它，默认 false）。
-    // 校核 / 修饰 / 问 的门槛改成只看「配没配 Key」；继续读 aiEnabled 会让这三项永久失效。
+    // 校核 / 修饰 的门槛改成只看「配没配 Key」；继续读 aiEnabled 会让这两项永久失效。
     // 只在进入编辑器时读一次：Key 在设置页保存（那一刻编辑器已退出），重新进来自然重算；
     // 不放进每次重组（打字时很频繁），否则每敲一个字都要解一次 KeyStore。
     val aiReady = remember { !AiKey.load(context).isNullOrBlank() }
@@ -709,19 +709,6 @@ fun WritingScreen(
     /** 校核打开后自动发一次请求（本地规则已停用，改成 AI 全量查）。 */
     var proofAutoAsk by remember { mutableStateOf(false) }
 
-    // 3.26.32 选段「问」：右侧浮窗里的对话，回答可替换回选中那一段。
-    // 只在内存；替换前写 ChapterHistory 快照。
-    var askOpen by remember { mutableStateOf(false) }
-    var askTurns by remember { mutableStateOf<List<AskTurn>>(emptyList()) }
-    var askInput by remember { mutableStateOf("") }
-    var askBusy by remember { mutableStateOf(false) }
-    var askError by remember { mutableStateOf<String?>(null) }
-    var askPreview by remember { mutableStateOf("") }
-    var askRange by remember { mutableStateOf(0 to 0) }
-    var askExpanded by remember { mutableStateOf(false) }
-    var askSeq by remember { mutableIntStateOf(0) }
-    // 3.26.48：流式回答已收到的部分。边收边画，落定（或失败）后清空。
-    var askStream by remember { mutableStateOf("") }
     // 3.26.48：章节历史面板。入口在章节「···」菜单；面板自己留底，恢复只负责写回。
     var historyOpen by remember(seedKey) { mutableStateOf(false) }
     LaunchedEffect(historyTick) {
@@ -744,7 +731,6 @@ fun WritingScreen(
         // Two right-side panels never stack: the notes window gives way, and the
         // body keeps its scroll position while the writing column re-wraps.
         floatNotePanel = false
-        askOpen = false
         bodyEditor?.captureScrollAnchor()
         // 本地规则不再跑（2026-11-14 用户定：本地一条都不命中，等于没用，全交给 AI）。
         proofIssues = emptyList()
@@ -912,7 +898,6 @@ fun WritingScreen(
         polishMode = true
         // 两块右侧浮窗不叠：打开修饰先让笔记窗退场，正文保持滚动位置。
         floatNotePanel = false
-        askOpen = false
         bodyEditor?.captureScrollAnchor()
         proofIssues = emptyList()
         proofBusy = false
@@ -982,140 +967,6 @@ fun WritingScreen(
             val ed = bodyEditor
             ed?.post { runCatching { ed.setSelection(a, b) } }
         }
-    }
-
-    /** 3.26.32：打开「问」——带着选中的那一段进浮窗。 */
-    fun startAsk() {
-        val a = min(body.selection.start, body.selection.end).coerceIn(0, body.text.length)
-        val b = max(body.selection.start, body.selection.end).coerceIn(0, body.text.length)
-        if (b - a < 2) {
-            ToastBus.show("先选中一段正文再问")
-            return
-        }
-        askPreview = body.text.substring(a, b)
-        askRange = a to b
-        askTurns = emptyList()
-        askInput = ""
-        askStream = ""
-        askError = null
-        askBusy = false
-        askExpanded = false
-        // 三块右侧浮窗不叠：开「问」先让校核和笔记窗退场。
-        proofOpen = false
-        floatNotePanel = false
-        bodyEditor?.captureScrollAnchor()
-        bodyEditor?.collapseSelection()
-        body = body.copy(selection = TextRange(a, a))
-        askOpen = true
-    }
-
-    /** 关「问」：选区放回这一段。 */
-    fun closeAsk() {
-        askOpen = false
-        val (a, b) = askRange
-        if (b > a && b <= body.text.length) {
-            body = body.copy(selection = TextRange(a, b))
-            val ed = bodyEditor
-            ed?.post { runCatching { ed.setSelection(a, b) } }
-        }
-    }
-
-    /**
-     * 发一条：上下文交给 [AskContextBuilder]（选区/上文/章名/摘要/圣经/对话），
-     * 回答走 [AskStream] 流式，边收边画；落定后才成一条可替换的 [AskTurn]。
-     */
-    fun sendAsk() {
-        val q = askInput.trim()
-        if (q.isEmpty() || askBusy) return
-        if (askTurns.count { it.mine } >= 6) {
-            ToastBus.show("这一段已经问了 6 次，换一段再问吧")
-            return
-        }
-        val key = AiKey.load(context)
-        // 3.26.64：只看 Key（AI 总开关已下线），否则「问」永远发不出去。
-        if (key.isNullOrBlank()) {
-            askError = "还没配置 AI：设置 → AI"
-            return
-        }
-        // 本轮提问自己不进「历史对话」：问题由 AskContextBuilder 的 question 给，
-        // 历史只放这之前的轮次，否则同一句会出现两次（一次是作者：q，一次是问题行）。
-        val priorTurns = askTurns
-        askInput = ""
-        askError = null
-        askStream = ""
-        askBusy = true
-        askSeq += 1
-        askTurns = askTurns + AskTurn("q" + askSeq, true, q)
-        scope.launch {
-            val askCtx = AskContextBuilder.forBook(
-                context,
-                proofBookId?.let { store.book(it) },
-                seedKey,
-                chapterTitle = title.ifBlank { "未命名" },
-                preview = askPreview,
-                before = body.text.substring(0, askRange.first.coerceIn(0, body.text.length)),
-                question = q,
-                history = priorTurns,
-                chapterWords = body.text.length,
-            )
-            val r = AskStream.chat(
-                baseUrl = settings.aiBaseUrl,
-                model = settings.aiModel,
-                key = key,
-                temperature = .6f,
-                system = ASK_SYSTEM,
-                user = askCtx.user,
-            ) { delta -> askStream += delta }
-            askBusy = false
-            askStream = ""
-            when {
-                r.ok -> {
-                    askSeq += 1
-                    askTurns = askTurns + AskTurn("q" + askSeq, false, r.text.trim())
-                }
-                r.partial -> {
-                    // 半路断流：收到的残句不落成可替换的回答（面板按「完整一条」才给
-                    // 「替换选中」），只提示没写完，作者重发一次即可。
-                    askError = "回答没写完（收到 ${r.text.length} 字），再发一次试试"
-                }
-                else -> askError = r.error ?: "没拿到回答，再试一次"
-            }
-        }
-    }
-
-    /**
-     * 把一条回答替换回选中那一段。
-     *
-     * 乐观锁：替换瞬间原文必须还等于打开时的那段，否则作废（期间作者手改过）。
-     * 替换前写一份 ChapterHistory 快照；撤销由正文自己的 undo 栈负责。
-     */
-    fun applyAsk(turn: AskTurn) {
-        // 3.26.64：AI 总开关与「只读/询问/自动」档位随 AI 设置项一起下线——原来这两道门
-        // 会让「问 → 替换选中」永久只读（aiEnabled 默认 false）。替换前仍走下面的乐观锁
-        // 与 ChapterHistory 快照，安全网一处没动。
-        val (a, b) = askRange
-        val src = body.text
-        if (a < 0 || a > b || b > src.length || src.substring(a, b) != askPreview) {
-            askTurns = askTurns.map { if (it.id == turn.id) it.copy(stale = true) else it }
-            ToastBus.show("这段正文已经改过了，这条作废")
-            return
-        }
-        // seedKey 在章节页就是 chapter.id；笔记页不写章节历史。
-        if (!isNote && !ChapterHistory.record(context, seedKey, src)) {
-            ToastBus.show("没能留底，这次不替换")
-            return
-        }
-        val ed = bodyEditor
-        if (ed != null) {
-            ed.replaceKeepingViewport(a, b, turn.text)
-        } else {
-            pushUndo()
-            body = body.copy(text = src.replaceRange(a, b, turn.text))
-        }
-        askPreview = turn.text
-        askRange = a to (a + turn.text.length)
-        askTurns = askTurns.map { if (it.id == turn.id) it.copy(applied = true) else it }
-        ToastBus.show("已替换选中 ${turn.text.length} 字，可以撤销")
     }
 
     /** 3.26.23：修饰模式下一键采纳本章所有卡片（逐条走 acceptProof，位置判定与撤销都沿用）。 */
@@ -1995,54 +1846,6 @@ fun WritingScreen(
                     .fillMaxHeight()
                     .padding(bottom = dockReserve + 12.dp),
             )
-            // 3.26.32 选段「问」：和校核/修饰同一块浮窗、同一套拖宽，
-            // 内容换成对话；两块互斥（开一个就关另一个）。
-            ProofSidePanel(
-                visible = askOpen && !sideOfNotes,
-                issues = emptyList(),
-                busy = false,
-                status = null,
-                error = null,
-                asked = true,
-                chars = askPreview.length,
-                canAsk = false,
-                onAsk = {},
-                onAccept = {},
-                onIgnore = {},
-                onLocate = {},
-                onClose = { closeAsk() },
-                heading = "问 · " + askPreview.length + " 字",
-                headingIcon = Glyph.Sparkles,
-                onClearEditorFocus = {
-                    val ed = bodyEditor
-                    if (ed != null && ed.hasFocus()) {
-                        ed.clearFocus()
-                        collapseBodySelection()
-                    }
-                },
-                onWidthAnimating = { bodyEditor?.captureScrollAnchorIfNone() },
-                onWidthSettled = { bodyEditor?.releaseScrollAnchor() },
-                onResizeStart = { bodyEditor?.captureScrollAnchor() },
-                modifier = Modifier
-                    .fillMaxHeight()
-                    .padding(bottom = dockReserve + 12.dp),
-            ) {
-                AskChat(
-                    preview = askPreview,
-                    chars = askPreview.length,
-                    expanded = askExpanded,
-                    onToggleExpand = { askExpanded = !askExpanded },
-                    turns = askTurns,
-                    input = askInput,
-                    onInput = { askInput = it },
-                    busy = askBusy,
-                    error = askError,
-                    canWrite = aiReady,
-                    onSend = { sendAsk() },
-                    onApply = { applyAsk(it) },
-                    streaming = askStream,
-                )
-            }
             // 3.26.23: floating story bible (same panes as the story page).
             // 3.26.64：AI 改动记录 / 撤销最近一次改动随问书下线删除，这里只传书本与落库回调。
             val storyBook = proofBookId?.let { store.book(it) }
@@ -2198,7 +2001,6 @@ fun WritingScreen(
                     },
                     onProof = { startProof() },
                     onPolish = { startPolish() },
-                    onAsk = { startAsk() },
                     backdrop = editorBodyBackdrop,
                     epoch = bodyScrollTick.intValue,
                     scrollTick = bodyScrollTick,
@@ -5062,8 +4864,6 @@ private fun EditorDock(
     onProof: (() -> Unit)? = null,
     /** AI 入口里的「修饰」：只顺句，出改写版本；点一个才替换正文。 */
     onPolish: (() -> Unit)? = null,
-    /** 3.26.32：AI 入口里的「问」：就选中的这一段对话，回答可一键替换回选区。 */
-    onAsk: (() -> Unit)? = null,
     /** 1型玻璃 sampling source. Pass the body's software backdrop so the real
      *  EditText text shows through the dock; null falls back to a paper bar. */
     backdrop: Backdrop? = null,
@@ -5155,22 +4955,22 @@ private fun EditorDock(
                         // AI 入口：点开横向展开成「校核 | 修饰」两格。这份 state
                         // 随选框行一起销毁——选择结束时自然收起，不用手动复位。
                         var aiOpen by remember { mutableStateOf(false) }
-                        // 3.26.38：这一行最多 9 格（AI 展开成 3 个 + 6 个动作）。以前每格固定宽、
-                        // 整行 SpaceBetween，9 格加起来超过屏宽，最右边的「取消」被裁成「取」。
-                        // 改成按格数分配权重：AI 展开时占 3 格宽、其余各 1 格，都按屏宽均分，
+                        // 3.26.38：这一行最多 8 格（AI 展开成 2 个 + 6 个动作）。以前每格固定宽、
+                        // 整行 SpaceBetween，格数一多最右边的「取消」就被裁成「取」。
+                        // 改成按格数分配权重：AI 展开时占 2 格宽、其余各 1 格，都按屏宽均分，
                         // 格子自己收窄，文字不会再被切掉。
                         Row(
                             Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(0.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            if (onProof != null || onPolish != null || onAsk != null) {
+                            if (onProof != null || onPolish != null) {
                                 val aiT by animateFloatAsState(
                                     targetValue = if (aiOpen) 1f else 0f,
                                     animationSpec = spring(dampingRatio = .6f, stiffness = 380f),
                                     label = "aiT",
                                 )
-                                DockCell(1f + 2f * aiT) {
+                                DockCell(1f + 1f * aiT) {
                                 AnimatedContent(
                                     targetState = aiOpen,
                                     transitionSpec = {
@@ -5186,9 +4986,9 @@ private fun EditorDock(
                                         DockTool(Glyph.Sparkles, "AI", true, onClick = { aiOpen = true }, tag = "editor.tool.ai")
                                     } else {
                                         Row(verticalAlignment = Alignment.CenterVertically) {
-                                            // 3.26.41：三格内部错层（0 / 12% / 24% 起步、76% 追平）。
-                                            // 整组宽度仍是外层 DockCell(1f + 2f*aiT) 的平滑摊开，
-                                            // 这里只让三格依次出现/收回，不再整排同时闪一下。
+                                            // 3.26.41：两格内部错层（0 / 12% 起步、76% 追平）。
+                                            // 整组宽度仍是外层 DockCell(1f + 1f*aiT) 的平滑摊开，
+                                            // 这里只让两格依次出现/收回，不再整排同时闪一下。
                                             AiCellStagger(aiT, 0) {
                                                 DockTool(Glyph.Check, "校核", true, onClick = {
                                                     aiOpen = false
@@ -5200,14 +5000,6 @@ private fun EditorDock(
                                                     aiOpen = false
                                                     onPolish?.invoke()
                                                 }, tag = "editor.tool.polish")
-                                            }
-                                            if (onAsk != null) {
-                                                AiCellStagger(aiT, 2) {
-                                                    DockTool(Glyph.Sparkles, "问", true, onClick = {
-                                                        aiOpen = false
-                                                        onAsk?.invoke()
-                                                    }, tag = "editor.tool.ask")
-                                                }
                                             }
                                         }
                                     }
@@ -5394,11 +5186,11 @@ private fun androidx.compose.foundation.layout.RowScope.DockCell(
 }
 
 /**
- * 3.26.41：AI 三格展开时的内部错层。
+ * 3.26.41：AI 两格展开时的内部错层。
  *
- * 3.26.39 已经把整组的宽度做成 aiT 驱动的动画（外层 DockCell 权重 1f + 2f*aiT），
- * 这里只补三格内部先后推出的顺序感：第 i 格在 aiT 走到 i*12% 之后才开始动，
- * 到 76% 追平——位移 12dp、透明度同步，所以三格读完是一条「依次被挤出来」的带。
+ * 3.26.39 已经把整组的宽度做成 aiT 驱动的动画（外层 DockCell 权重 1f + 1f*aiT），
+ * 这里只补两格内部先后推出的顺序感：第 i 格在 aiT 走到 i*12% 之后才开始动，
+ * 到 76% 追平——位移 12dp、透明度同步，所以两格读完是一条「依次被挤出来」的带。
  */
 @Composable
 private fun AiCellStagger(
