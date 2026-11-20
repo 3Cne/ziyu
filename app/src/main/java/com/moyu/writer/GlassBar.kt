@@ -87,13 +87,11 @@ internal fun Modifier.liquidGlassBar(
             .background(fallback)
             .border(.6.dp, palette.ink.copy(alpha = .10f), shape)
     }
-    // High transparency: the page stays visible through the bar. A tenth of
-    // the old paper fill, so the glass reads as glass and not as a panel.
-    val tint = if (palette.isDark) {
-        Color.White.copy(alpha = .06f)
-    } else {
-        palette.ink.copy(alpha = .045f)
-    }
+    // 3.26.62：删掉固有色 tint（原浅色主题 ink 4.5% / 深色主题 white 6%）。
+    // Apple 的 Liquid Glass 没有固有颜色——颜色只从正后方内容透射上来（AGSL 里的
+    // `col`）；这一层只是给玻璃垫一点底色，删掉后由透射色与「纸色覆盖」veil 共同
+    // 承担。shader 侧只补一次 luma 守恒的极轻增饱和（LENS_SATURATE）防止发灰。
+    // 注意：AI 输入框/按钮/通知也走 `liquidGlassBar`，同样不再有这层底色。
     val paperVeil = palette.paper.copy(alpha = veil.coerceIn(0f, 1f) * .94f)
     // Backdrop's lens effect walks a CornerBasedShape's SDF. `SmoothCorner` is a
     // custom continuous-corner shape, so asking for refraction on it throws
@@ -171,7 +169,7 @@ internal fun Modifier.liquidGlassBar(
             scaleY = scale
         },
         onDrawSurface = {
-            drawRect(tint)
+            // 3.26.62：不再叠固有色 tint（见上方注释）。
             if (veil > 0f) drawRect(paperVeil)
             // The AGSL lens draws its own Fresnel / specular / equator rim
             // inside the shader, and that rim now has a baseline that does not
@@ -250,7 +248,7 @@ internal fun Modifier.glassLens(
         // 非玻璃回退底色：墨 88%（浅色）→ 墨 18%（深色），随 darkAmount 连续过渡。
         return clip(shape).background(palette.ink.copy(alpha = .88f - .70f * palette.darkAmount))
     }
-    val tint = if (palette.isDark) Color.White.copy(alpha = .06f) else palette.ink.copy(alpha = .045f)
+    // 3.26.62：镜片与条同一口径——不再叠固有色 tint，颜色只来自正后方内容。
     val paperVeil = palette.paper.copy(alpha = material.veil.coerceIn(0f, 1f) * .94f)
     // AGSL 生效时 shader 自带 Fresnel / 赤道亮线，再叠一条宽边带就是第二道亮环
     // （3.26.13/14/52 三次被否的坑），与 liquidGlassBar 同一口径：跳过宽边带；
@@ -296,7 +294,7 @@ internal fun Modifier.glassLens(
             scaleY = 1f
         },
         onDrawSurface = {
-            drawRect(tint)
+            // 3.26.62：固有色 tint 已删，只留纸色覆盖。
             if (material.veil > 0f) drawRect(paperVeil)
             glassEdgeBand(shape, palette, if (useShader) 0f else material.rim)
         },
@@ -367,6 +365,44 @@ private const val LENS_RIM_GAIN = .45f
 /** 背景亮度的过渡区间（smoothstep 起止）：0.06 以下取基线，0.62 以上取满。 */
 private const val LENS_RIM_ENV_LO = .06f
 private const val LENS_RIM_ENV_HI = .62f
+
+// ── 3.26.62：明暗跟背景翻转（内容驱动 polarity，不跟 app 主题）──────────────
+// Apple Liquid Glass：材质没有固有色，明暗与边缘从背后内容取。背景亮 → 玻璃偏
+// 「亮材质」，边缘用暗色对比线保对比度；背景暗 → 玻璃偏「暗材质」，边缘用亮线
+// 读出厚度。逐像素 shader 无状态，真正的滞回做不了，所以「滞回」= 双阈值平滑：
+// 两段 smoothstep 各补一半、拼成 0→1 的 S 曲线，在 .30 / .50 / .70 三处一阶导
+// 为 0——阈值附近背景亮度小幅抖动不会让整圈材质来回闪。
+// 下面两组常量（暗材质 / 亮材质）都以 `$` 插值进 AGSL，Kotlin 侧只此一处。
+/** 背景亮度 ≤ 此值 = 纯暗材质（亮边）。 */
+private const val GLASS_POLAR_DARK_END = .30f
+/** 双阈值 S 曲线的中点：.30→.50 与 .50→.70 两段 smoothstep 各补一半。 */
+private const val GLASS_POLAR_MID = .50f
+/** 背景亮度 ≥ 此值 = 纯亮材质（暗边）。 */
+private const val GLASS_POLAR_LIGHT_END = .70f
+// 暗材质（深色玻璃）：亮边 + 亮 tint + 深一档内圈阴影。
+/** 暗材质边缘亮线色（冷白）。 */
+private const val GLASS_POLAR_DARK_EDGE_R = .96f
+private const val GLASS_POLAR_DARK_EDGE_G = .975f
+private const val GLASS_POLAR_DARK_EDGE_B = 1.0f
+/** 暗材质亮边强度（沿用厚度场一直用的 0.62）。 */
+private const val GLASS_POLAR_DARK_EDGE_K = .62f
+/** 暗材质内圈阴影 alpha（暗底上要压出玻璃厚度）。 */
+private const val GLASS_POLAR_DARK_SHADOW = .10f
+// 亮材质（浅色玻璃）：暗边 + 暗 tint + 很浅的内圈阴影。
+/** 亮材质边缘暗线色（暖墨，不是纯黑，避免把纸面切出一条硬边）。 */
+private const val GLASS_POLAR_LIGHT_EDGE_R = .10f
+private const val GLASS_POLAR_LIGHT_EDGE_G = .095f
+private const val GLASS_POLAR_LIGHT_EDGE_B = .088f
+/** 亮材质暗边强度（暗线随极性淡入的上限，0 = 只留亮边）。 */
+private const val GLASS_POLAR_LIGHT_EDGE_K = .55f
+/** 亮材质内圈阴影 alpha（亮底上阴影会读成脏灰，压到约 1/3）。 */
+private const val GLASS_POLAR_LIGHT_SHADOW = .03f
+
+/**
+ * 3.26.62：删掉固有色 tint 后，透射色做一次 luma 守恒的极轻增饱和，防止玻璃
+ * 读成灰玻璃。0.06 = 增加 6%（等价于 AGSL 的 `mix(col, luma, -0.06)`），0 = 关。
+ */
+private const val LENS_SATURATE = .06f
 
 private val AGSL_LIQUID_LENS = """
 uniform shader content;
@@ -458,15 +494,34 @@ half4 main(float2 coord) {
         col = float3(c0.r, c0.g, c0.b);
     }
 
-    // 3b. environment probe: the rim follows the background's brightness and
-    //     hue. `col` above is already the sampled backdrop, so no second
-    //     content.eval is needed. Only intensity and tint adapt on purpose:
-    //     deriving the light direction from the background gradient tears the
-    //     rim diagonally on the concave surface, so Lp / Ls stay fixed.
+    // 3b. environment probe: the material's polarity follows the content behind
+    //     the glass, not the app theme. `col` above is already the sampled
+    //     backdrop, so no second content.eval is needed. Two smoothsteps each
+    //     cover half of the ramp; their sum is a 0..1 S curve that is flat at
+    //     .30 / .50 / .70, so a small luminance change around a threshold cannot
+    //     flash the whole rim (a per-pixel shader has no state: this is the
+    //     hysteresis stand-in).
+    //       polar = 0 -> dark material (dark backdrop), bright edge.
+    //       polar = 1 -> light material (bright backdrop), dark contrast edge.
     float envLum = dot(col, float3(0.2126, 0.7152, 0.0722));
+    float polar = 0.5 * smoothstep($GLASS_POLAR_DARK_END, $GLASS_POLAR_MID, envLum)
+                + 0.5 * smoothstep($GLASS_POLAR_MID, $GLASS_POLAR_LIGHT_END, envLum);
+    // 3c. no intrinsic colour: the fixed tint is gone, so lift the transmitted
+    //     colour's saturation by a hair (luma preserving, <= 6%) to keep the
+    //     glass from reading grey. LENS_SATURATE = 0 disables it.
+    col = mix(col, float3(envLum), -$LENS_SATURATE);
+    // 3d. the edge tint flips with the material. The bright line keeps the
+    //     3.26.62 background-hue adaptation; the dark line is a fixed ink on
+    //     purpose - tinting a dark line with the backdrop hue reads as dirt.
     float3 envTint = clamp(col / max(envLum, 0.12), 0.35, 2.2);
-    float3 rimTint = mix(float3(1.0), envTint, $LENS_RIM_TINT);
+    float3 brightTint = mix(float3($GLASS_POLAR_DARK_EDGE_R, $GLASS_POLAR_DARK_EDGE_G, $GLASS_POLAR_DARK_EDGE_B), envTint, $LENS_RIM_TINT);
+    float3 inkTint = float3($GLASS_POLAR_LIGHT_EDGE_R, $GLASS_POLAR_LIGHT_EDGE_G, $GLASS_POLAR_LIGHT_EDGE_B);
     float rimGain = $LENS_RIM_GAIN_BASE + $LENS_RIM_GAIN * smoothstep($LENS_RIM_ENV_LO, $LENS_RIM_ENV_HI, envLum);
+    // 3e. inner shade just inside the rim: deeper on the dark material (it seats
+    //     the bright edge), almost gone on the light one (a dark halo on paper
+    //     reads as dirt). Shade first, highlights after.
+    float shade = mix($GLASS_POLAR_DARK_SHADOW, $GLASS_POLAR_LIGHT_SHADOW, polar);
+    col *= 1.0 - shade * (1.0 - smoothstep(0.0, 0.60, t));
 
     // 5. Fresnel (Schlick, F0 = 0.04) + key specular + opposite fill light.
     float nz = clamp(n.z, 0.0, 1.0);
@@ -480,7 +535,11 @@ half4 main(float2 coord) {
     float specS = 0.48 * pow(max(dot(n, Hs), 0.0), 20.0);
     float rimMask = 1.0 - smoothstep(0.05, 0.92, t);
     float highlight = (F * 0.62 + specP + specS) * rimMask * edgeK;
-    col += rimTint * min(highlight * rimGain, 1.2) * 0.62;
+    // Bright edge (dark material), dimmed as the material turns light so the ink
+    // line below can carry the contrast instead of stacking white on white.
+    col += brightTint * min(highlight * rimGain, 1.2) * $GLASS_POLAR_DARK_EDGE_K * (1.0 - 0.55 * polar);
+    // Dark contrast edge (light material): warm ink line fading in with polar.
+    col = mix(col, inkTint, clamp(min(highlight * $GLASS_POLAR_LIGHT_EDGE_K, 1.0) * polar, 0.0, 1.0));
 
     // 6. equator line: one bright hairline just inside the upper bevel.
     //    Nothing dark is painted at the top edge any more: the old dark-top
@@ -488,14 +547,18 @@ half4 main(float2 coord) {
     //    is pinned at a fixed ny (a few dp under the top edge, independent of
     //    the bevel ratio) instead of tracking b0, so a bevel change cannot move
     //    it. Width is a narrow Gaussian (~1px); its strength keeps the
-    //    edgeStrength boost like the Fresnel rim, and it follows the same
-    //    background gain / tint as the rim. No extra veil multiply: the paper
+    //    edgeStrength boost like the Fresnel rim. It also follows the same
+    //    polarity as the rim: on a bright backdrop the bright hairline is dimmed
+    //    and a thin ink line fades in, so the light material does not get a
+    //    white seam cut through the page. No extra veil multiply: the paper
     //    veil layer already damps it, a second one would erase the ring.
     float ny = -p.y / max(b.y, 1.0);
     float eq = (ny - 0.89) / 0.022;
     float equator = exp(-eq * eq);
     float3 eqTint = mix(float3(0.78, 0.82, 0.90), envTint, 0.18);
-    col += eqTint * equator * 0.42 * edgeK * rimGain * (1.0 - 0.72 * veil);
+    float eqAmt = equator * 0.42 * edgeK * rimGain * (1.0 - 0.72 * veil);
+    col += eqTint * eqAmt * (1.0 - 0.55 * polar);
+    col = mix(col, inkTint, clamp(eqAmt * 0.45 * polar, 0.0, 1.0));
 
     return half4(
         clamp(col.r, 0.0, 1.0),

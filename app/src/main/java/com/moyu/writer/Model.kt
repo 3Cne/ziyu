@@ -353,8 +353,19 @@ data class AppSettings(
     val glassRim: Float = .55f,
     /** 色散开关（AGSL 的 R/B 分离）。 */
     val glassDisperse: Boolean = true,
-    /** 纸色覆盖 0..1（沿用 tabBarOpacity 的语义，默认 .84）。 */
-    val glassVeil: Float = .84f,
+    /**
+     * 纸色覆盖 0..1（沿用 tabBarOpacity 的语义：0 = 纯玻璃，1 = 几乎实心纸条）。
+     * 3.26.62：默认 .84 → .30（「降纸色罩 + 加真模糊」）；3.26.61 已把 .84 作为默认
+     * 发给用户，[decodeSettings] 里有一条一次性迁移把旧默认读成新默认。
+     */
+    val glassVeil: Float = .30f,
+    /**
+     * 3.26.62：glassVeil 一次性迁移的落盘标记。
+     * 缺省 false；[decodeSettings] 解码后一律置 true。它真正的作用是「文件里有没有
+     * 这个键」——3.26.61 写的文件没有它，就是需要迁移的旧默认；有它就绝不再迁移，
+     * 所以作者之后自己把纸色罩调回 84% 不会被改第二次。
+     */
+    val glassVeilMigrated: Boolean = false,
     val tabNames: List<String> = listOf("书架", "笔记", "数据", "问书", "设置"),
     /** 被关掉的底部页面 key：library / notes / stats / ai。设置页永远显示。 */
     val hiddenTabs: List<String> = listOf("stats"),
@@ -1509,6 +1520,7 @@ private fun encodeSettings(s: AppSettings): JSONObject = JSONObject().apply {
     put("glassRefract", s.glassRefract.toDouble()); put("glassMeniscus", s.glassMeniscus.toDouble())
     put("glassEdgeBlur", s.glassEdgeBlur.toDouble()); put("glassRim", s.glassRim.toDouble())
     put("glassDisperse", s.glassDisperse); put("glassVeil", s.glassVeil.toDouble())
+    put("glassVeilMigrated", s.glassVeilMigrated)
     put("tabNames", JSONArray(s.tabNames))
     put("hiddenTabs", JSONArray(s.hiddenTabs))
     put("dailyGoal", s.dailyGoal); put("indent", s.indent)
@@ -1568,11 +1580,33 @@ private fun decodeStringList(o: JSONObject?, key: String): List<String> {
     return out
 }
 
+/**
+ * 3.26.61 发给用户的 glassVeil 旧默认。只在 [decodeSettings] 的一次性迁移里用；
+ * 新默认仍由 `AppSettings.glassVeil`（.30f）单源给出，这里不重复写。
+ */
+private const val LEGACY_GLASS_VEIL = .84f
+
 private fun decodeSettings(o: JSONObject?): AppSettings {
     // 3.26.53：兜底值统一取自 AppSettings 的默认。3.26.52 把默认外观换成用户真机那套之后，
     // 这里还是旧字面量（paper / 0xFF22221E / serif / tabBlur=8 …），极老备份缺字段会落回旧外观。
     // 只换兜底，解码逻辑与字段名不变。
     val d = AppSettings()
+    // 3.26.62：glassVeil 默认 .84 → .30（降纸色罩 + 加真模糊）。3.26.61 已经把 .84 当
+    // 默认值写进用户设备，升级后要先把「旧默认」一次性读成新默认，否则老用户看不见
+    // 这次改动。判据三件：文件里有 glassVeil、没有 glassVeilMigrated 键（3.26.61 写的
+    // 文件没有这个键）、值恰好是旧默认 .84。只迁一次——解码后 glassVeilMigrated 一律
+    // 置 true 并落盘，之后作者自己把纸色罩调回 84% 不会再被改。
+    // 代价：3.26.61 里恰好手动调成 84% 的作者也会被这一次迁移改到 30%；旧默认与手动
+    // 值都是 .84，没有更多信息可区分，这是「只迁一次」能接受的最小代价。
+    val legacyVeil = o != null &&
+        o.has("glassVeil") &&
+        !o.has("glassVeilMigrated") &&
+        o.optDouble("glassVeil", d.glassVeil.toDouble()).toFloat() == LEGACY_GLASS_VEIL
+    val veil = if (legacyVeil) {
+        d.glassVeil
+    } else {
+        (o?.optDouble("glassVeil", d.glassVeil.toDouble()) ?: d.glassVeil.toDouble()).toFloat()
+    }
     return AppSettings(
         theme = o?.optString("theme", d.theme) ?: d.theme,
         accent = o?.optLong("accent", d.accent) ?: d.accent,
@@ -1611,7 +1645,10 @@ private fun decodeSettings(o: JSONObject?): AppSettings {
         glassEdgeBlur = (o?.optDouble("glassEdgeBlur", d.glassEdgeBlur.toDouble()) ?: d.glassEdgeBlur.toDouble()).toFloat().coerceIn(0f, 1f),
         glassRim = (o?.optDouble("glassRim", d.glassRim.toDouble()) ?: d.glassRim.toDouble()).toFloat().coerceIn(0f, 1f),
         glassDisperse = o?.optBoolean("glassDisperse", d.glassDisperse) ?: d.glassDisperse,
-        glassVeil = (o?.optDouble("glassVeil", d.glassVeil.toDouble()) ?: d.glassVeil.toDouble()).toFloat().coerceIn(0f, 1f),
+        glassVeil = veil.coerceIn(0f, 1f),
+        // 解码后一律 true：迁移只可能发生一次，下次落盘会把 glassVeilMigrated 键
+        // 写进文件；3.26.61 的旧文件（无此键）因此只会被迁一次。
+        glassVeilMigrated = true,
         tabNames = o?.optJSONArray("tabNames")?.let { a -> (0 until a.length()).map { a.optString(it) } }
             ?: d.tabNames,
         hiddenTabs = o?.optJSONArray("hiddenTabs")
