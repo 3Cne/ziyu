@@ -30,10 +30,11 @@ import com.kyant.backdrop.backdrops.layerBackdrop
 import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 
 /**
- * 设置 → 玻璃：五个分组共用同一块 110dp 纸面、同一条 liquidGlassBar 路径。
+ * 设置 → 玻璃：三个分组共用同一块 110dp 纸面、同一条 liquidGlassBar 路径。
  *
- * 以前标签栏/镜片走一张图、输入框/按钮走另一张图，宽度和画法都不一样，滑杆
- * 动一下看到的不是同一套东西。现在只换中间那颗控件，底和宽度始终一致。
+ * 只换中间那颗控件，底和宽度始终一致，滑杆动一下看到的就是同一套东西。
+ * 3.26.66 起输入框 / 按钮表面不再用玻璃，对应预览档随之删除，只剩
+ * 标签栏 / 镜片 / 通知三档。
  *
  * 3.26.66：弯折宽度 / 边缘压缩是全局设置，`liquidGlassBar` 内部统一读
  * `AppSettings.glassBend` / `glassSqueeze` 再进 `glassLensBand`——预览和真表面
@@ -74,7 +75,7 @@ internal fun GlassLivePreview(group: Int, s: AppSettings) {
                 Spacer(Modifier.height(9.dp))
             }
         }
-        // 3.26.49：五档（标签栏 / 镜片 / 输入框 / 按钮 / 通知）切换不再硬切：
+        // 3.26.49：三档（标签栏 / 镜片 / 通知）切换不再硬切：
         // 淡入 + 从 97% 轻微放大 180ms；过渡中两块玻璃采样同一层静态纸面，模糊不会闪。
         AnimatedContent(
             targetState = group,
@@ -140,52 +141,6 @@ internal fun GlassLivePreview(group: Int, s: AppSettings) {
                         contentAlignment = Alignment.Center,
                     ) {
                         LineIcon(Glyph.Book, p.ink, 16.dp)
-                    }
-                }
-
-                2 -> Box(
-                    Modifier
-                        .padding(horizontal = 24.dp)
-                        .fillMaxWidth()
-                        .height(48.dp)
-                        .liquidGlassBar(
-                            backdrop = backdrop,
-                            shape = SmoothCorner(22.dp),
-                            palette = p,
-                            blurDp = s.fieldGlassBlur,
-                            refractionDp = s.fieldGlassRefraction,
-                            dispersion = s.fieldGlassDispersion,
-                            shadowAlpha = s.fieldGlassShadow,
-                            veil = s.fieldGlassOpacity,
-                            edgeStrength = s.fieldGlassEdge,
-                        ),
-                    contentAlignment = Alignment.CenterStart,
-                ) {
-                    Box(Modifier.padding(horizontal = 14.dp)) {
-                        Txt("问这本书的任何事", size = 12.5f, color = p.muted)
-                    }
-                }
-
-                3 -> Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    listOf(Glyph.Link, Glyph.ArrowUp).forEach { glyph ->
-                        Box(
-                            Modifier
-                                .size(46.dp)
-                                .liquidGlassBar(
-                                    backdrop = backdrop,
-                                    shape = CircleShape,
-                                    palette = p,
-                                    blurDp = s.btnGlassBlur,
-                                    refractionDp = s.btnGlassRefraction,
-                                    dispersion = s.btnGlassDispersion,
-                                    shadowAlpha = s.btnGlassShadow,
-                                    veil = s.btnGlassOpacity,
-                                    edgeStrength = s.btnGlassEdge,
-                                ),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            LineIcon(glyph, p.ink, 18.dp)
-                        }
                     }
                 }
 

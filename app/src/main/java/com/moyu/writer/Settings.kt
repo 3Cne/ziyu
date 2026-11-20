@@ -1809,9 +1809,12 @@ private fun DispersionRow(on: Boolean, onChange: (Boolean) -> Unit) {
 }
 
 /**
- * All four glass surfaces on one page: 标签栏 / 镜片 / 输入框 / 按钮.
+ * The three glass surfaces still in use on one page: 标签栏 / 镜片 / 通知.
  * They used to live in two places (外观 and 问书), which made "tune the glass"
  * a hunt; one page, one preview, one set of rows.
+ *
+ * 3.26.66：输入框 / 按钮表面已不再用玻璃，这两组的 tab 与滑杆整组删除；
+ * `field*` / `btn*` 字段保留在 AppSettings 里只为兼容旧备份，没有 UI。
  */
 @Composable
 private fun GlassSettingsPage(store: AppStore, onBack: () -> Unit) {
@@ -1823,7 +1826,7 @@ private fun GlassSettingsPage(store: AppStore, onBack: () -> Unit) {
     // so a continuous drag never let a single snapshot through.
     SettingsPage("玻璃", "", onBack) {
         // 3.26.66：弯折宽度 / 边缘压缩是**全局**参数（乘到所有玻璃表面的折射带），
-        // 不属于五个表面分组，所以放在切换器之前单独一节；切换器与下方六行不动。
+        // 不属于三个表面分组，所以放在切换器之前单独一节；切换器与下方六行不动。
         item { SectionCaption("弯折") }
         item {
             SettingGroup {
@@ -1846,7 +1849,7 @@ private fun GlassSettingsPage(store: AppStore, onBack: () -> Unit) {
         }
         item {
             Segmented(
-                listOf("标签栏", "镜片", "输入框", "按钮", "通知"),
+                listOf("标签栏", "镜片", "通知"),
                 group,
                 { group = it },
                 androidx.compose.ui.Modifier.fillMaxWidth(),
@@ -1865,7 +1868,7 @@ private fun GlassSettingsPage(store: AppStore, onBack: () -> Unit) {
             }
         }
         item {
-            // The four groups slide by their relative position, like the root
+            // The three groups slide by their relative position, like the root
             // tabs and the 对话/记忆 switch; the knobs travel together.
             AnimatedContent(
                 targetState = group,
@@ -1897,24 +1900,6 @@ private fun GlassSettingsPage(store: AppStore, onBack: () -> Unit) {
                             dispersion = s.lensDispersion, onDispersion = { v -> store.updateSettings { it.copy(lensDispersion = v) } },
                             opacityLabel = "镜片不透明度",
                         )
-                        2 -> GlassKnobs(
-                            blur = s.fieldGlassBlur, onBlur = { v -> store.updateSettings { it.copy(fieldGlassBlur = v) } },
-                            refraction = s.fieldGlassRefraction, onRefraction = { v -> store.updateSettings { it.copy(fieldGlassRefraction = v) } },
-                            shadow = s.fieldGlassShadow, onShadow = { v -> store.updateSettings { it.copy(fieldGlassShadow = v) } },
-                            opacity = s.fieldGlassOpacity, onOpacity = { v -> store.updateSettings { it.copy(fieldGlassOpacity = v) } },
-                            edge = s.fieldGlassEdge, onEdge = { v -> store.updateSettings { it.copy(fieldGlassEdge = v) } },
-                            dispersion = s.fieldGlassDispersion, onDispersion = { v -> store.updateSettings { it.copy(fieldGlassDispersion = v) } },
-                            opacityLabel = "输入框不透明度",
-                        )
-                        3 -> GlassKnobs(
-                            blur = s.btnGlassBlur, onBlur = { v -> store.updateSettings { it.copy(btnGlassBlur = v) } },
-                            refraction = s.btnGlassRefraction, onRefraction = { v -> store.updateSettings { it.copy(btnGlassRefraction = v) } },
-                            shadow = s.btnGlassShadow, onShadow = { v -> store.updateSettings { it.copy(btnGlassShadow = v) } },
-                            opacity = s.btnGlassOpacity, onOpacity = { v -> store.updateSettings { it.copy(btnGlassOpacity = v) } },
-                            edge = s.btnGlassEdge, onEdge = { v -> store.updateSettings { it.copy(btnGlassEdge = v) } },
-                            dispersion = s.btnGlassDispersion, onDispersion = { v -> store.updateSettings { it.copy(btnGlassDispersion = v) } },
-                            opacityLabel = "按钮不透明度",
-                        )
                         else -> GlassKnobs(
                             blur = s.bubbleGlassBlur, onBlur = { v -> store.updateSettings { it.copy(bubbleGlassBlur = v) } },
                             refraction = s.bubbleGlassRefraction, onRefraction = { v -> store.updateSettings { it.copy(bubbleGlassRefraction = v) } },
@@ -1931,7 +1916,7 @@ private fun GlassSettingsPage(store: AppStore, onBack: () -> Unit) {
     }
 }
 
-/** The same six rows for every group, so the four tabs cannot drift apart. */
+/** The same six rows for every group, so the three tabs cannot drift apart. */
 @Composable
 private fun GlassKnobs(
     blur: Float, onBlur: (Float) -> Unit,
