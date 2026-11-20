@@ -34,6 +34,11 @@ import com.kyant.backdrop.backdrops.rememberLayerBackdrop
  *
  * 以前标签栏/镜片走一张图、输入框/按钮走另一张图，宽度和画法都不一样，滑杆
  * 动一下看到的不是同一套东西。现在只换中间那颗控件，底和宽度始终一致。
+ *
+ * 3.26.61：标签栏与镜片是同一套材质（六项设置经 [glassMaterial] 一处换算），
+ * 所以两个分组的预览喂同一组值；形状用 RoundedCornerShape 而不是
+ * SmoothCornerShape——AGSL 厚度场只接 RoundedCornerShape，用后者预览会退回
+ * Backdrop `lens()`，就又变成「预览一套、真表面一套」。
  */
 @Composable
 internal fun GlassLivePreview(group: Int, s: AppSettings) {
@@ -41,6 +46,7 @@ internal fun GlassLivePreview(group: Int, s: AppSettings) {
     val p = ui.palette
     val motion = ui.settings.motion != "none"
     val backdrop = rememberLayerBackdrop()
+    val glass = s.glassMaterial()
     Box(
         Modifier
             .fillMaxWidth()
@@ -90,14 +96,20 @@ internal fun GlassLivePreview(group: Int, s: AppSettings) {
                         .height(52.dp)
                         .liquidGlassBar(
                             backdrop = backdrop,
-                            shape = SmoothCorner(26.dp),
+                            // RoundedCornerShape：真条是胶囊（CircleShape 也是
+                            // RoundedCornerShape），这样预览才真的走 AGSL 厚度场。
+                            shape = RoundedCornerShape(26.dp),
                             palette = p,
-                            blurDp = s.tabBlur,
-                            refractionDp = s.tabRefraction,
-                            dispersion = s.tabDispersion,
+                            // 新材质没有「整条模糊」项，与真条一致固定 0。
+                            blurDp = 0f,
+                            refractionDp = glass.bevelDp,
+                            dispersion = glass.dispersion,
                             shadowAlpha = s.tabShadow,
-                            veil = s.tabBarOpacity,
-                            edgeStrength = s.tabEdge,
+                            veil = glass.veil,
+                            edgeStrength = glass.rim,
+                            meniscus = glass.meniscus,
+                            rimBlurPx = glass.edgeBlurPx,
+                            rimK = glass.rim,
                         ),
                     horizontalArrangement = Arrangement.SpaceEvenly,
                     verticalAlignment = Alignment.CenterVertically,
@@ -117,20 +129,18 @@ internal fun GlassLivePreview(group: Int, s: AppSettings) {
                             .clip(SmoothCorner(26.dp))
                             .background(p.faint)
                     )
+                    // 真镜片走 GlassBar.glassLens（同一段厚度场代码、同一套六项
+                    // 参数、同一 12dp/6dp 阴影），预览直接调同一个函数，不另画。
                     Box(
                         Modifier
                             .width(84.dp)
                             .height(44.dp)
-                            .liquidGlassBar(
+                            .glassLens(
                                 backdrop = backdrop,
-                                shape = SmoothCorner(22.dp),
+                                shape = RoundedCornerShape(22.dp),
                                 palette = p,
-                                blurDp = s.lensBlur,
-                                refractionDp = s.lensRefraction,
-                                dispersion = s.lensDispersion,
+                                material = glass,
                                 shadowAlpha = s.lensShadow,
-                                veil = s.tabLensOpacity,
-                                edgeStrength = s.lensEdge,
                             ),
                         contentAlignment = Alignment.Center,
                     ) {

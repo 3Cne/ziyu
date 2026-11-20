@@ -338,6 +338,23 @@ data class AppSettings(
     val lensBlur: Float = 0f,
     val lensDispersion: Boolean = true,
     val lensShadow: Float = .28f,
+    // ── 3.26.61：玻璃（TabBar 整块玻璃；条与选中镜片同源，只有这一组）────────
+    // 上面 tabBlur/tabRefraction/tabEdge/tabDispersion/tabBarOpacity 与整组镜片
+    // 字段只保留解码容错（旧备份能读、不报错），不再被新 UI 写、也不再被 shader 读。
+    // 默认值只写在数据类这一处：decodeSettings 缺字段兜底与 withDefaultAppearance()
+    // 都从 AppSettings() 派生（3.26.52 三处各写一份默认值漂移的教训）。
+    /** 折射强度 0..1 → 曲面边 bevel = 2 + 16 × 值（约 2–18dp）。 */
+    val glassRefract: Float = .55f,
+    /** 凹面厚度 0..1：1 = 凹月牙，0 = 平的凸面（AGSL 的 `meniscus`）。 */
+    val glassMeniscus: Float = 1f,
+    /** 边缘模糊 0..1 → rim 额外模糊 8 × 值 px（0–8px）。 */
+    val glassEdgeBlur: Float = .5f,
+    /** 亮环强度 0..1 → AGSL 的 `edgeK`（0 无亮环，1 全亮）。 */
+    val glassRim: Float = .55f,
+    /** 色散开关（AGSL 的 R/B 分离）。 */
+    val glassDisperse: Boolean = true,
+    /** 纸色覆盖 0..1（沿用 tabBarOpacity 的语义，默认 .84）。 */
+    val glassVeil: Float = .84f,
     val tabNames: List<String> = listOf("书架", "笔记", "数据", "问书", "设置"),
     /** 被关掉的底部页面 key：library / notes / stats / ai。设置页永远显示。 */
     val hiddenTabs: List<String> = listOf("stats"),
@@ -479,6 +496,12 @@ fun AppSettings.withDefaultAppearance(): AppSettings {
         lensBlur = d.lensBlur,
         lensDispersion = d.lensDispersion,
         lensShadow = d.lensShadow,
+        glassRefract = d.glassRefract,
+        glassMeniscus = d.glassMeniscus,
+        glassEdgeBlur = d.glassEdgeBlur,
+        glassRim = d.glassRim,
+        glassDisperse = d.glassDisperse,
+        glassVeil = d.glassVeil,
         sectionStyle = d.sectionStyle,
         sectionSymbol = d.sectionSymbol,
         paperStyle = d.paperStyle,
@@ -1118,6 +1141,11 @@ class AppStore(context: Context) {
             aiMemoryLimit = settings.aiMemoryLimit.coerceIn(20, 500),
             aiWebMax = settings.aiWebMax.coerceIn(1, 5),
             aiWriteMode = settings.aiWriteMode.coerceIn(0, 2),
+            glassRefract = settings.glassRefract.coerceIn(0f, 1f),
+            glassMeniscus = settings.glassMeniscus.coerceIn(0f, 1f),
+            glassEdgeBlur = settings.glassEdgeBlur.coerceIn(0f, 1f),
+            glassRim = settings.glassRim.coerceIn(0f, 1f),
+            glassVeil = settings.glassVeil.coerceIn(0f, 1f),
             fieldGlassOpacity = settings.fieldGlassOpacity.coerceIn(0f, 1f),
             fieldGlassBlur = settings.fieldGlassBlur.coerceIn(0f, 40f),
             fieldGlassEdge = settings.fieldGlassEdge.coerceIn(0f, 2f),
@@ -1478,6 +1506,9 @@ private fun encodeSettings(s: AppSettings): JSONObject = JSONObject().apply {
     put("lensRefraction", s.lensRefraction.toDouble()); put("lensDispersion", s.lensDispersion)
     put("lensBlur", s.lensBlur.toDouble())
     put("lensShadow", s.lensShadow.toDouble())
+    put("glassRefract", s.glassRefract.toDouble()); put("glassMeniscus", s.glassMeniscus.toDouble())
+    put("glassEdgeBlur", s.glassEdgeBlur.toDouble()); put("glassRim", s.glassRim.toDouble())
+    put("glassDisperse", s.glassDisperse); put("glassVeil", s.glassVeil.toDouble())
     put("tabNames", JSONArray(s.tabNames))
     put("hiddenTabs", JSONArray(s.hiddenTabs))
     put("dailyGoal", s.dailyGoal); put("indent", s.indent)
@@ -1573,6 +1604,14 @@ private fun decodeSettings(o: JSONObject?): AppSettings {
         lensBlur = (o?.optDouble("lensBlur", d.lensBlur.toDouble()) ?: d.lensBlur.toDouble()).toFloat(),
         lensDispersion = o?.optBoolean("lensDispersion", d.lensDispersion) ?: d.lensDispersion,
         lensShadow = (o?.optDouble("lensShadow", d.lensShadow.toDouble()) ?: d.lensShadow.toDouble()).toFloat(),
+        // 3.26.61 玻璃六项：旧备份没有这些键 → 落到 AppSettings 的默认（不迁移旧
+        // tab*/lens* 的值）；显式值一律夹进 0..1，坏数据不会让滑杆读数越界。
+        glassRefract = (o?.optDouble("glassRefract", d.glassRefract.toDouble()) ?: d.glassRefract.toDouble()).toFloat().coerceIn(0f, 1f),
+        glassMeniscus = (o?.optDouble("glassMeniscus", d.glassMeniscus.toDouble()) ?: d.glassMeniscus.toDouble()).toFloat().coerceIn(0f, 1f),
+        glassEdgeBlur = (o?.optDouble("glassEdgeBlur", d.glassEdgeBlur.toDouble()) ?: d.glassEdgeBlur.toDouble()).toFloat().coerceIn(0f, 1f),
+        glassRim = (o?.optDouble("glassRim", d.glassRim.toDouble()) ?: d.glassRim.toDouble()).toFloat().coerceIn(0f, 1f),
+        glassDisperse = o?.optBoolean("glassDisperse", d.glassDisperse) ?: d.glassDisperse,
+        glassVeil = (o?.optDouble("glassVeil", d.glassVeil.toDouble()) ?: d.glassVeil.toDouble()).toFloat().coerceIn(0f, 1f),
         tabNames = o?.optJSONArray("tabNames")?.let { a -> (0 until a.length()).map { a.optString(it) } }
             ?: d.tabNames,
         hiddenTabs = o?.optJSONArray("hiddenTabs")

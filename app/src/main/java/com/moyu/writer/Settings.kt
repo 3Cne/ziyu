@@ -22,15 +22,6 @@ import androidx.compose.animation.slideOutVertically
 import kotlinx.coroutines.delay
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import android.os.Build
-import com.kyant.backdrop.backdrops.layerBackdrop
-import com.kyant.backdrop.backdrops.rememberLayerBackdrop
-import com.kyant.backdrop.drawBackdrop
-import com.kyant.backdrop.effects.blur
-import com.kyant.backdrop.effects.lens
-import com.kyant.backdrop.effects.vibrancy
-import com.kyant.backdrop.shadow.InnerShadow
-import com.kyant.backdrop.shadow.Shadow
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -397,7 +388,10 @@ private fun AppearancePage(store: AppStore, onBack: () -> Unit, onOpen: (String)
     // being changed. A pinned card stole a fixed slice of the page forever and
     // an inline one was pushed off screen exactly when the low sliders were
     // being tuned.
-    var preview by remember { mutableStateOf(0) } // 0 none, 1 text, 2 glass
+    // 3.26.61：玻璃设置整组重做后，外观页那张「玻璃预览」卡没有入口再能触发
+    // （唯一会置 2 的旧玻璃滑杆已移走），连同它读的旧 tab*/lens* 字段一起删除；
+    // 实时预览现在只在 设置 → 玻璃 页里（与真表面同源）。
+    var preview by remember { mutableStateOf(0) } // 0 none, 1 text
     LaunchedEffect(preview) {
         if (preview != 0) {
             delay(1700)
@@ -408,36 +402,14 @@ private fun AppearancePage(store: AppStore, onBack: () -> Unit, onOpen: (String)
         "外观",
         "主题、点缀色和字体。",
         onBack,
-        // One AnimatedVisibility per card, each with fixed content: a single
-        // container whose child depended on `preview` swapped to the text card
-        // the moment the value reset to 0, so the text card popped in while the
-        // glass card was still fading out. It sits inside the page column, right
-        // under the header, so it cannot leave a gap above it.
+        // Each card keeps fixed content: a single container whose child depended
+        // on `preview` swapped cards the moment the value reset to 0, so the text
+        // card popped in while the old card was still fading out. It sits inside
+        // the page column, right under the header, so it cannot leave a gap.
         floatingBelowHeader = {
             val floatModifier = androidx.compose.ui.Modifier
                 .align(Alignment.TopCenter)
                 .padding(horizontal = 20.dp)
-            AnimatedVisibility(
-                visible = preview == 2,
-                modifier = floatModifier,
-                enter = fadeIn(tween(120)) + slideInVertically(tween(160)) { -it / 4 },
-                exit = fadeOut(tween(180)) + slideOutVertically(tween(160)) { -it / 4 },
-            ) {
-                GlassPreview(
-                    barBlur = s.tabBlur,
-                    barRefraction = s.tabRefraction,
-                    barDispersion = s.tabDispersion,
-                    barShadow = s.tabShadow,
-                    barVeil = s.tabBarOpacity,
-                    lensBlur = s.lensBlur,
-                    lensRefraction = s.lensRefraction,
-                    lensDispersion = s.lensDispersion,
-                    lensShadow = s.lensShadow,
-                    lensVeil = s.tabLensOpacity,
-                    barEdge = s.tabEdge,
-                    lensEdge = s.lensEdge,
-                )
-            }
             AnimatedVisibility(
                 visible = preview == 1,
                 modifier = floatModifier,
@@ -619,130 +591,6 @@ private fun AppearancePreview() {
                         .padding(horizontal = 13.dp, vertical = 8.dp)
                 ) { Txt("换个色调", size = 9f, color = ui.accent, weight = FontWeight.Medium) }
             }
-        }
-    }
-}
-
-/**
- * Live preview for the glass knobs: a sample page slice with the real
- * liquidGlassBar() drawn over it, driven by the same values the TabBar reads.
- */
-@Composable
-private fun GlassPreview(
-    barBlur: Float,
-    barRefraction: Float,
-    barDispersion: Boolean,
-    barShadow: Float,
-    barVeil: Float,
-    lensBlur: Float,
-    lensRefraction: Float,
-    lensDispersion: Boolean,
-    lensShadow: Float,
-    lensVeil: Float,
-    barEdge: Float = 1f,
-    lensEdge: Float = 1f,
-    showBar: Boolean = true,
-    showLens: Boolean = true,
-) {
-    val ui = LocalInk.current
-    val p = ui.palette
-    val backdrop = rememberLayerBackdrop()
-    val shape = SmoothCorner(50)
-    val lensTint = if (p.isDark) Color.White.copy(alpha = .08f) else p.ink.copy(alpha = .08f)
-    val lensPaper = p.paper.copy(alpha = lensVeil.coerceIn(0f, 1f) * .94f)
-    val lensSurface: Modifier = (
-        if (backdrop != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            Modifier.drawBackdrop(
-                backdrop = backdrop,
-                shape = { shape },
-                effects = {
-                    vibrancy()
-                    if (lensBlur > 0f) blur(lensBlur.dp.toPx())
-                    if (lensRefraction > 0f) {
-                        lens(
-                            refractionHeight = lensRefraction.dp.toPx(),
-                            refractionAmount = (lensRefraction * 1.2f).dp.toPx(),
-                            depthEffect = true,
-                            chromaticAberration = lensDispersion,
-                        )
-                    }
-                },
-                highlight = null,
-                shadow = { Shadow(radius = 12.dp, alpha = lensShadow) },
-                innerShadow = { InnerShadow(radius = 6.dp, alpha = lensShadow + .07f) },
-                onDrawSurface = {
-                    drawRect(lensTint)
-                    if (lensVeil > 0f) drawRect(lensPaper)
-                    glassEdgeBand(shape, p, lensEdge)
-                },
-            )
-        } else {
-            Modifier.clip(shape).background(p.paper.copy(alpha = .94f))
-        }
-        ).border(
-        .5.dp,
-        if (p.isDark) Color.White.copy(alpha = .06f) else p.ink.copy(alpha = .05f),
-        shape,
-    )
-    Box(
-        Modifier
-            .fillMaxWidth()
-            .height(80.dp)
-            .clip(SmoothCorner(18.dp)),
-        contentAlignment = Alignment.Center,
-    ) {
-        Column(
-            Modifier
-                .fillMaxSize()
-                .layerBackdrop(backdrop)
-                .background(p.paper)
-                .padding(horizontal = 18.dp),
-            verticalArrangement = Arrangement.Center,
-        ) {
-            repeat(3) { i ->
-                Box(
-                    Modifier
-                        .fillMaxWidth(if (i == 2) .55f else 1f)
-                        .height(6.dp)
-                        .background(p.ink.copy(alpha = .34f), SmoothCorner(3.dp)),
-                )
-                Spacer(androidx.compose.ui.Modifier.height(9.dp))
-            }
-        }
-        if (showBar) {
-            Box(
-                Modifier
-                    .width(210.dp)
-                    .height(44.dp)
-                    .liquidGlassBar(
-                        backdrop = backdrop,
-                        shape = shape,
-                        palette = p,
-                        blurDp = barBlur,
-                        refractionDp = barRefraction,
-                        dispersion = barDispersion,
-                        shadowAlpha = barShadow,
-                        veil = barVeil,
-                        edgeStrength = barEdge,
-                    ),
-                contentAlignment = Alignment.Center,
-            ) {
-                if (showLens) {
-                    Box(
-                        Modifier
-                            .width(58.dp)
-                            .height(34.dp)
-                            .then(lensSurface),
-                    )
-                }
-            }
-        } else if (showLens) {
-            Box(
-                Modifier
-                    .width(124.dp)
-                    .height(34.dp)
-                    .then(lensSurface),
-            )
         }
     }
 }
@@ -1918,21 +1766,30 @@ private fun AiSettingsPage(store: AppStore, onBack: () -> Unit, onOpen: (String)
         )
     }
 }
-/** A named slider with its live value and a one-line explanation. Used by the
- *  问书 glass section so three knobs do not need three bespoke rows. */
+/** A named slider with its live value and an optional one-line hint. Used by the
+ *  glass section so the knobs do not need bespoke rows.
+ *
+ *  [hint] 只写「这个百分比换算成什么物理量」（如「约 2–18dp」）——会随值变的
+ *  语义才写；没有换算的滑杆不写小标签字。 */
 @Composable
 private fun GlassSliderRow(
     title: String,
     value: Float,
     min: Float,
     max: Float,
+    hint: String? = null,
     onChange: (Float) -> Unit,
 ) {
     val ui = LocalInk.current
     Column(androidx.compose.ui.Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
         androidx.compose.foundation.layout.Row(verticalAlignment = Alignment.CenterVertically) {
-            Txt(title, size = 12.5f)
-            Spacer(androidx.compose.ui.Modifier.weight(1f))
+            Column(androidx.compose.ui.Modifier.weight(1f)) {
+                Txt(title, size = 12.5f)
+                if (hint != null) {
+                    Spacer(androidx.compose.ui.Modifier.height(2.dp))
+                    Txt(hint, size = 9.5f, color = ui.palette.muted)
+                }
+            }
             Txt(
                 if (max <= 2f) "${(value * 100).roundToInt()}%" else "${value.roundToInt()}",
                 size = 12f,
@@ -1965,9 +1822,12 @@ private fun DispersionRow(on: Boolean, onChange: (Boolean) -> Unit) {
 }
 
 /**
- * All four glass surfaces on one page: 标签栏 / 镜片 / 输入框 / 按钮.
+ * All glass surfaces on one page: 标签栏 / 镜片 / 输入框 / 按钮 / 通知.
  * They used to live in two places (外观 and 问书), which made "tune the glass"
  * a hunt; one page, one preview, one set of rows.
+ *
+ * 3.26.61：标签栏那组换成整块玻璃的六项（材质重做，条与镜片同源）；镜片组只剩
+ * 它自己的阴影（lensShadow）；输入框 / 按钮 / 通知 仍是问书页自己的玻璃，未动。
  */
 @Composable
 private fun GlassSettingsPage(store: AppStore, onBack: () -> Unit) {
@@ -1999,8 +1859,8 @@ private fun GlassSettingsPage(store: AppStore, onBack: () -> Unit) {
             }
         }
         item {
-            // The four groups slide by their relative position, like the root
-            // tabs and the 对话/记忆 switch; the knobs travel together.
+            // The groups slide by their relative position, like the root tabs and
+            // the 对话/记忆 switch; the knobs travel together.
             AnimatedContent(
                 targetState = group,
                 transitionSpec = {
@@ -2013,24 +1873,21 @@ private fun GlassSettingsPage(store: AppStore, onBack: () -> Unit) {
                 Column {
                     Spacer(androidx.compose.ui.Modifier.height(2.dp))
                     when (g) {
-                        0 -> GlassKnobs(
-                            blur = s.tabBlur, onBlur = { v -> store.updateSettings { it.copy(tabBlur = v) } },
-                            refraction = s.tabRefraction, onRefraction = { v -> store.updateSettings { it.copy(tabRefraction = v) } },
-                            shadow = s.tabShadow, onShadow = { v -> store.updateSettings { it.copy(tabShadow = v) } },
-                            opacity = s.tabBarOpacity, onOpacity = { v -> store.updateSettings { it.copy(tabBarOpacity = v) } },
-                            edge = s.tabEdge, onEdge = { v -> store.updateSettings { it.copy(tabEdge = v) } },
-                            dispersion = s.tabDispersion, onDispersion = { v -> store.updateSettings { it.copy(tabDispersion = v) } },
-                            opacityLabel = "整条不透明度",
+                        // 0 标签栏：3.26.61 整块玻璃的六项（条与镜片同源）。
+                        0 -> TabBarGlassKnobs(
+                            refract = s.glassRefract, onRefract = { v -> store.updateSettings { it.copy(glassRefract = v) } },
+                            meniscus = s.glassMeniscus, onMeniscus = { v -> store.updateSettings { it.copy(glassMeniscus = v) } },
+                            edgeBlur = s.glassEdgeBlur, onEdgeBlur = { v -> store.updateSettings { it.copy(glassEdgeBlur = v) } },
+                            rim = s.glassRim, onRim = { v -> store.updateSettings { it.copy(glassRim = v) } },
+                            veil = s.glassVeil, onVeil = { v -> store.updateSettings { it.copy(glassVeil = v) } },
+                            disperse = s.glassDisperse, onDisperse = { v -> store.updateSettings { it.copy(glassDisperse = v) } },
                         )
-                        1 -> GlassKnobs(
-                            blur = s.lensBlur, onBlur = { v -> store.updateSettings { it.copy(lensBlur = v) } },
-                            refraction = s.lensRefraction, onRefraction = { v -> store.updateSettings { it.copy(lensRefraction = v) } },
-                            shadow = s.lensShadow, onShadow = { v -> store.updateSettings { it.copy(lensShadow = v) } },
-                            opacity = s.tabLensOpacity, onOpacity = { v -> store.updateSettings { it.copy(tabLensOpacity = v) } },
-                            edge = s.lensEdge, onEdge = { v -> store.updateSettings { it.copy(lensEdge = v) } },
-                            dispersion = s.lensDispersion, onDispersion = { v -> store.updateSettings { it.copy(lensDispersion = v) } },
-                            opacityLabel = "镜片不透明度",
-                        )
+                        // 1 镜片：与条同源后只剩阴影可调（5 个材质滑杆已删）。
+                        1 -> SettingGroup {
+                            GlassSliderRow("内外阴影", s.lensShadow, 0f, 1f) { v ->
+                                store.updateSettings { it.copy(lensShadow = v) }
+                            }
+                        }
                         2 -> GlassKnobs(
                             blur = s.fieldGlassBlur, onBlur = { v -> store.updateSettings { it.copy(fieldGlassBlur = v) } },
                             refraction = s.fieldGlassRefraction, onRefraction = { v -> store.updateSettings { it.copy(fieldGlassRefraction = v) } },
@@ -2092,123 +1949,33 @@ private fun GlassKnobs(
 }
 
 /**
- * Live: the real bar + lens, plus the actual input and button glass below.
+ * 3.26.61：TabBar 整块玻璃的六项。条与镜片同源，所以只有这一组；
+ * 顺序 = 折射强度 → 凹面厚度 → 边缘模糊 → 亮环强度 → 纸色覆盖 → 色散（开关最后）。
  *
- * The field and button previews used to be hand-drawn (paper fill + shadow +
- * border). That is not the material the tab runs: the blur went on the PAGE
- * behind the control, and the control itself had no refraction and no
- * dispersion — so three of the six sliders moved nothing. They now take the
- * same `liquidGlassBar` + recorded-layer path as the real input row, which is
- * the only way "tune it here, see it there" can be true.
+ * 每行都写进设置字段、真表面（TabBar 条 + 镜片）和预览同源消费
+ * （换算唯一入口 `GlassMaterial`）。滑块统一 0–100%，副标题只写百分比换算成
+ * 什么物理量（「约 2–18dp」「0–8px」），不写解释性小标签。
  */
 @Composable
-private fun LegacyGlassLivePreview(group: Int, s: AppSettings) {
-    val p = LocalInk.current.palette
-    if (group <= 1) {
-        GlassPreview(
-            barBlur = s.tabBlur,
-            barRefraction = s.tabRefraction,
-            barDispersion = s.tabDispersion,
-            barShadow = s.tabShadow,
-            barVeil = s.tabBarOpacity,
-            lensBlur = s.lensBlur,
-            lensRefraction = s.lensRefraction,
-            lensDispersion = s.lensDispersion,
-            lensShadow = s.lensShadow,
-            lensVeil = s.tabLensOpacity,
-            barEdge = s.tabEdge,
-            lensEdge = s.lensEdge,
-            showBar = group == 0,
-            showLens = group == 1,
-        )
-        return
-    }
-    val button = group == 3
-    val backdrop = rememberLayerBackdrop()
-    val blur = if (button) s.btnGlassBlur else s.fieldGlassBlur
-    val refraction = if (button) s.btnGlassRefraction else s.fieldGlassRefraction
-    val dispersion = if (button) s.btnGlassDispersion else s.fieldGlassDispersion
-    val veil = if (button) s.btnGlassOpacity else s.fieldGlassOpacity
-    val edge = if (button) s.btnGlassEdge else s.fieldGlassEdge
-    val shadow = if (button) s.btnGlassShadow else s.fieldGlassShadow
-    // 玻璃现在也走连续曲率：SmoothCornerShape 继承 CornerBasedShape，
-    // lens 的类型检查能过；四角按圆弧半径算折射，与裁切路径最多差 1–3dp，
-    // 由边缘带盖住。
-    val shape = if (button) CircleShape else SmoothCorner(22.dp)
-    Box(
-        androidx.compose.ui.Modifier
-            .fillMaxWidth()
-            .height(96.dp)
-            .clip(SmoothCorner(18.dp)),
-        contentAlignment = Alignment.Center,
-    ) {
-        // The layer the glass samples: a static paper slice. Nothing here
-        // changes while a slider moves, so the backdrop is recorded once and
-        // only the effects re-run — that is what keeps the drag smooth.
-        Column(
-            androidx.compose.ui.Modifier
-                .fillMaxSize()
-                .layerBackdrop(backdrop)
-                .background(p.paper)
-                .padding(horizontal = 18.dp),
-            verticalArrangement = Arrangement.Center,
-        ) {
-            repeat(3) { i ->
-                Box(
-                    androidx.compose.ui.Modifier
-                        .fillMaxWidth(if (i == 2) .55f else 1f)
-                        .height(6.dp)
-                        .background(p.ink.copy(alpha = .34f), SmoothCorner(3.dp)),
-                )
-                Spacer(androidx.compose.ui.Modifier.height(9.dp))
-            }
-        }
-        if (!button) {
-            Box(
-                androidx.compose.ui.Modifier
-                    .padding(horizontal = 24.dp)
-                    .fillMaxWidth()
-                    .height(48.dp)
-                    .liquidGlassBar(
-                        backdrop = backdrop,
-                        shape = shape,
-                        palette = p,
-                        blurDp = blur,
-                        refractionDp = refraction,
-                        dispersion = dispersion,
-                        shadowAlpha = shadow,
-                        veil = veil,
-                        edgeStrength = edge,
-                    ),
-                contentAlignment = Alignment.CenterStart,
-            ) {
-                Box(androidx.compose.ui.Modifier.padding(horizontal = 14.dp)) {
-                    Txt("问这本书的任何事", size = 12.5f, color = p.muted)
-                }
-            }
-        } else {
-            androidx.compose.foundation.layout.Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                listOf(Glyph.Link, Glyph.ArrowUp).forEach { glyph ->
-                    Box(
-                        androidx.compose.ui.Modifier
-                            .size(46.dp)
-                            .liquidGlassBar(
-                                backdrop = backdrop,
-                                shape = shape,
-                                palette = p,
-                                blurDp = blur,
-                                refractionDp = refraction,
-                                dispersion = dispersion,
-                                shadowAlpha = shadow,
-                                veil = veil,
-                                edgeStrength = edge,
-                            ),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        LineIcon(glyph, p.ink, 18.dp)
-                    }
-                }
-            }
-        }
+private fun TabBarGlassKnobs(
+    refract: Float, onRefract: (Float) -> Unit,
+    meniscus: Float, onMeniscus: (Float) -> Unit,
+    edgeBlur: Float, onEdgeBlur: (Float) -> Unit,
+    rim: Float, onRim: (Float) -> Unit,
+    veil: Float, onVeil: (Float) -> Unit,
+    disperse: Boolean, onDisperse: (Boolean) -> Unit,
+) {
+    SettingGroup {
+        GlassSliderRow("折射强度", refract, 0f, 1f, hint = "约 2–18dp") { onRefract(it) }
+        RowDivider()
+        GlassSliderRow("凹面厚度", meniscus, 0f, 1f) { onMeniscus(it) }
+        RowDivider()
+        GlassSliderRow("边缘模糊", edgeBlur, 0f, 1f, hint = "0–8px") { onEdgeBlur(it) }
+        RowDivider()
+        GlassSliderRow("亮环强度", rim, 0f, 1f) { onRim(it) }
+        RowDivider()
+        GlassSliderRow("纸色覆盖", veil, 0f, 1f) { onVeil(it) }
+        RowDivider()
+        DispersionRow(disperse) { onDisperse(it) }
     }
 }
