@@ -65,60 +65,56 @@ import androidx.compose.runtime.compositionLocalOf/**
  * 「弯折宽度」只进 [glassLensBand]（H），「边缘压缩」只进 [glassLensAmount]（A）——
  * 3.26.66 的 `A = H × squeeze` 会让两个滑杆看起来都只在放大同一件事（用户实测
  * 「弯折宽度和边缘折射效果一样」）。`liquidGlassBar` 不再自己读设置，由调用方
- * 显式传 `bend` / `squeeze`。默认 2.2 / 2.2 与 3.26.66 的观感逐像素一致：A 的基准
- * 改成未乘 bend 的折射值后，squeeze 要从 1.0 重新标定到 2.2 才等于旧式
- * `A = H × 1.0 = 基准 × 2.2`。
+ * 显式传 `bend` / `squeeze`。
+ *
+ * 3.26.67（第二次修正）：两个设置值改成「**占物理上限的百分比**」——设
+ * `cap = 表面最小边 × [GLASS_LENS_MAX_SIDE]`，则 `H = cap × 宽度%`、`A = cap × 压缩%`。
+ * 这样 0%→0、100%→物理上限，滑杆**全程有效、永不饱和**（旧「基准 × 倍率」在
+ * 小表面上会被 cap 提前压住，通知组一半行程是死的）。数据类默认值按
+ * `旧物理量 / cap` 标定，默认观感仍逐像素等于 3.26.66/3.26.67 前一版。
  */
 
-/** 折射带宽上限：不超过表面最小边的这个比例。小芯片（按钮 46dp、通知 36dp）的
- *  折射基准值本来就大（18dp / 15dp），放大后会比自身还大、采样点翻到对侧去
- *  （读成万花筒）。条 56dp：2.2×9.78=21.5dp < 30.8dp 不受影响；46dp 按钮的
- *  18×2.2=39.6dp 会被压到 25.3dp。3.26.66 起倍率可调到 4.0，这道封顶是防
- *  「预览/小表面变万花筒」的关键，预览同样受它约束（同一函数内封顶）。 */
-private const val GLASS_LENS_MAX_SIDE = .55f
+/** 折射物理上限比例：`cap = minSide × 这个值`，H 与 A 的最大值都是它。
+ *  0.55 是防「采样点翻到对侧变万花筒」的实测上限：条 64dp → 35.2dp、
+ *  镜片 56dp → 30.8dp、通知 toast 42dp → 23.1dp。3.26.67 起它不再只是封顶，
+ *  而是滑杆 100% 对应的物理值（设置值本身是该值的百分比）。 */
+internal const val GLASS_LENS_MAX_SIDE = .55f
 
-/** 3.26.67：弯折宽度 / 边缘压缩的量程。数据夹取（Model）、UI 映射（Settings）、
- *  换算（这里）共用一份，避免三处各写一份范围慢慢漂开。 */
-internal const val GLASS_BEND_MIN = 1f
-internal const val GLASS_BEND_MAX = 4f
-internal const val GLASS_SQUEEZE_MIN = .5f
-internal const val GLASS_SQUEEZE_MAX = 4f
+/** 3.26.67：弯折宽度 / 边缘压缩都是「占物理上限的百分比」，取值 0..1。
+ *  数据夹取（Model）与换算（这里）共用一份，避免两处范围漂开。 */
+internal const val GLASS_FRACTION_MIN = 0f
+internal const val GLASS_FRACTION_MAX = 1f
 
 /**
  * 未显式传 `bend` / `squeeze` 的调用点兜底：直接从数据类默认值派生，不另写字面量。
  * 3.26.67 起 [liquidGlassBar] 不再内部读设置（弯折按部件各一套，必须由调用方指定），
- * 默认值只服务「以后新增调用点漏传」这一种情况，取标签栏那对（2.2 / 2.2 = 3.26.66 观感）。
+ * 默认值只服务「以后新增调用点漏传」这一种情况。
  */
 private val GLASS_BEND_FALLBACK: Float = AppSettings().tabBend
 private val GLASS_SQUEEZE_FALLBACK: Float = AppSettings().tabSqueeze
 
-/**
- * 折射带宽度 H（px）的唯一换算入口（标签条 / 选中镜片 / 设置预览共用同一口径）。
- *
- * **只由「弯折宽度」控制**：拖这个滑杆只改带铺多宽，不改折得多狠（位移见
- * [glassLensAmount]）。[bend] 是「设置 → 玻璃 → 对应部件 → 弯折宽度」的倍率；
- * [minSidePx] 传表面最小边，小表面按 [GLASS_LENS_MAX_SIDE] 封顶。
- */
-internal fun glassLensBand(
-    refractionPx: Float,
-    minSidePx: Float,
-    bend: Float = GLASS_BEND_FALLBACK,
-): Float =
-    if (refractionPx <= 0f || minSidePx <= 0f) 0f
-    else (refractionPx * bend).coerceAtMost(minSidePx * GLASS_LENS_MAX_SIDE)
+/** 物理上限（px）：H / A 都先取它，再乘各自的百分比。 */
+internal fun glassLensCapPx(minSidePx: Float): Float =
+    if (minSidePx <= 0f) 0f else minSidePx * GLASS_LENS_MAX_SIDE
 
 /**
- * 最大位移 A（px）的唯一换算入口：**只由「边缘压缩」控制**，与 H 正交（基准取未乘
- * bend 的折射值，所以拖「弯折宽度」不会顺带把边缘内容拉得更狠）。同样按
- * [GLASS_LENS_MAX_SIDE] 封顶——小表面 A 太大会让采样点翻到对侧，读成万花筒。
+ * 折射带宽度 H（px）：**只由「弯折宽度」控制** —— H = 物理上限 × 宽度百分比。
+ * 0% → 0（无弯折带）、100% → 上限，全程单调有效。[fraction] 就是设置里那个 0..1 的值，
+ * [minSidePx] 传表面最小边。
+ */
+internal fun glassLensBand(
+    minSidePx: Float,
+    fraction: Float = GLASS_BEND_FALLBACK,
+): Float = glassLensCapPx(minSidePx) * fraction.coerceIn(GLASS_FRACTION_MIN, GLASS_FRACTION_MAX)
+
+/**
+ * 最大位移 A（px）：**只由「边缘压缩」控制** —— A = 物理上限 × 压缩百分比。
+ * 与 H 完全正交（式子里不出现 bend），同样 0%→0、100%→上限、全程有效。
  */
 internal fun glassLensAmount(
-    refractionPx: Float,
     minSidePx: Float,
-    squeeze: Float = GLASS_SQUEEZE_FALLBACK,
-): Float =
-    if (refractionPx <= 0f || minSidePx <= 0f) 0f
-    else (refractionPx * squeeze).coerceAtMost(minSidePx * GLASS_LENS_MAX_SIDE)
+    fraction: Float = GLASS_SQUEEZE_FALLBACK,
+): Float = glassLensCapPx(minSidePx) * fraction.coerceIn(GLASS_FRACTION_MIN, GLASS_FRACTION_MAX)
 
 @Composable
 internal fun Modifier.liquidGlassBar(
@@ -132,10 +128,12 @@ internal fun Modifier.liquidGlassBar(
     // at a size nobody can see, purely so the draw node records a new frame.
     epoch: Int = 0,
     blurDp: Float = 8f,
+    /** 3.26.67：存量「边缘折射」基准 B 现在只当**启用开关**（>0 才画折射）。
+     *  H / A 已改成「物理上限百分比」，B 不再参与它们的换算。 */
     refractionDp: Float = 30f,
-    /** 3.26.67：弯折宽度倍率（[GLASS_BEND_MIN]–[GLASS_BEND_MAX]），按部件由调用方传。 */
+    /** 3.26.67：弯折宽度 = 物理上限（`minSide × .55`）的百分比，0..1；0%→无弯折带。 */
     bend: Float = GLASS_BEND_FALLBACK,
-    /** 3.26.67：边缘压缩倍率（[GLASS_SQUEEZE_MIN]–[GLASS_SQUEEZE_MAX]），只进 A；同上按部件传。 */
+    /** 3.26.67：边缘压缩 = 物理上限的百分比，0..1；与弯折宽度正交。 */
     squeeze: Float = GLASS_SQUEEZE_FALLBACK,
     dispersion: Boolean = true,
     shadowAlpha: Float = .30f,
@@ -158,9 +156,9 @@ internal fun Modifier.liquidGlassBar(
             .border(.6.dp, palette.ink.copy(alpha = .10f), shape)
     }
     // 3.26.67：弯折宽度 / 边缘压缩按部件各一套，由调用方显式传（真标签栏 / 选中镜片
-    // / 通知各读自己那对）；这里只做量程夹取，不再从 LocalInk 里读一对全局值。
-    val bendNow = bend.coerceIn(GLASS_BEND_MIN, GLASS_BEND_MAX)
-    val squeezeNow = squeeze.coerceIn(GLASS_SQUEEZE_MIN, GLASS_SQUEEZE_MAX)
+    // / 通知各读自己那对）；两者都是「物理上限的百分比」，只在这里夹到 0..1。
+    val bendNow = bend.coerceIn(GLASS_FRACTION_MIN, GLASS_FRACTION_MAX)
+    val squeezeNow = squeeze.coerceIn(GLASS_FRACTION_MIN, GLASS_FRACTION_MAX)
     // High transparency: the page stays visible through the bar. A tenth of
     // the old paper fill, so the glass reads as glass and not as a panel.
     val tint = if (palette.isDark) {
@@ -185,18 +183,20 @@ internal fun Modifier.liquidGlassBar(
                 // 「垂直于最近这条边」拧向「从形状中心指向该点」（两项相加再归一），
                 // 四条边的位移都朝中心收，才读成一块凸透镜；false 时四边各自笔直
                 // 往里挤，中间还留着法线跳变的折痕（只像一圈斜面，不像弯）。
-                // 3.26.67：H 只由 bend、A 只由 squeeze 决定（两条式子互不出现对方的
-                // 参数），所以两个滑杆的观感真正不同：宽度只改带多宽，压缩只改折多狠。
-                val base = refractionDp.dp.toPx()
+                // 3.26.67：H = cap × 宽度%、A = cap × 压缩%（两条式子互不出现对方
+                // 参数），所以两个滑杆真正正交、且 0..100% 全程有效（不再饱和）。
+                // band == 0 时直接不调 lens()：refractionHeight = 0 会让 shader 里
+                // 的圆弧剖面除以 0（旧模型滑杆最小值是 1 倍率，不会出现 0）。
                 val minSide = minOf(size.width, size.height)
-                val band = glassLensBand(base, minSide, bendNow)
-                val amount = glassLensAmount(base, minSide, squeezeNow)
-                lens(
-                    refractionHeight = band,
-                    refractionAmount = amount,
-                    depthEffect = true,
-                    chromaticAberration = dispersion,
-                )
+                val band = glassLensBand(minSide, bendNow)
+                if (band > 0f) {
+                    lens(
+                        refractionHeight = band,
+                        refractionAmount = glassLensAmount(minSide, squeezeNow),
+                        depthEffect = true,
+                        chromaticAberration = dispersion,
+                    )
+                }
             }
         },
         // No outer rim: the outermost glow ring was removed on request. The

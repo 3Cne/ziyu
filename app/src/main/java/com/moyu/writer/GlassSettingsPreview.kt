@@ -39,10 +39,11 @@ import com.kyant.backdrop.backdrops.rememberLayerBackdrop
  * 3.26.66：弯折宽度 / 边缘压缩不再是全局值。3.26.67 起它们**按部件各一套**，三档
  * 预览各用自己那一对（标签栏 tabBend/tabSqueeze、镜片 lensBend/lensSqueeze、通知
  * bubbleBend/bubbleSqueeze），并且 `liquidGlassBar` 不再内部读设置、由调用方显式传。
- * 预览仍与真表面走同一条换算：`glassLensBand`（只吃 bend，进 refractionHeight）+
- * `glassLensAmount`（只吃 squeeze，进 refractionAmount），连 `.55×minSide` 封顶都在
- * 同一函数里，这里不写死数值、也不另拼公式。因此拖动任一滑杆本预览会随重组即时重算。
- * 预览几何比真表面小是既有的（绝对 dp 相同、相对比例不同），不为它改布局。
+ * 两个值都是「占物理上限（`minSide × .55`）的百分比」：`glassLensBand` 只吃 bend
+ * （进 refractionHeight）、`glassLensAmount` 只吃 squeeze（进 refractionAmount），
+ * 0%→0、100%→该预览表面的物理上限，全程有效。预览几何比真表面小是既有的（绝对 dp
+ * 相同、相对比例不同），既不给它改布局，也不另拼公式——本预览就是自己那一档的
+ * 「同一条换算」演示。
  */
 @Composable
 internal fun GlassLivePreview(group: Int, s: AppSettings) {

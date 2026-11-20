@@ -368,18 +368,20 @@ internal fun MoyuTabBar(
                                             // 3.26.65：与条同口径（glassLensBand）——原版把
                                             // 9dp 同时当带宽与位移，镜片上只有一圈窄边；
                                             // 放大后带才铺开，镜片才像一块真透镜。
-                                            // 3.26.67：走按部件拆开的两个换算入口——H 只吃
-                                            // lensBend、A 只吃 lensSqueeze（两条式子互不出现
-                                            // 对方参数）；1.2 是镜片比条略强的历史偏置。
-                                            val base = s.lensRefraction.dp.toPx()
+                                            // 3.26.67：H = cap×宽度%、A = cap×压缩%（cap =
+                                            // 镜片最小边 × .55 = 30.8dp），两条式子互不出现
+                                            // 对方参数。历史 1.2 的位移偏置已折进
+                                            // lensSqueeze 默认值（0.771），这里不再乘它。
                                             val minSide = minOf(size.width, size.height)
-                                            val band = glassLensBand(base, minSide, s.lensBend)
-                                            lens(
-                                                refractionHeight = band,
-                                                refractionAmount = glassLensAmount(base, minSide, s.lensSqueeze) * 1.2f,
-                                                depthEffect = true,
-                                                chromaticAberration = s.lensDispersion,
-                                            )
+                                            val band = glassLensBand(minSide, s.lensBend)
+                                            if (band > 0f) {
+                                                lens(
+                                                    refractionHeight = band,
+                                                    refractionAmount = glassLensAmount(minSide, s.lensSqueeze),
+                                                    depthEffect = true,
+                                                    chromaticAberration = s.lensDispersion,
+                                                )
+                                            }
                                         }
                                     },
                                     highlight = null,
