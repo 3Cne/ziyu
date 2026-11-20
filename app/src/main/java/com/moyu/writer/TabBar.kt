@@ -335,9 +335,17 @@ internal fun MoyuTabBar(
                                         vibrancy()
                                         if (s.lensBlur > 0f) blur(s.lensBlur.dp.toPx())
                                         if (s.lensRefraction > 0f) {
+                                            // 3.26.65：与条同口径（glassLensBand）——原版把
+                                            // 9dp 同时当带宽与位移，57dp 的镜片上只有一圈
+                                            // 16% 的窄边；放大后带铺到 ~35%，镜片才像一块
+                                            // 真透镜。1.2 是镜片比条略强的历史偏置。
+                                            val band = glassLensBand(
+                                                s.lensRefraction.dp.toPx(),
+                                                minOf(size.width, size.height),
+                                            )
                                             lens(
-                                                refractionHeight = s.lensRefraction.dp.toPx(),
-                                                refractionAmount = (s.lensRefraction * 1.2f).dp.toPx(),
+                                                refractionHeight = band,
+                                                refractionAmount = band * 1.2f,
                                                 depthEffect = true,
                                                 chromaticAberration = s.lensDispersion,
                                             )

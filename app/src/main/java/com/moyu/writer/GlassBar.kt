@@ -43,6 +43,46 @@ import androidx.compose.runtime.compositionLocalOf/**
  * Below API 31 there is no RenderEffect, so both bars fall back to a readable
  * paper surface instead of drawing an unblurred crop of the page.
  */
+
+/**
+ * 3.26.65：透镜的「弯折」与「边缘压缩」都来自 Backdrop 1.0.0 的 `lens()`，它只
+ * 动边缘往里一圈的采样点（带内），带外的像素原样返回：
+ *
+ * ```
+ * k   = -sd                                  // 离边缘的距离（sd 是圆角矩形 SDF）
+ * d   = (1 - sqrt(1 - (1 - k/H)^2)) * A      // 圆弧剖面：边缘最大、带到头归零
+ * dir = normalize(sdfNormal + depthEffect * normalize(centeredCoord))
+ * 采样点 = coord - d * dir                    // Kotlin 侧把 A 取负，所以是「朝中心」采
+ * ```
+ *
+ * H（refractionHeight）决定「弯折」铺多宽，A（refractionAmount）决定最外圈
+ * 「压缩」多狠。3.26.58 原版把滑杆值同时当 H 和 A（9.78dp），在 56dp 高的条上
+ * 只占一圈 17% 的窄边 → 只能读出「边上有点扭曲」，读不出整块玻璃被掰弯。
+ * 这里把滑杆值当「透镜半径」放大 [GLASS_LENS_BEND] 倍：带铺到条高的 ~38%，
+ * A 同步放大、剖面比例（A/H）仍是 1，形状不变、只是整块放大。
+ */
+internal const val GLASS_LENS_BEND = 2.2f
+
+/** 在 [GLASS_LENS_BEND] 之上给「最外圈最大位移」再乘的系数（1 = 与原版剖面同比例）。
+ *  真机若边缘压过头，先降这个；若只是弯折不够宽，先升 [GLASS_LENS_BEND]。 */
+internal const val GLASS_LENS_SQUEEZE = 1f
+
+/** 折射带宽上限：不超过表面最小边的这个比例。小芯片（按钮 46dp、通知 36dp）的
+ *  折射滑杆值本来就大（18dp / 15dp），放大后会比自身还大、采样点翻到对侧去
+ *  （读成万花筒）。条 56dp：2.2×9.78=21.5dp < 30.8dp 不受影响；46dp 按钮的
+ *  18×2.2=39.6dp 会被压到 25.3dp。 */
+private const val GLASS_LENS_MAX_SIDE = .55f
+
+/**
+ * 透镜两个 uniform 的唯一换算入口（标签条 / 选中镜片 / 设置预览共用同一口径）。
+ *
+ * 返回折射带宽度（px）；最大位移 = 它 × [GLASS_LENS_SQUEEZE]（镜片另有 1.2 的
+ * 历史偏置）。[minSidePx] 传表面最小边，小表面按 [GLASS_LENS_MAX_SIDE] 封顶。
+ */
+internal fun glassLensBand(refractionPx: Float, minSidePx: Float): Float =
+    if (refractionPx <= 0f || minSidePx <= 0f) 0f
+    else (refractionPx * GLASS_LENS_BEND).coerceAtMost(minSidePx * GLASS_LENS_MAX_SIDE)
+
 internal fun Modifier.liquidGlassBar(
     backdrop: Backdrop?,
     shape: Shape,
@@ -95,9 +135,14 @@ internal fun Modifier.liquidGlassBar(
             vibrancy()
             if (blurDp > 0f) blur(blurDp.dp.toPx())
             if (canRefract) {
+                // depthEffect = true 是「弯折」的另一半：它把每处的偏移方向从
+                // 「垂直于最近这条边」拧向「从形状中心指向该点」（两项相加再归一），
+                // 四条边的位移都朝中心收，才读成一块凸透镜；false 时四边各自笔直
+                // 往里挤，中间还留着法线跳变的折痕（只像一圈斜面，不像弯）。
+                val band = glassLensBand(refractionDp.dp.toPx(), minOf(size.width, size.height))
                 lens(
-                    refractionHeight = refractionDp.dp.toPx(),
-                    refractionAmount = refractionDp.dp.toPx(),
+                    refractionHeight = band,
+                    refractionAmount = band * GLASS_LENS_SQUEEZE,
                     depthEffect = true,
                     chromaticAberration = dispersion,
                 )
