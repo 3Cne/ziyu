@@ -71,6 +71,15 @@ private val LensSettle = spring<Float>(dampingRatio = .78f, stiffness = 380f, vi
 private val LensLift = spring<Float>(dampingRatio = .56f, stiffness = 520f, visibilityThreshold = 1e-3f)
 
 /**
+ * 3.26.66：选中镜片尺寸的**唯一事实源**（下一轮只改这两行）。
+ *
+ * 条高 64dp（带文字），镜片高 72dp → 上下各鼓出 4dp，读作「从条里凸出来」；
+ * 圆角永远取高度一半（= 胶囊）。横向 76dp 在 4 格里居中，离格子边界还有富余。
+ */
+private val TAB_LENS_W_DP = 76.dp
+private val TAB_LENS_H_DP = 72.dp
+
+/**
  * Floating four-tab bar made from a real liquid-glass surface.
  *
  * 3.24.1 修的四条（用户报「移动时全是 bug、没有对劲的位置、太圆太大」）：
@@ -114,23 +123,19 @@ internal fun MoyuTabBar(
     // 栏体是胶囊。注意 SmoothCorner(50) 命中 Int 重载 = CircleShape，
     // 这在「宽远大于高」的栏体上正好是胶囊；但**不能**拿给镜片用（会变椭圆）。
     val capsule = SmoothCorner(50)
-    // 镜片是圆角矩形，不是胶囊。
-    // 3.26.9：普通 RoundedCornerShape 在直线与圆弧的切点处曲率从 0 跳到 1/R，
-    // 22dp 的角在大屏上能看出「棱角」。换成连续曲率的 SmoothCornerShape：
-    // 它仍继承 CornerBasedShape，drawBackdrop 的 lens() 才不会抛
-    // "Only CornerBasedShape is supported in lens effects"；折射仍按圆弧半径
-    // 计算，所以角上 1–3dp 与裁剪路径略有偏差，正好被加宽后的边缘带盖住。
-    // 3.26.21：用户要求「像水滴一样圆满圆润」。镜片从 75.35×54dp 的 22dp 圆角矩形
-    // 改成 65.55×57dp（比例 1.15）的完整胶囊——视觉直边最短，读作水滴；
-    // 圆角取高度一半，SmoothCornerShape 在 CornerBasedShape 上才能继续用 lens() 折射。
+    // 镜片是胶囊，不是普通圆角矩形。
+    // 3.26.9：普通 RoundedCornerShape 在直线与圆弧的切点处曲率从 0 跳到 1/R，大屏上
+    // 能看出「棱角」；SmoothCornerShape 曲率连续，且仍继承 CornerBasedShape，
+    // drawBackdrop 的 lens() 才不会抛 "Only CornerBasedShape is supported in lens
+    // effects"（折射仍按圆弧半径算，角上 1–3dp 偏差被边缘带盖住）。
+    // 3.26.21：用户要「像水滴一样圆满圆润」——圆角取高度一半，视觉直边最短。
+    // 3.26.66：尺寸 76×72dp（条高 64dp → 上下各鼓出 4dp），圆角仍 = 高/2 = 36dp。
     val lensShape: androidx.compose.foundation.shape.CornerBasedShape = SmoothCornerShape(
-        androidx.compose.foundation.shape.CornerSize(28.5.dp),
-        androidx.compose.foundation.shape.CornerSize(28.5.dp),
-        androidx.compose.foundation.shape.CornerSize(28.5.dp),
-        androidx.compose.foundation.shape.CornerSize(28.5.dp),
+        androidx.compose.foundation.shape.CornerSize(TAB_LENS_H_DP / 2f),
+        androidx.compose.foundation.shape.CornerSize(TAB_LENS_H_DP / 2f),
+        androidx.compose.foundation.shape.CornerSize(TAB_LENS_H_DP / 2f),
+        androidx.compose.foundation.shape.CornerSize(TAB_LENS_H_DP / 2f),
     )
-    val lensTargetW = 65.55.dp
-    val lensTargetH = 57.dp
     val glassEnabled = backdrop != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
     val count = names.size.coerceAtLeast(1)
     val scope = rememberCoroutineScope()
@@ -195,7 +200,8 @@ internal fun MoyuTabBar(
             val itemWidth = (maxWidth - 10.dp) / count
             val density = LocalDensity.current
             val itemPx = with(density) { itemWidth.toPx() }
-            // 镜片四周留白：左右各 4dp（不压邻格），上下各 5dp（与 tab 内容对齐）。
+            // 镜片槽位：左右各留 4dp（不压邻格）；高度方向镜片 72dp > 条 64dp，
+            // 上下各鼓出 4dp——从本层到根 Box 都没有 clipToBounds/clip，鼓出部分不会被裁。
             val lensInsetX = 4.dp
             val lensWidth = itemWidth - lensInsetX * 2
             val lensLeftPx = with(density) { (5.dp + lensInsetX).toPx() }
@@ -285,8 +291,8 @@ internal fun MoyuTabBar(
             )
 
             // 镜片：外层是整格槽位（管位置与抬起），内层是水滴本体（管速度拉伸）。
-            // 3.26.21：本体固定 65.55×57dp、在槽内居中；槽宽与命中区域不变，
-            // 只是视觉变圆润（用户点的时候还是要整格可点）。
+            // 3.26.66：本体固定 TAB_LENS_W_DP×TAB_LENS_H_DP（76×72dp）、槽内居中；
+            // 槽宽与命中区域不变（点的时候还是整格可点），72 > 条高 64 → 上下各鼓出 4dp。
             Box(
                 Modifier
                     .width(lensWidth)
@@ -305,8 +311,8 @@ internal fun MoyuTabBar(
             ) {
                 Box(
                     Modifier
-                        .width(lensTargetW)
-                        .height(lensTargetH)
+                        .width(TAB_LENS_W_DP)
+                        .height(TAB_LENS_H_DP)
                         .graphicsLayer {
                             // 速度拉伸：原点放在运动方向的前端（前端先到、后端拖尾）。
                             transformOrigin = TransformOrigin(if (lensRightward) 1f else 0f, .5f)
@@ -336,16 +342,19 @@ internal fun MoyuTabBar(
                                         if (s.lensBlur > 0f) blur(s.lensBlur.dp.toPx())
                                         if (s.lensRefraction > 0f) {
                                             // 3.26.65：与条同口径（glassLensBand）——原版把
-                                            // 9dp 同时当带宽与位移，57dp 的镜片上只有一圈
-                                            // 16% 的窄边；放大后带铺到 ~35%，镜片才像一块
-                                            // 真透镜。1.2 是镜片比条略强的历史偏置。
+                                            // 9dp 同时当带宽与位移，镜片上只有一圈窄边；
+                                            // 放大后带才铺开，镜片才像一块真透镜。
+                                            // 3.26.66：弯折宽度/边缘压缩接入全局设置项，与条、
+                                            // 输入框、设置预览共用同一个换算入口；1.2 是镜片
+                                            // 比条略强的历史偏置，设置取默认值时与 3.26.65 同观感。
                                             val band = glassLensBand(
                                                 s.lensRefraction.dp.toPx(),
                                                 minOf(size.width, size.height),
+                                                s.glassBend,
                                             )
                                             lens(
                                                 refractionHeight = band,
-                                                refractionAmount = band * 1.2f,
+                                                refractionAmount = band * 1.2f * s.glassSqueeze,
                                                 depthEffect = true,
                                                 chromaticAberration = s.lensDispersion,
                                             )
