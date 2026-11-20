@@ -24,8 +24,8 @@ android {
         applicationId = "com.moyu.writer"
         minSdk = 26
         targetSdk = 36
-        versionCode = 882
-        versionName = "3.26.63"
+        versionCode = 884
+        versionName = "3.26.65"
         val updateRepo = (project.findProperty("updateRepo") as String?) ?: ""
         buildConfigField("String", "UPDATE_REPO", "\"$updateRepo\"")
         vectorDrawables { useSupportLibrary = true }
@@ -76,9 +76,6 @@ dependencies {
     implementation("androidx.compose.ui:ui-graphics:1.9.5")
     implementation("androidx.compose.foundation:foundation:1.9.5")
     implementation("androidx.compose.animation:animation:1.9.5")
-    // Local copy of Haze 1.7.3, compiled against a newer Compose. It is used through
-    // the small Java bridge below so the Kotlin compiler never has to read its metadata.
-    implementation(files("libs/haze-1.7.3.aar"))
     // Floating tab bar glass: Kyant0/AndroidLiquidGlass, Apache-2.0.
     // 1.0.0 is the last release built against Compose 1.9.4 / Kotlin 2.2.21,
     // which matches this project without a build-chain upgrade.

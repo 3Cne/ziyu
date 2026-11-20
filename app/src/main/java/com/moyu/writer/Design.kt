@@ -204,7 +204,6 @@ val LocalInk = staticCompositionLocalOf {
 }
 
 val LocalHaptic = compositionLocalOf<(Int) -> Unit> { {} }
-val LocalHazeHandle = staticCompositionLocalOf<HazeBridge.Handle?> { null }
 
 val LocalStore = staticCompositionLocalOf<AppStore> { error("AppStore missing") }
 

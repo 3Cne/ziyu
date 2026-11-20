@@ -539,11 +539,6 @@ fun WritingScreen(
     // 标题框的实测高度：用来算正文要往上让多少，纯位移、不改布局。
     var titleBoxH by remember { mutableIntStateOf(0) }
 
-    // 1型玻璃 only re-samples when its draw node records a new frame. The body
-    // is a native EditText, so Compose never sees its scroll. Bump this tick on
-    // every body scroll / text change and pass it as the glass epoch.
-    val bodyScrollTick = remember { mutableIntStateOf(0) }
-
     val latestSave by androidx.compose.runtime.rememberUpdatedState(onSave)
     val latestTitle by androidx.compose.runtime.rememberUpdatedState(title)
     val latestBody by androidx.compose.runtime.rememberUpdatedState(body.text)
@@ -554,7 +549,7 @@ fun WritingScreen(
 
     // 3.26.57 历史版本自动存档：上次快照时间 + 距上次快照累计改动的字数。
     // 这两个状态**不随 seedKey 重建**：原生 EditText 的 TextWatcher 只创建一次并把
-    // 它们捕进闭包（和 bodyScrollTick 一个写法）；换章由下面的 effect 复位数值，
+    // 它们捕进闭包；换章由下面的 effect 复位数值，
     // 不能换对象，否则原生那边数到的永远是旧章。
     val autoLastTs = remember { mutableLongStateOf(0L) }
     val autoChars = remember { mutableIntStateOf(0) }
@@ -1479,7 +1474,6 @@ fun WritingScreen(
                             // paragraph get consumed (see ACTION_MOVE) with no effect.
                             onTodoSwipe = null,
                             onBodyScroll = {
-                                bodyScrollTick.intValue++
                                 val y = bodyEditor?.scrollY ?: 0
                                 if (y != bodyScrollY) bodyScrollY = y
                             },
@@ -1567,8 +1561,6 @@ fun WritingScreen(
                                     }
                                 }
                                 override fun afterTextChanged(s: Editable?) {
-                                    self.renderRevision++
-                                    bodyScrollTick.intValue++
                                     if (syncing.value) return
                                     if (s == null) return
                                     val caret = selectionStart
@@ -1979,8 +1971,6 @@ fun WritingScreen(
                     },
                     onProof = { startProof() },
                     onPolish = { startPolish() },
-                    epoch = bodyScrollTick.intValue,
-                    scrollTick = bodyScrollTick,
                     bodyEditor = bodyEditor,
                     // 3.26.42：横滑移光标的轴状态（轴画在工具行原位，不再是页面层浮层）。
                     scrub = scrub,
@@ -2473,8 +2463,6 @@ private class BodyEditText(
     var autoIndent = false
     var indentGuard = false
     private var redirectingSelection = false
-    /** Bumped on every text or scroll change. */
-    var renderRevision = 0L
     var lastTextLength = 0
 
     /** Temporarily tints a range so a proofing suggestion can be found on the page. */
@@ -2490,26 +2478,6 @@ private class BodyEditText(
         }, 1600)
     }
 
-    /** Window-space top of this view, used to align the dock slice. */
-    fun windowTop(): Float {
-        val loc = IntArray(2)
-        getLocationInWindow(loc)
-        return loc[1].toFloat()
-    }
-
-    /** Renders the slice of this view that sits under the dock, in view pixels. */
-    fun renderDockSlice(topInView: Int, sliceHeight: Int): Bitmap? {
-        if (width <= 0 || height <= 0 || sliceHeight <= 0) return null
-        val top = topInView.coerceIn(0, maxOf(0, height - 1))
-        val h = min(sliceHeight, height - top)
-        if (h <= 0) return null
-        val bmp = Bitmap.createBitmap(width, h, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(bmp)
-        canvas.translate(0f, -top.toFloat())
-        canvas.clipRect(0, top, width, top + h)
-        draw(canvas)
-        return bmp
-    }
     var pendingNewline = false
     private var cachedSelectHandle: android.graphics.drawable.Drawable? = null
     val selectHandleDrawable: android.graphics.drawable.Drawable?
@@ -3387,7 +3355,6 @@ private class BodyEditText(
 
     override fun onScrollChanged(horiz: Int, vert: Int, oldHoriz: Int, oldVert: Int) {
         super.onScrollChanged(horiz, vert, oldHoriz, oldVert)
-        renderRevision++
         onBodyScroll?.invoke()
         emitGeometry()
     }
@@ -4685,8 +4652,8 @@ private fun EditorTopBar(
             .padding(horizontal = 12.dp, vertical = 4.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            // Solid paper back button: a GlassSurface here could be captured at
-            // the wrong size during the editor push and leave a white rounded ghost.
+            // Solid paper back button: a translucent surface here could be captured
+            // at the wrong size during the editor push and leave a rounded ghost.
             Box(
                 Modifier
                     .size(40.dp)
@@ -4840,12 +4807,6 @@ private fun EditorDock(
     onProof: (() -> Unit)? = null,
     /** AI 入口里的「修饰」：只顺句，出改写版本；点一个才替换正文。 */
     onPolish: (() -> Unit)? = null,
-    /** Bumped on every body scroll / text change so the glass re-samples the
-     *  native EditText instead of freezing on its first frame. */
-    epoch: Int = 0,
-    /** Read inside the dock's draw scope; invalidates the same draw chain that
-     *  contains liquidGlassBar, so the backdrop is re-sampled on every scroll. */
-    scrollTick: androidx.compose.runtime.MutableIntState? = null,
     bodyEditor: BodyEditText? = null,
     /** 3.26.42：非选区工具行横向拖动 = 把这一行换成一条跟随手指的轴。
      *  状态由页面层持有（为了 abilityT < .5 时强制复位），轴本体在 [DockScrubAxis]。 */
@@ -4869,20 +4830,11 @@ private fun EditorDock(
     val latestEditor by rememberUpdatedState(bodyEditor)
     // 手势器只在第一次组合时启动；触感开关改了要立刻生效，所以走 rememberUpdatedState。
     val latestHaptic by rememberUpdatedState(LocalHaptic.current)
-    var dockTopInWindow by remember { mutableStateOf(0f) }
-    // AGSL lens for the dock: real per-pixel refraction + RGB dispersion on the
-    // sampled body slice. null below API 33, where the bar falls back to blur.
-    val dockShader = remember {
-        if (android.os.Build.VERSION.SDK_INT >= 33) {
-            runCatching { android.graphics.RuntimeShader(DOCK_REFRACTION_AGSL) }.getOrNull()
-        } else null
-    }
     Box(
         Modifier
             .fillMaxWidth()
             // 一整块：左右不留白，上缘圆角、下缘压到底。
             .fillMaxWidth()
-            .onGloballyPositioned { dockTopInWindow = it.positionInWindow().y }
     ) {
         Box(
             Modifier
@@ -5919,68 +5871,47 @@ private fun MiniStepper(value: String, onMinus: () -> Unit, onPlus: () -> Unit) 
 
 // ---------------------------------------------------------------------------
 // Preview. The dock is the surface whose material is easiest to judge wrongly by
-// eye, so it gets a tile of its own. Haze still falls back to static glass in
-// layoutlib; real blur is only visible on a device.
+// eye, so it gets a tile of its own. Layoutlib does not render the real backdrop;
+// material is only visible on a device.
 // ---------------------------------------------------------------------------
 
 @Preview(name = "写作 Dock", widthDp = 412, heightDp = 210, showBackground = true)
 @Composable
 private fun EditorDockPreview() {
     MoyuTheme(AppSettings(theme = "night", motion = "none")) {
-        CompositionLocalProvider(LocalHazeHandle provides null) {
-            Box(
-                Modifier.fillMaxSize().background(LocalInk.current.palette.bgTop),
-                contentAlignment = Alignment.BottomCenter,
-            ) {
-                val scrub = remember { ScrubAxisState() }
-                EditorDock(
-                    canUndo = true,
-                    canRedo = false,
-                    isNote = true,
-                    pendingTodos = 2,
-                    onUndo = {},
-                    onRedo = {},
-                    onIndent = {},
-                    onQuote = {},
-                    onDivider = {},
-                    onType = {},
-                    onTodos = {},
-                    boundNotes = 3,
-                    onNotes = {},
-                    onNotesLongPress = {},
-                    onHideKeyboard = {},
-                    onCollapse = {},
-                    onSymbol = {},
-                    onExpand = {},
-                    selectionMode = false,
-                    onCopy = {},
-                    onCut = {},
-                    onPaste = {},
-                    onSelectAll = {},
-                    onDelete = {},
-                    onCancelSelection = {},
-                    scrub = scrub,
-                )
-            }
+        Box(
+            Modifier.fillMaxSize().background(LocalInk.current.palette.bgTop),
+            contentAlignment = Alignment.BottomCenter,
+        ) {
+            val scrub = remember { ScrubAxisState() }
+            EditorDock(
+                canUndo = true,
+                canRedo = false,
+                isNote = true,
+                pendingTodos = 2,
+                onUndo = {},
+                onRedo = {},
+                onIndent = {},
+                onQuote = {},
+                onDivider = {},
+                onType = {},
+                onTodos = {},
+                boundNotes = 3,
+                onNotes = {},
+                onNotesLongPress = {},
+                onHideKeyboard = {},
+                onCollapse = {},
+                onSymbol = {},
+                onExpand = {},
+                selectionMode = false,
+                onCopy = {},
+                onCut = {},
+                onPaste = {},
+                onSelectAll = {},
+                onDelete = {},
+                onCancelSelection = {},
+                scrub = scrub,
+            )
         }
     }
 }
-
-/** Dock lens: edge refraction + RGB dispersion over the sampled body slice. */
-private const val DOCK_REFRACTION_AGSL = """
-uniform shader content;
-uniform float2 size;
-uniform float amount;
-uniform float dispersion;
-uniform float edge;
-
-half4 main(float2 coord) {
-    float d = clamp(coord.y / edge, 0.0, 1.0);
-    float k = (1.0 - d) * (1.0 - d);
-    float2 base = clamp(coord, float2(0.0), size - float2(1.0));
-    float2 off = float2(0.0, -k * amount);
-    float2 cr = clamp(base + off * (1.0 + dispersion), float2(0.0), size - float2(1.0));
-    float2 cb = clamp(base + off * (1.0 - dispersion), float2(0.0), size - float2(1.0));
-    return half4(content.eval(cr).r, content.eval(base).g, content.eval(cb).b, 1.0);
-}
-"""
