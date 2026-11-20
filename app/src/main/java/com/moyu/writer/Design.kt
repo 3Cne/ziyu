@@ -43,7 +43,6 @@ import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -69,9 +68,6 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.CornerBasedShape
-import androidx.compose.foundation.shape.CornerSize
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -103,23 +99,18 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathMeasure
-import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.lerp
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.addOutline
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
-import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
@@ -143,10 +134,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntSize
-import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
@@ -501,375 +490,6 @@ fun Txt(
         maxLines = maxLines,
         overflow = overflow,
     )
-}
-
-/**
- * One continuous liquid-glass layer.
- *
- * The important part here is what is *not* drawn: no flat backing layer, no inner
- * dark band, no second rounded rectangle. A single frosted gradient, one soft
- * caustic bloom, one refractive rim and grain keep the material reading as one
- * piece of glass instead of stacked translucent plates.
- */
-@Composable
-fun Modifier.liquidGlass(
-    radius: Float = 26f,
-    strength: Float = 1f,
-    tint: Color = Color.White,
-    frost: Float = .62f,
-    iridescent: Boolean = true,
-    specular: Boolean = true,
-    shape: Shape? = null,
-    fillOverride: Float? = null,
-    blurOverride: Float? = null,
-    grainOverride: Boolean? = null,
-    edgeWidth: Float = 1.1f,
-    innerEdgeWidth: Float = .6f,
-    rimStrength: Float = 1f,
-    specularStrength: Float = 1f,
-    refractionStrength: Float = 1f,
-    borderColor: Color? = null,
-): Modifier {
-    val ui = LocalInk.current
-    // Read the live settings in composition, not only inside drawWithCache.
-    // The draw cache was not reliably invalidated by a Slider change, so the
-    // glass controls appeared disconnected from every existing surface.
-    val p = ui.palette
-    // Global glass/blur/brightness sliders were removed: every MoyuSurface
-    // passes per-role overrides, so those controls were dead there. Keep the
-    // old button defaults locally instead of exposing a setting that cannot
-    // reach the real surfaces.
-    val glassSetting = .64f
-    val blurSetting = .55f
-    val grainSetting = ui.settings.grain
-    val brightnessSetting = 0f
-    val accentColor = ui.accent
-    return drawWithCache {
-        val r = (radius * density).coerceAtMost(min(size.width, size.height) / 2f)
-        val corner = CornerRadius(r, r)
-        val outlinePath = shape?.let { s ->
-            Path().apply { addOutline(s.createOutline(size, layoutDirection, this@drawWithCache)) }
-        }
-        val w = size.width
-        val h = size.height
-        val glass = glassSetting
-        // Higher "通透度" must mean more transparent, not more opaque. The
-        // old curve also varied too little to see on light paper.
-        val blurFactor = .35f + (blurOverride ?: blurSetting) * 1.60f
-        val opacity = fillOverride?.coerceIn(0f, 1f)
-            ?: (frost * (1.45f - glass * 1.05f) * blurFactor * strength).coerceIn(0f, 1f)
-        // Fill is a real visual range, not a tiny alpha nudge: 0 is almost
-        // clear, 100 is a solid paper surface. A slight ink shift prevents the
-        // high end from disappearing into white paper.
-        val fillAmount = (fillOverride ?: opacity).coerceIn(0f, 1f)
-        val bodyAlpha = (0.04f + 0.96f * fillAmount).coerceIn(0f, 1f)
-        // 3.26.50：昼夜过渡时这些量不再读原始 isDark（主题切换第一帧硬翻），而是按
-        // 动画后的 darkAmount 连续插值；静止态 darkAmount 恰为 0/1，像素与旧版一致。
-        val d = p.darkAmount
-        fun mix(light: Float, dark: Float): Float = light + (dark - light) * d
-        val frostColor = lerp(tint, Color(0xFF191C1A), d)
-        val bodyTint = lerp(frostColor, lerp(p.ink, Color.White, d), fillAmount * .12f)
-        fun rimAlpha(alpha: Float): Float =
-            (alpha * rimStrength).coerceIn(0f, 1f)
-        // MoyuSurface always passes frost = 1f. Treating that as a solid
-        // surface made fillOverride irrelevant: every card used the fixed
-        // 96/98/99% branch and the Fill slider did nothing.
-        val solid = frost >= .99f && fillOverride == null
-        // The gradient used to keep a fixed 10/16/26 percent of transparency even at
-// fill = 1, so a control set to 100 dispensed still let the page show through
-// and its labels ghosted onto whatever sat behind. Interpolate towards fully
-// opaque instead: at fill 1 the three stops are all alpha 1, and the old
-// falloff only applies below that.
-        // Dark and light used different gradient stops. Blend both the stop colours and
-        // their alphas by darkAmount so a theme switch fades the surface instead of
-        // swapping brushes in one frame; at d = 0 / 1 this is exactly the old branch.
-        val darkStops = if (fillAmount >= 1f) {
-            floatArrayOf(1f, 1f, 1f)
-        } else {
-            floatArrayOf(.045f, .86f, .96f)
-        }
-        val lightStops = if (fillAmount >= 1f) {
-            floatArrayOf(1f, 1f, 1f)
-        } else {
-            floatArrayOf(.90f, .84f, .74f)
-        }
-        val fill = Brush.linearGradient(
-            colors = listOf(
-                lerp(bodyTint, Color.White, d).copy(
-                    alpha = mix(if (solid) .96f else bodyAlpha * lightStops[0], if (solid) .06f else bodyAlpha * darkStops[0]),
-                ),
-                lerp(bodyTint, frostColor, d).copy(
-                    alpha = mix(if (solid) .985f else bodyAlpha * lightStops[1], if (solid) .985f else bodyAlpha * darkStops[1]),
-                ),
-                bodyTint.copy(
-                    alpha = mix(if (solid) .99f else bodyAlpha * lightStops[2], if (solid) .99f else bodyAlpha * darkStops[2]),
-                ),
-            ),
-            start = Offset(0f, 0f),
-            end = Offset(w, h),
-        )
-        val caustic = Brush.radialGradient(
-            colors = listOf(
-                // 折射 is the only thing that may push these two glows around.
-                // Scaling them by the fill as well meant that raising 填充 made
-                // the surface look hazier instead of more opaque, which is the
-                // opposite of what the slider promises.
-                Color.White.copy(
-                    alpha = mix(.52f, .06f) * refractionStrength,
-                ),
-                Color.Transparent,
-            ),
-            center = Offset(w * .20f, h * .015f),
-            radius = w * .86f,
-        )
-        val lowerCaustic = Brush.radialGradient(
-            colors = listOf(
-                (if (iridescent) accentColor else Color.White)
-                    .copy(alpha = .14f * refractionStrength),
-                Color.Transparent,
-            ),
-            center = Offset(w * .86f, h * .94f),
-            radius = w * .72f,
-        )
-        // 3.26.53：卡片 / 弹窗的边缘厚度。旧 rim 是「墨色 → 白高光 → 缀色」的斜向
-        // 渐变，而 MoyuSurface 传的 edgeWidth = 0f 让整条描边宽度为 0 —— 卡片边缘
-        // 实际只剩 .95dp 的 specular，看不出厚度。现在改成贴轮廓的「外圈亮环 +
-        // 内圈次高光」两道纯白竖渐变：顶亮、侧中、底暗，没有暗斜面、没有外发光。
-        // 亮度只有 1 型玻璃条的一半（顶 .35 / 侧 .18 / 底 .08 级别）；昼夜按
-        // darkAmount 连续插值（3.26.50 约定），过渡时不会硬翻。
-        val rim = Brush.verticalGradient(
-            0f to Color.White.copy(alpha = rimAlpha(mix(.35f, .30f))),
-            .45f to Color.White.copy(alpha = rimAlpha(mix(.18f, .15f))),
-            1f to Color.White.copy(alpha = rimAlpha(mix(.08f, .065f))),
-        )
-        // 次高光比亮环再弱一档（约一半），两张主题都保持同一层「纸面收边」的观感。
-        val innerRim = Brush.verticalGradient(
-            0f to Color.White.copy(alpha = rimAlpha(mix(.16f, .13f))),
-            .45f to Color.White.copy(alpha = rimAlpha(mix(.09f, .07f))),
-            1f to Color.White.copy(alpha = rimAlpha(mix(.04f, .03f))),
-        )
-        // 亮环沿「内缩轮廓」画：整条线都落在表面内部，不依赖外层圆角裁掉一半，
-        // 也避免 0.8dp 细线被硬裁出锯齿。外圈可见宽度 = edgeWidth，内圈紧接其内。
-        val ringPx = edgeWidth.dp.toPx()
-        val innerRingPx = innerEdgeWidth.dp.toPx()
-        val rimShape: Shape? = if (rimStrength > 0f && ringPx > 0f) {
-            shape ?: SmoothCorner(radius.dp)
-        } else null
-        val outerRingPath = rimShape?.let {
-            insetOutlinePath(it, size, ringPx / 2f, layoutDirection, this)
-        }
-        val innerRingPath = if (rimShape != null && innerRingPx > 0f) {
-            insetOutlinePath(
-                rimShape,
-                size,
-                ringPx + innerRingPx / 2f,
-                layoutDirection,
-                this,
-            )
-        } else null
-        onDrawWithContent {
-            fun fillLayer(brush: Brush) {
-                if (outlinePath != null) drawPath(outlinePath, brush)
-                else drawRoundRect(brush, cornerRadius = corner)
-            }
-            fillLayer(fill)
-            fillLayer(caustic)
-            fillLayer(lowerCaustic)
-            val frameWidth = edgeWidth.dp.toPx()
-            if (outlinePath != null) {
-                // borderColor 是调用点显式要求的边框，语义不变，整条保留。
-                if (borderColor != null) {
-                    drawPath(outlinePath, borderColor, style = Stroke(width = frameWidth))
-                }
-            } else if (borderColor != null) {
-                // A centred stroke loses its outer half to GlassSurface's
-                // rounded clip, producing a thin outer line plus a second
-                // inner ring. Inset the stroke by half its width so the whole
-                // frame lives inside the card and reads as one solid edge.
-                val inset = frameWidth / 2f
-                drawRoundRect(
-                    borderColor,
-                    topLeft = Offset(inset, inset),
-                    size = Size(
-                        (w - inset * 2f).coerceAtLeast(0f),
-                        (h - inset * 2f).coerceAtLeast(0f),
-                    ),
-                    cornerRadius = CornerRadius((r - inset).coerceAtLeast(0f)),
-                    style = Stroke(width = frameWidth),
-                )
-            }
-            if (borderColor == null && rimStrength > 0f) {
-                if (outerRingPath != null) {
-                    // 外圈亮环 + 内圈次高光各画在一条内缩轮廓上，两条相邻，
-                    // 合计约 1.4dp 的收边，但没有任何暗色斜面。
-                    translate(ringPx / 2f, ringPx / 2f) {
-                        drawPath(outerRingPath, rim, style = Stroke(width = ringPx))
-                    }
-                    if (innerRingPath != null) {
-                        translate(ringPx + innerRingPx / 2f, ringPx + innerRingPx / 2f) {
-                            drawPath(innerRingPath, innerRim, style = Stroke(width = innerRingPx))
-                        }
-                    }
-                } else if (outlinePath != null && frameWidth > 0f) {
-                    // 任意 Shape（无法精确内缩）退回「双倍线宽 + 裁掉外侧一半」，
-                    // 可见宽度仍等于 edgeWidth。
-                    clipPath(outlinePath) {
-                        drawPath(outlinePath, rim, style = Stroke(width = 2f * frameWidth))
-                    }
-                }
-            }
-            if (specular && specularStrength > 0f) {
-                drawLine(
-                    brush = Brush.horizontalGradient(
-                        listOf(
-                            Color.Transparent,
-                            Color.White.copy(
-                                alpha = mix(.94f, .20f) * specularStrength,
-                            ),
-                            Color.Transparent,
-                        ),
-                        startX = w * .06f,
-                        endX = w * .78f,
-                    ),
-                    start = Offset(w * .06f, .8.dp.toPx()),
-                    end = Offset(w * .78f, .8.dp.toPx()),
-                    strokeWidth = .95.dp.toPx(),
-                )
-            }
-            if (grainOverride ?: grainSetting) {
-                var i = 0
-                val dots = 28
-                while (i < dots) {
-                    val n = i * 2.399f
-                    val x = (sin(n) * .5f + .5f) * w
-                    val y = (sin(n * 1.71f + .4f) * .5f + .5f) * h
-                    drawCircle(
-                        Color.White.copy(alpha = mix(.05f, .022f)),
-                        .6f.dp.toPx(),
-                        Offset(x, y),
-                    )
-                    i++
-                }
-            }
-            if (brightnessSetting > 0f) {
-                val brush = SolidColor(Color.White.copy(alpha = brightnessSetting * .30f))
-                if (outlinePath != null) drawPath(outlinePath, brush)
-                else drawRoundRect(brush, cornerRadius = corner, size = Size(w, h))
-            } else if (brightnessSetting < 0f) {
-                val brush = SolidColor(Color.Black.copy(alpha = -brightnessSetting * .32f))
-                if (outlinePath != null) drawPath(outlinePath, brush)
-                else drawRoundRect(brush, cornerRadius = corner, size = Size(w, h))
-            }
-            drawContent()
-        }
-    }
-}
-
-/**
- * 把 [shape] 的轮廓沿四边往里缩 [inset] px 后的路径。
- *
- * 不采样 / 腐蚀任意 Path：Shape 本身能在小一圈的尺寸上重新生成轮廓，只要把四个
- * 圆角半径同步减掉 [inset]——胶囊、圆、固定 dp 圆角、连续曲率圆角（SmoothCornerShape）
- * 都适用。只支持 [CornerBasedShape]；其它 Shape 返回 null，调用方退回「裁掉外侧
- * 一半」的画法。3.26.53 的卡片 / 弹窗边缘亮环沿这条内缩轮廓画，整条线都落在表面
- * 内部，不会被外层圆角硬裁；内圈次高光再往里缩一档，两圈相邻就是一条收边。
- */
-private fun insetOutlinePath(
-    shape: Shape,
-    size: Size,
-    inset: Float,
-    layoutDirection: LayoutDirection,
-    density: Density,
-): Path? {
-    if (inset <= 0f) return null
-    val w = size.width - inset * 2f
-    val h = size.height - inset * 2f
-    if (w <= 2f || h <= 2f) return null
-    fun radiusOf(corner: CornerSize): Dp =
-        ((corner.toPx(size, density) - inset).coerceAtLeast(0f) / density.density).dp
-    val shrunk: Shape = when (shape) {
-        is SmoothCornerShape -> SmoothCornerShape(
-            CornerSize(radiusOf(shape.topStart)),
-            CornerSize(radiusOf(shape.topEnd)),
-            CornerSize(radiusOf(shape.bottomEnd)),
-            CornerSize(radiusOf(shape.bottomStart)),
-        )
-        is CornerBasedShape -> RoundedCornerShape(
-            topStart = radiusOf(shape.topStart),
-            topEnd = radiusOf(shape.topEnd),
-            bottomEnd = radiusOf(shape.bottomEnd),
-            bottomStart = radiusOf(shape.bottomStart),
-        )
-        else -> return null
-    }
-    return Path().apply {
-        addOutline(shrunk.createOutline(Size(w, h), layoutDirection, density))
-    }
-}
-
-@Composable
-fun GlassSurface(
-    modifier: Modifier = Modifier,
-    radius: Float = 26f,
-    strength: Float = 1f,
-    frost: Float = .68f,
-    tint: Color = Color.White,
-    haze: HazeBridge.Handle? = null,
-    useHaze: Boolean = true,
-    hazeBlur: Float = 58f,
-    specular: Boolean = true,
-    shape: Shape? = null,
-    fillOverride: Float? = null,
-    blurOverride: Float? = null,
-    grainOverride: Boolean? = null,
-    edgeWidth: Float = 1.1f,
-    innerEdgeWidth: Float = .6f,
-    rimStrength: Float = 1f,
-    specularStrength: Float = 1f,
-    refractionStrength: Float = 1f,
-    borderColor: Color? = null,
-    content: @Composable BoxScope.() -> Unit,
-) {
-    val resolvedShape = shape ?: SmoothCorner(radius.dp)
-    val clipped = modifier.clip(resolvedShape)
-    // Haze used to hard-code a 25% white tint, which turned the dark TabBar into
-    // a flat gray slab. Tint the blur toward the paper color in each theme, and
-    // cross-fade that tint by darkAmount so the blur does not swap in one frame
-    // while the rest of the palette is still animating.
-    val hazeTint = lerp(
-        Color(0x40FFFFFF),
-        Color(0x4D101312),
-        LocalInk.current.palette.darkAmount,
-    ).toArgb().toLong()
-    val blurScale = .55f
-    val blurValue = (blurOverride ?: blurScale).coerceIn(0f, 1f)
-    // 模糊 0 must mean no blurring at all. The old curve kept a 35% floor, so
-    // pulling the slider to 0 still left the backdrop smeared and the setting
-    // read as broken.
-    val effectiveBlur = hazeBlur * (blurValue * 1.75f)
-    val liveHaze = if (useHaze) haze ?: LocalHazeHandle.current else null
-    val glass = if (liveHaze != null) HazeBridge.effect(clipped, liveHaze, effectiveBlur, hazeTint) else clipped
-    Box(
-        glass.liquidGlass(
-            radius = radius,
-            strength = strength,
-            tint = tint,
-            frost = frost,
-            specular = specular,
-            shape = shape,
-            fillOverride = fillOverride,
-            blurOverride = blurOverride,
-            grainOverride = grainOverride,
-            edgeWidth = edgeWidth,
-            innerEdgeWidth = innerEdgeWidth,
-            rimStrength = rimStrength,
-            specularStrength = specularStrength,
-            refractionStrength = refractionStrength,
-            borderColor = borderColor,
-        )
-    ) {
-        content()
-    }
 }
 
 @Composable
@@ -1825,7 +1445,6 @@ fun GlassDialog(
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
     dismissOnOutsideClick: Boolean = true,
-    performanceMode: Boolean = false,
     /** 3.26.48：内容需要框架的 `close()` 时用这个（取消/保存/删除按钮先播退场、idle 后才回调 onDismiss）。
      *  与 [ModalSheet] 同一套写法：不写成同名 `content` 重载——两个重载都吃尾随 lambda 时
      *  `GlassDialog(onDismiss) { }` 会解析歧义，把现有调用点全部弄坏。 */
@@ -1894,7 +1513,6 @@ fun GlassDialog(
                     exit = fadeOut(tween(150, easing = FastOutSlowInEasing)) +
                         scaleOut(targetScale = .965f, animationSpec = tween(150, easing = FastOutSlowInEasing)),
                 ) {
-                    CompositionLocalProvider(LocalGlassLite provides performanceMode) {
                         MoyuSurface(modifier
                                 .padding(horizontal = 18.dp)
                                 .fillMaxWidth()
@@ -1920,7 +1538,6 @@ fun GlassDialog(
                                 }
                             }
                         }
-                    }
                 }
             }
         }

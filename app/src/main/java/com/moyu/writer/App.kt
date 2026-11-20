@@ -186,8 +186,6 @@ private fun MoyuRoot(store: AppStore, initialNote: String?, consumeInitialNote: 
     val p = ui.palette
     val context = LocalContext.current
     val activity = context as? Activity
-    val haze = remember { HazeBridge.newHandle() }
-    val hazeSupported = HazeBridge.isSupported()
     // The page is recorded into a layer the floating tab bar samples. Backdrop
     // owns the layer and the glass effect; the tab bar never samples the window
     // buffer, so its own icons cannot appear inside the capsule as ghosts.
@@ -314,14 +312,10 @@ private fun MoyuRoot(store: AppStore, initialNote: String?, consumeInitialNote: 
         }
     }
 
-    // The Haze source has to cover the TabBar too. It used to sit on the
-    // AnimatedContent only, so the TabBar — a sibling of that content — sampled
-    // a source it was not inside and its 模糊 slider did nothing at all.
     Box(
         Modifier
             .fillMaxSize()
-            .background(p.bgBottom)
-            .then(if (hazeSupported) HazeBridge.source(Modifier, haze) else Modifier),
+            .background(p.bgBottom),
     ) {
         // The page is recorded into its own layer, and that layer carries the
         // effect. Shading a live node sampled the window buffer, which already
@@ -391,7 +385,6 @@ DepthStack(
             motion = store.data.settings.pageMotion,
             dragOffset = tabDrag,
         ) { i ->
-            CompositionLocalProvider(LocalHazeHandle provides if (hazeSupported) haze else null) {
                 when (visibleScreens[i]) {
                     Screen.Library -> LibraryScreen(
                         store = store,
@@ -411,12 +404,10 @@ DepthStack(
                         stack = stack + Screen.SettingPage(page)
                     }
                 }
-            }
         }
         return@DepthStack
     }
     val screen = screenAny as Screen
-            CompositionLocalProvider(LocalHazeHandle provides if (hazeSupported) haze else null) {
             when (screen) {
                 Screen.Library -> LibraryScreen(
                     store = store,
@@ -474,7 +465,6 @@ DepthStack(
                     onBack = { pop() },
                     onOpen = { p -> stack = stack + Screen.SettingPage(p) },
                 )
-            }
             }
             }
         }
