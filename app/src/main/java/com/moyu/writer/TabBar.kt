@@ -201,7 +201,9 @@ internal fun MoyuTabBar(
     // ③ 不透明度：×倍率后**必须夹 0..1**，否则 2× 会溢出。paperVeil 与
     //    AGSL 的 veilK 共用这一个值（默认 = 栏的 tabBarOpacity）。
     val lensVeil = (s.tabBarOpacity * lensOpacityFactor).coerceIn(0f, 1f)
-    // ④ 边缘带：栏的 tabEdge × lensEdge，再夹 0..1。
+    // ④ 边缘带：栏的 tabEdge × lensEdge，再夹 0..1。AGSL 路径下这只是
+    //    「增强项」（Fresnel 亮环 / 赤道线 / 边缘变量模糊有基线，0 也不熄）；
+    //    API 31–32 回退路径仍按旧语义 = 0 就不画宽边带。
     val lensEdgeStrength = (s.tabEdge * s.lensEdge).coerceIn(0f, 1f)
     // ⑤ 色散：两边都开才有（默认 lensDispersion=true → 与栏的 tabDispersion 同值）。
     val lensDispersion = s.tabDispersion && s.lensDispersion

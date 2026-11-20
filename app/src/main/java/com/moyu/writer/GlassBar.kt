@@ -66,8 +66,9 @@ internal fun Modifier.liquidGlassBar(
      *  only), 1 = an almost solid paper bar. This is what "不透明度" means
      *  to a reader; scaling the 4.5% tint was invisible. */
     veil: Float = 0f,
-    /** 0..1 strength of the inner bevel band. Reads as glass thickness; it is
-     *  a soft band, not a glow. */
+    /** 0..1 boost on the glass rim (bevel band, Fresnel ring, equator line,
+     *  extra edge blur). The rim itself is part of the material and is always
+     *  drawn; 0 only drops the boost. It is a thickness cue, not a glow. */
     edgeStrength: Float = 1f,
 ): Modifier {
     if (backdrop == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
@@ -101,7 +102,7 @@ internal fun Modifier.liquidGlassBar(
     // The shader's SDF is an exact rounded rect, so only *bar-shaped*
     // rounded-rect surfaces take the new path: the TabBar capsule and the
     // settings preview that mirrors it. Small circular pills are also
-    // CircleShape, so they keep Backdrop's lens — the black-top/Fresnel
+    // CircleShape, so they keep Backdrop's lens — the thickness-field rim
     // geometry must not be stretched over a 40dp chip.
     val canAgsLens = canRefract &&
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
@@ -159,10 +160,11 @@ internal fun Modifier.liquidGlassBar(
             drawRect(tint)
             if (veil > 0f) drawRect(paperVeil)
             // The AGSL lens draws its own Fresnel / specular / equator rim
-            // inside the shader. Keeping the old wide band on top would be a
-            // second bright ring (the one users rejected three times), so on
-            // the AGSL path the band strength is effectively 0. The function
-            // and the other paths are untouched.
+            // inside the shader, and that rim now has a baseline that does not
+            // depend on edgeStrength (the setting is only a boost). Keeping the
+            // old wide band on top would be a second bright ring (the one users
+            // rejected three times), so on the AGSL path the band strength is
+            // effectively 0. The function and the other paths are untouched.
             if (edgeStrength > 0f && !agsSurface(size.width, density)) {
                 // 3.26.13：再放宽一档（用户第二次报「太窄，根本看不出来」）。
                 // 6.4dp 在 1220px 宽的条上只有 ~17px，而且 blur 3.2 把它糊平了，
@@ -190,7 +192,7 @@ internal fun Modifier.liquidGlassBar(
 // radius, a uniform displacement scaled only by distance to the rounded-rect
 // edge, and no surface model. This shader replaces it for bar-shaped surfaces
 // with the complete algorithm: thickness field -> meniscus -> variable blur ->
-// optical-path displacement -> Fresnel with two lights -> black top + equator.
+// optical-path displacement -> Fresnel rim + equator line.
 //
 // It deliberately reuses the existing material knobs instead of adding new
 // settings:
@@ -198,8 +200,9 @@ internal fun Modifier.liquidGlassBar(
 //   * edge height (the algorithm's `H`) has no setting, so it follows the same
 //     slider: H = LENS_HEIGHT_PER_BEVEL * bevel. 1.5 keeps the peak lateral
 //     displacement around one bevel width, i.e. about what `lens()` did.
-//   * `edgeStrength`  -> rim highlights + extra edge blur; 0 = silently off
-//     (same "0 = disabled" convention the old band used)
+//   * `edgeStrength`  -> boost on top of the always-on rim baseline (Fresnel
+//     ring / equator line / extra edge blur). 0 = baseline, not "off": the rim
+//     must read on the default settings (tabEdge = 0 used to multiply it to 0).
 //   * `veil`          -> damps the optical highlights (paper over glass)
 //   * `blurDp`        -> base blur radius; the shader only adds edge blur
 //   * `meniscus`      -> fixed at 1 for now (not exposed)
@@ -212,14 +215,20 @@ internal fun Modifier.liquidGlassBar(
 private const val LENS_HEIGHT_PER_BEVEL = 1.5f
 /** Extra blur the shader adds at the rim, in px, at edgeStrength = 1. */
 private const val LENS_EDGE_BLUR_PX = 6.5f
+/**
+ * Fraction of [LENS_EDGE_BLUR_PX] that is always present at the rim, so the
+ * edge blur reads as glass thickness even with the "edge band" setting at 0.
+ */
+private const val LENS_EDGE_BLUR_BASE = .35f
 /** R/B sample split at the rim when dispersion is on (0..1). */
 private const val LENS_DISPERSION = .06f
 /**
- * Base rim strength added to `edgeStrength`. 0 keeps the "edgeStrength == 0 =
- * silently disabled" convention; raise to 0.5 if the Fresnel rim / equator
- * line should stay visible with the setting at 0.
+ * Baseline strength of the Fresnel rim and the equator line, 0..1.
+ * `edgeStrength` is a *boost* on top of it: 0 -> .55, 1 -> 1. The rim belongs
+ * to the glass model, not to an optional "edge band" switch, so it must stay
+ * visible on the default settings (tabEdge = 0 used to multiply it to 0).
  */
-private const val LENS_RIM_BASE = 0f
+private const val LENS_RIM_BASE = .55f
 private const val LENS_SHADER_KEY = "moyu.liquid.lens"
 
 private const val AGSL_LIQUID_LENS = """
@@ -232,7 +241,7 @@ uniform float cornerRadius;  // rounded-rect corner radius, px
 uniform float bevel;         // width of the curved edge, px
 uniform float edgeHeight;    // height of the glass edge, px (the spec's H)
 uniform float meniscus;      // 1 = concave meniscus (default), 0 = convex
-uniform float edgeK;         // 0..1 edge treatment strength (Fresnel + equator)
+uniform float edgeK;         // 0..1 rim strength: LENS_RIM_BASE + boost
 uniform float veil;          // 0..1 paper veil over the glass
 uniform float dispersion;    // R/B split at the rim, 0 = off
 uniform float blurExtra;     // extra blur radius in the bevel band, px
@@ -326,27 +335,15 @@ half4 main(float2 coord) {
     float highlight = (F * 0.62 + specP + specS) * rimMask * edgeK;
     col += float3(0.97, 0.985, 1.0) * min(highlight, 1.2) * 0.62;
 
-    // 6. black top + equator line. The upper edge mirrors the dark room
-    //    (ny -> +1 at the top); the bright equator line sits on the boundary
-    //    of that dark mirror.
-    //    3.26.60: the black top used to be 2*bevel/size.y tall - .3055 on the
-    //    64dp bar but .379 on the 57dp lens, i.e. 15-19% of the height, with
-    //    the equator one bevel below the top. On the lens the paper veil is
-    //    not drawn (veilK was 0), so the unattenuated black showed as the
-    //    measured (3,4,6) = float3(.012,.015,.025)*255 band. Cap the ratio at
-    //    .10, i.e. 5% of the height on both surfaces, and blend at .35.
-    //    The equator keeps tracking b0, so it follows the new cap; its width
-    //    coefficient goes .09 -> .16 because b0 moved from 15.3% to 5% below
-    //    the top edge and .09 collapsed to the 0.012 floor there: a 1px
-    //    hairline hugging the top edge.
+    // 6. equator line: one bright hairline just inside the upper bevel.
+    //    Nothing dark is painted at the top edge any more: the old dark-top
+    //    mask (smoothstep(b0, ...) + mix) is deleted, and with it b0. The line
+    //    is pinned at a fixed ny (a few dp under the top edge, independent of
+    //    the bevel ratio) instead of tracking b0, so a bevel change cannot move
+    //    it. Width is a narrow Gaussian (~1px); its strength keeps the
+    //    edgeStrength boost like the Fresnel rim.
     float ny = -p.y / max(b.y, 1.0);
-    float bevelNy = clamp(2.0 * bevel / max(size.y, 1.0), 0.02, 0.10);
-    float b0 = 1.0 - bevelNy;
-    float b1 = min(1.0, b0 + 0.30 * bevelNy + 0.04);
-    float blackMask = smoothstep(b0, b1, ny);
-    col = mix(col, float3(0.012, 0.015, 0.025), blackMask * 0.35);
-    float eqW = max(0.012, bevelNy * 0.16);
-    float eq = (ny - b0) / eqW;
+    float eq = (ny - 0.89) / 0.022;
     float equator = exp(-eq * eq);
     col += float3(0.78, 0.82, 0.90) * equator * 0.42 * edgeK * (1.0 - 0.72 * veil);
 
@@ -383,8 +380,13 @@ internal fun BackdropEffectScope.buildLensEffect(
         ?.coerceIn(0f, minDim * .5f)
         ?: (minDim * .5f)
     val edgeRaw = edgeStrength.coerceIn(0f, 1f)
-    val edgeK = (edgeRaw + LENS_RIM_BASE).coerceIn(0f, 1f)
-    val blurExtra = if (edgeRaw > 0f) LENS_EDGE_BLUR_PX * edgeRaw else 0f
+    // The Fresnel rim / equator line are always on; the setting only boosts
+    // them (0 -> LENS_RIM_BASE, 1 -> 1).
+    val edgeK = LENS_RIM_BASE + (1f - LENS_RIM_BASE) * edgeRaw
+    // Same for the extra rim blur: always present so the edge reads as a
+    // thickness gradient, boosted by the setting.
+    val blurExtra = LENS_EDGE_BLUR_PX *
+        (LENS_EDGE_BLUR_BASE + (1f - LENS_EDGE_BLUR_BASE) * edgeRaw)
     // The compressed surroundings are sampled up to ~one bevel outside the
     // edge, so the recorded layer must reach at least that far.
     padding = maxOf(padding, bevel * 1.15f + blurExtra + 2f)
