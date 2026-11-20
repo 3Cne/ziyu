@@ -9,7 +9,7 @@ import androidx.compose.ui.layout.LayoutCoordinates
 /**
  * One shared element in flight between two pages.
  *
- * Same recipe as the transcript's send flight (`AiTab`): remember the live
+ * Same recipe as the old 问书 send flight: remember the live
  * `LayoutCoordinates` of both ends, keep the real element invisible while the
  * overlay travels, and read both rectangles every frame. Cached rectangles went
  * stale because the page pager moves pages with a graphics-layer translation,

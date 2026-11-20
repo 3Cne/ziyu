@@ -91,8 +91,8 @@ internal fun MoyuTabBar(
     current: Int,
     onSelect: (Int) -> Unit,
     backdrop: Backdrop? = null,
-    /** 显示哪些页（0 书架 / 1 笔记 / 2 数据 / 3 问书 / 4 设置），顺序固定；默认全显示。 */
-    visible: List<Int> = listOf(0, 1, 2, 3, 4),
+    /** 显示哪些页（0 书架 / 1 笔记 / 2 数据 / 3 设置），顺序固定；默认全显示。 */
+    visible: List<Int> = listOf(0, 1, 2, 3),
     /** 长按拖动时的连续位置（0..n-1），松手回 null。root 用它驱动页面跟着走。 */
     onDrag: (Float?) -> Unit = {},
 ) {
@@ -100,15 +100,14 @@ internal fun MoyuTabBar(
     val p = ui.palette
     val s = ui.settings
     val motionNone = s.motion == "none"
-    val defaults = listOf("书架", "笔记", "数据", "问书", "设置")
-    // Five tabs since 3.10.0: 问书 sits between 数据 and 设置. The name list is
-    // read through `defaults` so a data file written by an older build (four
-    // names) still lines up after normalize() inserts the fifth slot.
+    val defaults = listOf("书架", "笔记", "数据", "设置")
+    // Four tabs since 3.26.64（问书页下线）：设置永远在最后一项。名字表仍按
+    // `defaults` 逐位读，旧数据（含「问书」那一位的五个名字）由 normalize 换成四个。
     val allNames = List(defaults.size) { i ->
         s.tabNames.getOrNull(i)?.ifBlank { defaults[i] } ?: defaults[i]
     }
-    val allIcons = listOf(Glyph.Book, Glyph.Note, Glyph.Chart, Glyph.Sparkles, Glyph.Gear)
-    val shown = visible.ifEmpty { listOf(4) }
+    val allIcons = listOf(Glyph.Book, Glyph.Note, Glyph.Chart, Glyph.Gear)
+    val shown = visible.ifEmpty { listOf(3) }
     val names = shown.map { allNames.getOrElse(it) { defaults[it] } }
     val icons = shown.map { allIcons[it] }
     val height = if (s.showTabLabels) 64.dp else 56.dp
@@ -139,7 +138,7 @@ internal fun MoyuTabBar(
 
     // 手势协程只在 key 变化时重启，闭包会把当时的 current / 回调冻结住。
     // 切过一次页之后，闭包里还是旧值——「长按是否按在当前格」永远不成立，
-    // 表现就是长按拖动彻底失效（2026-11-15 实测：切到问书后 DOWN 仍报 cur=0）。
+    // 表现就是长按拖动彻底失效（2026-11-15 实测：切到别的 tab 后 DOWN 仍报 cur=0）。
     val currentNow by androidx.compose.runtime.rememberUpdatedState(current)
     val onSelectNow by androidx.compose.runtime.rememberUpdatedState(onSelect)
     val onDragNow by androidx.compose.runtime.rememberUpdatedState(onDrag)

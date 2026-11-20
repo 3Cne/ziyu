@@ -60,7 +60,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.derivedStateOf
@@ -86,26 +85,6 @@ import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlin.math.roundToInt
-
-/**
- * 清空问书聊天记录的一次性信号（3.26.51）。
- *
- * 3.26.64：设置页的「清空问书聊天记录」已随问书下线删除，本对象**目前没有生产者**；
- * 保留是因为 AiTab.kt 仍以 `version` 作 LaunchedEffect key（第二波删问书时一起删）。
- *
- * 聊天记录存在 `filesDir/ai/<bookId>.json` 的 `turns`（见 `MemoStore`）。设置页把盘上的
- * `turns` 清空后 bump 一次；问书页（AiTab.kt）用 `version` 当 LaunchedEffect key 重新读盘，
- * 这样用户从设置回到问书就是空态——否则 `AiScreen` 常驻组合、`memo` 只在首次组合时读盘，
- * 旧的对话会一直留在内存里，还会在下一次发问时被 `persist` 写回盘。
- *
- * 只做版本通知，不保存任何对话内容；`version` 从 0 起，首次组合时 AiTab 读到 0 不动作。
- */
-internal object ChatClearSignal {
-    var version by mutableIntStateOf(0)
-    fun bump() {
-        version++
-    }
-}
 
 internal val accentChoices = listOf(
     "墨黑" to 0xFF22221E,
@@ -1122,8 +1101,8 @@ private fun NavigationSettingsPage(store: AppStore, onBack: () -> Unit) {
     val ui = LocalInk.current
     val s = ui.settings
     var names by remember { mutableStateOf(s.tabNames) }
-    val tabDefaults = listOf("书架", "笔记", "数据", "问书", "设置")
-    SettingsPage("标签栏", "五个入口的名字，改完立刻出现在底部。", onBack) {
+    val tabDefaults = listOf("书架", "笔记", "数据", "设置")
+    SettingsPage("标签栏", "四个入口的名字，改完立刻出现在底部。", onBack) {
         item { MiniTabPreview(names, s.showTabLabels) }
         item { SectionCaption("显示") }
         item {
@@ -1135,18 +1114,17 @@ private fun NavigationSettingsPage(store: AppStore, onBack: () -> Unit) {
         }
         item { SectionCaption("显示哪些页面") }
         item {
-            // 设置页永远在；其余四项可单独关掉，至少留一个。
+            // 设置页永远在；其余三项可单独关掉，至少留一个。
             val pages = listOf(
                 Triple("library", "书架", Glyph.Book),
                 Triple("notes", "笔记", Glyph.Note),
                 Triple("stats", "数据", Glyph.Chart),
-                Triple("ai", "问书", Glyph.Sparkles),
             )
             SettingGroup {
                 pages.forEachIndexed { i, (key, label, glyph) ->
                     if (i > 0) RowDivider()
                     val on = key !in s.hiddenTabs
-                    val wouldBeEmpty = on && s.hiddenTabs.size >= 3
+                    val wouldBeEmpty = on && s.hiddenTabs.size >= 2
                     SettingRow(
                         label,
                         when {
@@ -1158,7 +1136,7 @@ private fun NavigationSettingsPage(store: AppStore, onBack: () -> Unit) {
                     ) {
                         Box(androidx.compose.ui.Modifier.alpha(if (wouldBeEmpty) .45f else 1f)) {
                             InkToggle(on) { next ->
-                                if (!next && s.hiddenTabs.size >= 3) {
+                                if (!next && s.hiddenTabs.size >= 2) {
                                     ToastBus.show("至少留一个页面")
                                 } else {
                                     store.updateSettings {
@@ -1230,7 +1208,7 @@ private fun MiniTabPreview(names: List<String>, showLabels: Boolean) {
     val ui = LocalInk.current
     MoyuSurface(androidx.compose.ui.Modifier.fillMaxWidth(), radius = 30f, flat = true) {
         Row(androidx.compose.ui.Modifier.fillMaxWidth().padding(7.dp)) {
-            val icons = listOf(Glyph.Book, Glyph.Note, Glyph.Chart, Glyph.Sparkles, Glyph.Gear)
+            val icons = listOf(Glyph.Book, Glyph.Note, Glyph.Chart, Glyph.Gear)
             names.forEachIndexed { index, name ->
                 val active = index == 0
                 Column(

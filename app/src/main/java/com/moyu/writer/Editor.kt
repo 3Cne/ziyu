@@ -477,7 +477,6 @@ fun WritingScreen(
     var floatNotePanel by remember(seedKey) { mutableStateOf(false) }
     // 3.26.23: floating story bible opened from the dock (chapter pages only).
     var storyFloat by remember(seedKey) { mutableStateOf(false) }
-    var storyJournalTick by remember { mutableIntStateOf(0) }
     // 能力栏（工具 + 符号栏）的展开态：左下角的球收起/展开整块能力栏。
     // 2026-11-15 用户要求「展开和关闭要有记忆性」：初值取设置里的 dockOpen
     // （首次与旧备份默认收起），每次开合写回设置。
@@ -762,7 +761,7 @@ fun WritingScreen(
         val key = AiKey.load(context)
         // 3.26.64：只看 Key；AI 总开关已下线，不再读 settings.aiEnabled（默认 false 会永久拦住校核）。
         if (key.isNullOrBlank()) {
-            proofError = "还没配置 AI：设置 → AI 与记忆"
+            proofError = "还没配置 AI：设置 → AI"
             return
         }
         proofBusy = true
@@ -833,7 +832,7 @@ fun WritingScreen(
         val key = AiKey.load(context)
         // 3.26.64：只看 Key（AI 总开关已下线），否则修饰永远进不去。
         if (key.isNullOrBlank()) {
-            proofError = "还没配置 AI：设置 → AI 与记忆"
+            proofError = "还没配置 AI：设置 → AI"
             return
         }
         if (proofBusy) return
@@ -1035,7 +1034,7 @@ fun WritingScreen(
         val key = AiKey.load(context)
         // 3.26.64：只看 Key（AI 总开关已下线），否则「问」永远发不出去。
         if (key.isNullOrBlank()) {
-            askError = "还没配置 AI：设置 → 问书 AI"
+            askError = "还没配置 AI：设置 → AI"
             return
         }
         // 本轮提问自己不进「历史对话」：问题由 AskContextBuilder 的 question 给，
@@ -1139,7 +1138,7 @@ fun WritingScreen(
         if (key.isNullOrBlank()) {
             proofOpen = true
             polishMode = false
-            proofError = "还没配置 AI：设置 → 问书 AI"
+            proofError = "还没配置 AI：设置 → AI"
             return
         }
         hideEditorKeyboard()
@@ -2045,22 +2044,13 @@ fun WritingScreen(
                 )
             }
             // 3.26.23: floating story bible (same panes as the story page).
+            // 3.26.64：AI 改动记录 / 撤销最近一次改动随问书下线删除，这里只传书本与落库回调。
             val storyBook = proofBookId?.let { store.book(it) }
-            val storyJournal = remember(storyFloat, storyBook?.id, storyJournalTick) {
-                if (storyFloat && storyBook != null) {
-                    AiBible.recent(context, 12).map { it.optString("label") to it.optLong("time") }
-                } else emptyList()
-            }
             if (storyFloat && storyBook != null) {
                 StoryBibleFloatSheet(
                     book = storyBook,
                     onBible = { store.updateBible(storyBook.id, it) },
                     onDismiss = { storyFloat = false },
-                    journal = storyJournal,
-                    onUndo = {
-                        ToastBus.show(AiBible.undoLast(context, store, storyBook.id))
-                        storyJournalTick++
-                    },
                 )
             }
             }

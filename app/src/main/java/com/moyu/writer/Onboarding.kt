@@ -108,7 +108,7 @@ import kotlin.math.roundToInt
 /**
  * 「立即重播上手引导」信号（3.26.54）。
  *
- * 形态照 [ChatClearSignal]：只有一个自增版本号，不携带任何内容。生产者是设置页，
+ * 形态与 [TutorialSignal] 同一类：只有一个自增版本号，不携带任何内容。生产者是设置页，
  * 消费者是根组合（App.kt 的 `snapshotFlow { TutorialSignal.version }`）。
  *
  * **Settings.kt 要加的一行**（「重看功能引导」的 onClick 里，清完两个标记之后）：
@@ -185,7 +185,7 @@ val LANDING_TUTORIAL: TutorialGroup = TutorialGroup(
 /** 示意图种类。真正画法在 [PptArtView]，这里只留类型，避免把 Composable lambda 放进数据。 */
 private enum class PptArt {
     Welcome, NewBook, NewChapter, Writing, Select, Ability, Symbols, Type,
-    Todo, Notes, Export, AiTools, Story, Backup, Look, Stats, Done,
+    Todo, Notes, Export, AskTools, Story, Backup, Look, Stats, Done,
 }
 
 /** 一页：大标题 + 一句说明 + 一张示意图。 */
@@ -207,7 +207,7 @@ private val PPT_PAGES: List<PptPage> = listOf(
     PptPage("待办与提醒", "笔记里以方框开头的行会变成待办，还能给它设到点提醒。", PptArt.Todo),
     PptPage("笔记夹与章节", "笔记放进笔记夹，也能关联到某一章，写作时就在正文旁边。", PptArt.Notes),
     PptPage("文字带得走", "书能导出成 EPUB 或 TXT，文件会出现在下载目录里。", PptArt.Export),
-    PptPage("校核、修饰、问", "选中一段再点 AI：校核挑错、修饰润色，问就聊这一段。", PptArt.AiTools),
+    PptPage("校核、修饰、问", "选中一段再点 AI：校核挑错、修饰润色，问就聊这一段。", PptArt.AskTools),
     PptPage("故事圣经", "角色、关系、时间线和大纲收在一处，都能自己改。", PptArt.Story),
     PptPage("备份与恢复", "全部内容能导出成一份备份，换手机时再恢复回来。", PptArt.Backup),
     PptPage("外观由你定", "主题、点缀色、字体和玻璃材质都在外观里，改完立刻生效。", PptArt.Look),
@@ -704,7 +704,7 @@ private fun PptArtView(art: PptArt, active: Boolean, modifier: Modifier = Modifi
             PptArt.Todo -> ArtTodo(active)
             PptArt.Notes -> ArtNotes(active)
             PptArt.Export -> ArtExport(active)
-            PptArt.AiTools -> ArtAiTools(active)
+            PptArt.AskTools -> ArtAskTools(active)
             PptArt.Story -> ArtStory(active)
             PptArt.Backup -> ArtBackup(active)
             PptArt.Look -> ArtLook(active)
@@ -1412,7 +1412,7 @@ private fun ArtExport(active: Boolean) {
 }
 
 @Composable
-private fun ArtAiTools(active: Boolean) {
+private fun ArtAskTools(active: Boolean) {
     val ui = LocalInk.current
     val p = ui.palette
     Column(

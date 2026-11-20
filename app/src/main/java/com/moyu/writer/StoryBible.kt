@@ -119,7 +119,6 @@ import kotlinx.coroutines.launch
 fun StorySheet(
     book: Book,
     onBible: (BookBible) -> Unit,
-    onOpenChapter: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
     // 导航只剩「视图」一层（角色 / 时间线 / 大纲）；默认停在大纲（写作前规划台）。
@@ -2462,8 +2461,6 @@ private fun chineseNumber(text: String): Int? {
  * - 点 X：关浮层。
  * - 滑动：面板内容纵向滚；角色图同故事面板手势。
  *
- * [journal] / [onUndo]：Editor.kt 仍按名传这两个参数（那边下一波随问书一起删），本面板已不再使用。
- *
  * TODO(bleedContent): ModalSheet 还没有 bleedContent（3.26.47 只有 InlineModalSheet 有），
  * 悬浮故事页暂时保留 [storyBleed] 反向多量；Design.kt 给 ModalSheet 补上后删掉这层、
  * 改成 bleedContent = true，并只留每页自己的 [SHEET_CONTENT_INSET]。
@@ -2473,8 +2470,6 @@ internal fun StoryBibleFloatSheet(
     book: Book,
     onBible: (BookBible) -> Unit,
     onDismiss: () -> Unit,
-    journal: List<Pair<String, Long>> = emptyList(),
-    onUndo: (() -> Unit)? = null,
 ) {
     val ui = LocalInk.current
     val pager = remember { StoryPagerState() }
@@ -2590,22 +2585,6 @@ private fun StoryNavBody(
             }
         }
     }
-}
-
-/**
- * 空兼容壳（3.26.64）：问书页 AiTab 仍按名调用 `StoryPendingDrawerHost(book, store, shown, onDismiss)`，
- * 而「待同意 AI 改动」的整块 UI（抽屉 / 行组件 / 字段级差异 / 侧车读取）已随故事面板的 AI 一起删除。
- *
- * 这里只保留签名、不渲染任何东西——第二波删问书（AiTab）时连这个壳一起删。
- */
-@Composable
-internal fun StoryPendingDrawerHost(
-    book: Book,
-    store: AppStore,
-    shown: Boolean,
-    onDismiss: () -> Unit,
-) {
-    // 无 UI：待同意机制已下线（见上方注释）。
 }
 
 // ───────────────────── 三个视图共用的页面骨架（3.26.48） ─────────────────────
@@ -3222,10 +3201,6 @@ private fun outlineNodesToBuild(book: Book): List<OutlineNode> =
 
 /**
  * 按大纲建章：把一个未落地节点变成一章（标题用节点标题），再把 node.chapterId 指回新章。
- *
- * 与 AI 工具 `chapters_from_outline` 的落地逻辑同源（那里在 AiTab.applyQueue 的
- * `AiPendingKind.ChapterFromOutline` 分支），但那边是 composable 里的 local function、
- * 本文件调不到，所以这里用同一对 store 写入口复刻：updateBook 加章 + updateBible 回填 chapterId。
  *
  * 3.26.56：批量入口 [BuildChaptersFromOutlineDialog] 逐条调这里——**同一条落地路径**，
  * 不新造存储 / 网络层；每次调用都从 store 重读，所以连着建多章时章号、大纲回填都正确。

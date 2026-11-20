@@ -138,42 +138,6 @@ object Proofing {
         return dedupe(out)
     }
 
-    /**
-     * Variants of names the writer already stored (3+ characters, so a single
-     * wrong character is a real signal rather than a common short word).
-     */
-    fun names(text: String, facts: List<MemoFact>): List<ProofIssue> {
-        val names = facts
-            .filter { it.enabled && it.name.length in 3..6 }
-            .map { it.name.trim() }
-            .filter { n -> n.all { it in HAN } }
-            .distinct()
-        if (names.isEmpty()) return emptyList()
-        val out = ArrayList<ProofIssue>()
-        for (name in names) {
-            val n = name.length
-            var i = 0
-            while (i + n <= text.length) {
-                val win = text.substring(i, i + n)
-                if (win != name && win.all { it in HAN }) {
-                    var diff = 0
-                    for (k in 0 until n) if (win[k] != name[k]) diff++
-                    if (diff == 1) {
-                        out += ProofIssue(
-                            kind = "错别字",
-                            quote = win,
-                            suggestion = name,
-                            why = "记忆里的名字是「$name」",
-                            local = true,
-                        )
-                    }
-                }
-                i++
-            }
-        }
-        return dedupe(out)
-    }
-
     /** The semantic pass. Sending the passage is the writer's explicit choice.
      *  Names are deliberately out of scope: the model has no authority over a
      *  character's spelling, and with no list it "fixed" 赵意年 into 赵意念 by

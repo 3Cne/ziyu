@@ -106,8 +106,7 @@ sealed class Screen(val depth: Int, val tabIndex: Int? = null) {
     data object Library : Screen(0, 0)
     data object Notes : Screen(0, 1)
     data object Stats : Screen(0, 2)
-    data object Ai : Screen(0, 3)
-    data object Settings : Screen(0, 4)
+    data object Settings : Screen(0, 3)
     data class BookDetail(val bookId: String) : Screen(1)
     data class ChapterEditor(val bookId: String, val chapterId: String) : Screen(2)
     /** 笔记夹里的一页；folderId 为 null 是「未归类」。 */
@@ -352,12 +351,12 @@ val rootTab = stack.firstOrNull { it.depth == 0 }?.tabIndex ?: 0
 // → 面板所在页不会 dispose → suppress 只置位不复位，TabBar 会永久消失。
 // TabBar 被 suppress 时用户点不到 tab，所以这里只可能被「返回重置栈」触发，不会误复位。
 LaunchedEffect(rootTab) { sheetSuppressed = false }
-// 底部可以关掉「书架 / 笔记 / 数据 / 问书」中的任意几页；设置永远在。
+// 底部可以关掉「书架 / 笔记 / 数据」中的任意几页；设置永远在（最后一项）。
 // key 与 Screen.tabIndex 一一对应，顺序固定，关掉后不重排。
-val tabKeys = listOf("library", "notes", "stats", "ai", "settings")
-val tabScreens = listOf(Screen.Library, Screen.Notes, Screen.Stats, Screen.Ai, Screen.Settings)
+val tabKeys = listOf("library", "notes", "stats", "settings")
+val tabScreens = listOf(Screen.Library, Screen.Notes, Screen.Stats, Screen.Settings)
 val hiddenTabs = ui.settings.hiddenTabs.toSet()
-val visibleTabs = tabKeys.indices.filter { it == 4 || tabKeys[it] !in hiddenTabs }
+val visibleTabs = tabKeys.indices.filter { it == tabKeys.lastIndex || tabKeys[it] !in hiddenTabs }
 val visibleScreens = visibleTabs.map { tabScreens[it] }
 val rootIndex = visibleScreens.indexOfFirst { it.tabIndex == rootTab }.coerceAtLeast(0)
 // 正停在被关掉的那页时自动回退到第一个可见页，否则页面和底栏会对不上。
@@ -377,7 +376,7 @@ DepthStack(
     },
 ) { screenAny, _ ->
     if (screenAny == RootTabsLayer) {
-        // Root tabs: four pages live side by side, the whole strip
+        // Root tabs: three pages live side by side, the whole strip
         // slides by |Δtab| screens so 笔记 and 数据 really pass through.
         val perPage = when (store.data.settings.motion) {
             "none" -> 0
@@ -408,14 +407,6 @@ DepthStack(
                         onCreateNote = { noteId -> stack = stack + Screen.NoteEditor(noteId) },
                     )
                     Screen.Stats -> StatsScreen(store)
-                    Screen.Ai -> AiScreen(
-                        store = store,
-                        onOpenChapter = { bookId, chapterId ->
-                            stack = stack + Screen.ChapterEditor(bookId, chapterId)
-                        },
-                        onOpenBook = { bookId -> stack = stack + Screen.BookDetail(bookId) },
-                        onOpenNote = { noteId -> stack = stack + Screen.NoteEditor(noteId) },
-                    )
                     else -> SettingsScreen(store, settingsListState) { page ->
                         stack = stack + Screen.SettingPage(page)
                     }
@@ -439,14 +430,6 @@ DepthStack(
                     onCreateNote = { noteId -> stack = stack + Screen.NoteEditor(noteId) },
                 )
                 Screen.Stats -> StatsScreen(store)
-                Screen.Ai -> AiScreen(
-                    store = store,
-                    onOpenChapter = { bookId, chapterId ->
-                        stack = stack + Screen.ChapterEditor(bookId, chapterId)
-                    },
-                    onOpenBook = { bookId -> stack = stack + Screen.BookDetail(bookId) },
-                    onOpenNote = { noteId -> stack = stack + Screen.NoteEditor(noteId) },
-                )
                 Screen.Settings -> SettingsScreen(store, settingsListState) { page ->
                     stack = stack + Screen.SettingPage(page)
                 }
@@ -524,12 +507,12 @@ DepthStack(
                 // 登记到 TutorialRegistry；Lead 后续把真实锚点逐个加到页面里。
                 .tutorialAnchor("app.tabBar"),
         ) {
-            // 同一套规则就近再算一次：设置永远在，其余按开关过滤，顺序固定。
-            val barKeys = listOf("library", "notes", "stats", "ai", "settings")
+            // 同一套规则就近再算一次：设置永远在（最后一项），其余按开关过滤，顺序固定。
+            val barKeys = listOf("library", "notes", "stats", "settings")
             val barHidden = ui.settings.hiddenTabs.toSet()
-            val barVisible = barKeys.indices.filter { it == 4 || barKeys[it] !in barHidden }
+            val barVisible = barKeys.indices.filter { it == barKeys.lastIndex || barKeys[it] !in barHidden }
             val barScreens = barVisible.map {
-                listOf(Screen.Library, Screen.Notes, Screen.Stats, Screen.Ai, Screen.Settings)[it]
+                listOf(Screen.Library, Screen.Notes, Screen.Stats, Screen.Settings)[it]
             }
             val barPos = barScreens.indexOfFirst {
                 it.tabIndex == (stack.firstOrNull { s -> s.depth == 0 }?.tabIndex ?: 0)

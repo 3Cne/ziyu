@@ -1529,10 +1529,6 @@ fun BookDetailScreen(
         StorySheet(
             book = book,
             onBible = { next -> store.updateBook(book.id) { it.copy(bible = next) } },
-            onOpenChapter = { chapterId ->
-                storyOpen = false
-                onOpenChapter(book.id, chapterId)
-            },
             onDismiss = { storyOpen = false },
         )
     }

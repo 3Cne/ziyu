@@ -366,8 +366,8 @@ data class AppSettings(
      * 所以作者之后自己把纸色罩调回 84% 不会被改第二次。
      */
     val glassVeilMigrated: Boolean = false,
-    val tabNames: List<String> = listOf("书架", "笔记", "数据", "问书", "设置"),
-    /** 被关掉的底部页面 key：library / notes / stats / ai。设置页永远显示。 */
+    val tabNames: List<String> = listOf("书架", "笔记", "数据", "设置"),
+    /** 被关掉的底部页面 key：library / notes / stats。设置页永远显示。 */
     val hiddenTabs: List<String> = listOf("stats"),
     val dailyGoal: Int = 2000,
     val indent: Boolean = true,
@@ -775,12 +775,6 @@ class AppStore(context: Context) {
             } else d.dailyWords
             d.copy(books = books, dailyWords = daily, lastBookId = bookId, lastChapterId = chapterId)
         }
-        // 3.26.23: chapter text is the source of truth. Once the body is saved, ask the
-        // auto-organizer to fold what is now written into the story bible (3 min throttle,
-        // it self-checks aiEnabled / aiBibleSync / key, and never blocks the save).
-        if (content != null) {
-            AiBibleSync.noteChapterSaved(appContext, this, bookId, chapterId)
-        }
     }
 
     /**
@@ -1134,14 +1128,15 @@ class AppStore(context: Context) {
             settings = settings.copy(noteFloatW = .34f)
         }
 
-        // Five tabs now: 问书 sits between 数据 and 设置. Data saved by earlier
-        // builds carries four names in the old order, so the fifth slot is
-        // inserted rather than appended — appending would put 设置 before it.
-        val tabDefaults = listOf("书架", "笔记", "数据", "问书", "设置")
-        if (settings.tabNames.size != 5) {
-            val four = (settings.tabNames.take(4) + tabDefaults).distinct().take(4)
-            settings = settings.copy(tabNames = four.take(3) + tabDefaults[3] + four.drop(3))
-        }
+        // Four tabs since 3.26.64（问书页下线）。旧数据可能是五个名字（「问书」夹在数据与设置
+        // 之间）：先把「问书」那一位去掉；去完正好四条就原样保留（自定义名不丢），
+        // 否则用前三个 + 默认「设置」补齐——设置永远在最后一项。
+        val tabDefaults = listOf("书架", "笔记", "数据", "设置")
+        val cleaned = settings.tabNames.filterNot { it == "问书" }
+        settings = settings.copy(
+            tabNames = if (cleaned.size == 4) cleaned
+            else (0 until 3).map { cleaned.getOrElse(it) { tabDefaults[it] } } + tabDefaults[3],
+        )
         settings = settings.copy(
             aiBaseUrl = settings.aiBaseUrl.trim().ifBlank { "https://api.deepseek.com" },
             aiModel = settings.aiModel.trim().ifBlank { "deepseek-chat" },
@@ -1653,7 +1648,7 @@ private fun decodeSettings(o: JSONObject?): AppSettings {
             ?: d.tabNames,
         hiddenTabs = o?.optJSONArray("hiddenTabs")
             ?.let { a -> (0 until a.length()).map { a.optString(it) } }
-            ?.filter { it in setOf("library", "notes", "stats", "ai") }
+            ?.filter { it in setOf("library", "notes", "stats") }
             ?: d.hiddenTabs,
         dailyGoal = o?.optInt("dailyGoal", d.dailyGoal) ?: d.dailyGoal,
         indent = o?.optBoolean("indent", d.indent) ?: d.indent,
