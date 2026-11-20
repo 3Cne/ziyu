@@ -87,11 +87,10 @@ private val TAB_LENS_W_DP = 72.dp
 private val TAB_LENS_H_DP = 56.dp
 
 /**
- * 3.26.67：镜片圆角 18dp（< 高/2 = 28dp），比 3.26.21 的纯胶囊（高/2）扁一档；
- * 再交给 [SmoothCornerShape] 做曲率连续的平滑圆角，切点不会出现「棱角」——
- * 用户要的「越润越好」由这层平滑给，尺寸交给上面两个常量。
+ * 3.26.68：圆角回到纯胶囊 = 高/2，**尺寸保持 72×56 不动**（用户：「只改圆角，尺寸不动」）。
+ * 仍是 [SmoothCornerShape] 做曲率连续平滑，所以端头是圆润的胶囊而不是「圆角矩形」。
  */
-private val TAB_LENS_CORNER_DP = 18.dp
+private val TAB_LENS_CORNER_DP = TAB_LENS_H_DP / 2
 
 /**
  * Floating four-tab bar made from a real liquid-glass surface.
