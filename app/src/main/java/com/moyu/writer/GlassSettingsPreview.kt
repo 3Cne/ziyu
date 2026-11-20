@@ -34,6 +34,11 @@ import com.kyant.backdrop.backdrops.rememberLayerBackdrop
  *
  * 以前标签栏/镜片走一张图、输入框/按钮走另一张图，宽度和画法都不一样，滑杆
  * 动一下看到的不是同一套东西。现在只换中间那颗控件，底和宽度始终一致。
+ *
+ * 3.26.66：弯折宽度 / 边缘压缩是全局设置，`liquidGlassBar` 内部统一读
+ * `AppSettings.glassBend` / `glassSqueeze` 再进 `glassLensBand`——预览和真表面
+ * 走的是同一条换算（连 `.55×minSide` 封顶都在同一函数里），这里不写死数值、
+ * 也不另拼公式。因此拖动「弯折」两行时本预览会随重组即时重算。
  */
 @Composable
 internal fun GlassLivePreview(group: Int, s: AppSettings) {

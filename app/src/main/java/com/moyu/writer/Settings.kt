@@ -1736,14 +1736,36 @@ private fun AiSettingsPage(store: AppStore, onBack: () -> Unit) {
     }
 }
 
+// 3.26.66：「弯折宽度 / 边缘压缩」滑杆是 0–100%，内部量程不同。映射只写在这几个
+// 小函数里（纯 UI 换算）；内部默认值仍由 AppSettings 单源给出（2.2 / 1.0）。
+private const val GLASS_BEND_FROM = 1f
+private const val GLASS_BEND_TO = 4f
+private const val GLASS_SQUEEZE_FROM = .5f
+private const val GLASS_SQUEEZE_TO = 1.5f
+
+private fun glassBendToUi(v: Float): Float =
+    ((v - GLASS_BEND_FROM) / (GLASS_BEND_TO - GLASS_BEND_FROM)).coerceIn(0f, 1f)
+
+private fun glassBendFromUi(v: Float): Float =
+    GLASS_BEND_FROM + v.coerceIn(0f, 1f) * (GLASS_BEND_TO - GLASS_BEND_FROM)
+
+private fun glassSqueezeToUi(v: Float): Float =
+    ((v - GLASS_SQUEEZE_FROM) / (GLASS_SQUEEZE_TO - GLASS_SQUEEZE_FROM)).coerceIn(0f, 1f)
+
+private fun glassSqueezeFromUi(v: Float): Float =
+    GLASS_SQUEEZE_FROM + v.coerceIn(0f, 1f) * (GLASS_SQUEEZE_TO - GLASS_SQUEEZE_FROM)
+
 /** A named slider with its live value and a one-line explanation. Used by the
- *  glass section so the knobs do not need bespoke rows. */
+ *  glass section so the knobs do not need bespoke rows.
+ *  3.26.66 加 [subtitle]：只给「弯折宽度 / 边缘压缩」写「越大…」的一句话说明；
+ *  其它行不传时与原来逐像素一致（标题行 + 滑杆的结构不变）。 */
 @Composable
 private fun GlassSliderRow(
     title: String,
     value: Float,
     min: Float,
     max: Float,
+    subtitle: String? = null,
     onChange: (Float) -> Unit,
 ) {
     val ui = LocalInk.current
@@ -1756,6 +1778,10 @@ private fun GlassSliderRow(
                 size = 12f,
                 color = ui.palette.muted,
             )
+        }
+        if (subtitle != null) {
+            Spacer(androidx.compose.ui.Modifier.height(2.dp))
+            Txt(subtitle, size = 10.5f, color = ui.palette.muted, lineHeight = 14f)
         }
         Spacer(androidx.compose.ui.Modifier.height(6.dp))
         InkSlider(value = value, onChange = onChange, min = min, max = max)
@@ -1796,6 +1822,28 @@ private fun GlassSettingsPage(store: AppStore, onBack: () -> Unit) {
     // the reason "nothing moves while I drag": each new value reset the timer,
     // so a continuous drag never let a single snapshot through.
     SettingsPage("玻璃", "", onBack) {
+        // 3.26.66：弯折宽度 / 边缘压缩是**全局**参数（乘到所有玻璃表面的折射带），
+        // 不属于五个表面分组，所以放在切换器之前单独一节；切换器与下方六行不动。
+        item { SectionCaption("弯折") }
+        item {
+            SettingGroup {
+                GlassSliderRow(
+                    "弯折宽度",
+                    glassBendToUi(s.glassBend),
+                    0f,
+                    1f,
+                    subtitle = "越大，边缘被掰弯的带越宽",
+                ) { v -> store.updateSettings { it.copy(glassBend = glassBendFromUi(v)) } }
+                RowDivider()
+                GlassSliderRow(
+                    "边缘压缩",
+                    glassSqueezeToUi(s.glassSqueeze),
+                    0f,
+                    1f,
+                    subtitle = "越大，边缘内容挤得越狠",
+                ) { v -> store.updateSettings { it.copy(glassSqueeze = glassSqueezeFromUi(v)) } }
+            }
+        }
         item {
             Segmented(
                 listOf("标签栏", "镜片", "输入框", "按钮", "通知"),
