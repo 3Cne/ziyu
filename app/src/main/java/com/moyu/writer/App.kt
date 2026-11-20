@@ -233,10 +233,6 @@ private fun MoyuRoot(store: AppStore, initialNote: String?, consumeInitialNote: 
     // TabBar 是 root 的兄弟节点、画在页面之上，不收面板底部会被盖住、点不到。
     var sheetSuppressed by remember { mutableStateOf(false) }
     val suppressSheet: (Boolean) -> Unit = remember { { v -> sheetSuppressed = v } }
-    // 兜底：根 tab 变化时强制复位。风险场景 = 面板打开中按系统返回、栈被重置回书架，
-    // 而所有根 tab 页常驻组合（TabPager.kt:106），面板所在页不会 dispose → suppress 只置位不复位，
-    // TabBar 会永久消失。TabBar 被 suppress 时用户无法切 tab，所以这里只会被「返回重置栈」触发。
-    LaunchedEffect(rootTab) { sheetSuppressed = false }
 
     // 教练式引导：控制器与锚点表由 MainActivity 的 CompositionLocal 提供。
     val tutorial = LocalTutorialController.current
@@ -351,6 +347,11 @@ private fun MoyuRoot(store: AppStore, initialNote: String?, consumeInitialNote: 
 // twice and both copies slid over each other.
 val rootTabs: Any = RootTabsLayer
 val rootTab = stack.firstOrNull { it.depth == 0 }?.tabIndex ?: 0
+// 兜底：根 tab 变化时强制复位 TabBar 的收起状态。风险场景 = 面板打开中按系统返回、
+// 栈被根返回重置回书架（App.kt 的 RootBackHandler），而所有根 tab 页常驻组合（TabPager.kt:106）
+// → 面板所在页不会 dispose → suppress 只置位不复位，TabBar 会永久消失。
+// TabBar 被 suppress 时用户点不到 tab，所以这里只可能被「返回重置栈」触发，不会误复位。
+LaunchedEffect(rootTab) { sheetSuppressed = false }
 // 底部可以关掉「书架 / 笔记 / 数据 / 问书」中的任意几页；设置永远在。
 // key 与 Screen.tabIndex 一一对应，顺序固定，关掉后不重排。
 val tabKeys = listOf("library", "notes", "stats", "ai", "settings")
