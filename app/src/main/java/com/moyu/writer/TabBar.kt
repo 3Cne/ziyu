@@ -381,7 +381,20 @@ internal fun MoyuTabBar(
                                         drawRect(selectedTint)
                                         val v = s.tabLensOpacity.coerceIn(0f, 1f)
                                         if (v > 0f) drawRect(p.paper.copy(alpha = v * .94f))
-                                        glassEdgeBand(lensShape, p, s.lensEdge)
+                                        glassEdgeBand(
+                                            lensShape,
+                                            p,
+                                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                                                s.lensRefraction > 0f
+                                            ) {
+                                                // 3.26.59：AGSL 路径上 shader 自带 Fresnel/赤道亮线，
+                                                // 再叠一条宽边带就是第二道亮环（3.26.13/14/52 三次被否的坑），
+                                                // 与 GlassBar 同口径：AGSL 生效时跳过宽边带。
+                                                0f
+                                            } else {
+                                                s.lensEdge
+                                            },
+                                        )
                                     },
                                 )
                             } else {
