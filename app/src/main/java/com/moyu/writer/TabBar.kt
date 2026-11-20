@@ -158,9 +158,9 @@ internal fun MoyuTabBar(
     // 连点两个 tab 只执行最后一次。
     var selectJob by remember { mutableStateOf<Job?>(null) }
 
-    val lensAlpha = .08f * s.tabLensOpacity.coerceIn(0f, 1f)
-    // 3.26.53：镜片内的选中薄涂随昼夜连续从墨色走到白色（原来 if (isDark) 中点硬翻）。
-    val selectedTint = lerp(p.ink, Color.White, p.darkAmount).copy(alpha = lensAlpha)
+    // 3.26.60：镜片的专属填充（选中薄涂 selectedTint + tabLensOpacity 纸色覆层）
+    // 整段删掉。镜片与栏只剩同一套材质（同一 AGSL 厚度场 / 同一 veil / 同一
+    // 基础模糊），选中感只由图标与文字的墨色承担（见下方 fg）。
 
     // 镜片只在「切页」和「拖动」时抬起；按住不抬（2026-11-15 用户报：按住别的格也抬）。
     val liftTarget = if (dragging || clickLift) 1f else 0f
@@ -334,19 +334,23 @@ internal fun MoyuTabBar(
                                     backdrop = backdrop!!,
                                     shape = { lensShape },
                                     effects = {
+                                        // 3.26.60：镜片与栏同一材质——同一 vibrancy、同一个基础
+                                        // 模糊来源（栏用 tabBlur，镜片不再读自己的 lensBlur）。
                                         vibrancy()
-                                        if (s.lensBlur > 0f) blur(s.lensBlur.dp.toPx())
-                                        if (s.lensRefraction > 0f) {
+                                        if (s.tabBlur > 0f) blur(s.tabBlur.dp.toPx())
+                                        if (s.tabRefraction > 0f) {
                                             // 3.26.59：选中镜片与玻璃条同源。API 33+ 走 GlassBar 的
-                                            // 真厚度场 AGSL（bevel 取原 lens() 的 refractionAmount =
-                                            // 1.2×折射设置，峰值位移量级不变）；31–32 或 shader 构建
-                                            // 失败仍回退 Backdrop 的 lens()，行为与之前一致。
+                                            // 真厚度场 AGSL；31–32 或 shader 构建失败仍回退 Backdrop
+                                            // 的 lens()，不崩、不画空。
+                                            // 3.26.60：bevel 不再取 1.2×镜片折射，直接与栏同值
+                                            // tabRefraction；veilK 取栏的 tabBarOpacity。镜片只保留
+                                            // lensEdge / lensDispersion 两个「边缘带/色散」设置。
                                             val ags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                                                 runCatching {
                                                     buildLensEffect(
-                                                        bevelDp = s.lensRefraction * 1.2f,
+                                                        bevelDp = s.tabRefraction,
                                                         edgeStrength = s.lensEdge,
-                                                        veilK = s.tabLensOpacity,
+                                                        veilK = s.tabBarOpacity,
                                                         dispersion = s.lensDispersion,
                                                     )
                                                 }.getOrNull()
@@ -357,8 +361,8 @@ internal fun MoyuTabBar(
                                                 effect(ags)
                                             } else {
                                                 lens(
-                                                    refractionHeight = s.lensRefraction.dp.toPx(),
-                                                    refractionAmount = (s.lensRefraction * 1.2f).dp.toPx(),
+                                                    refractionHeight = s.tabRefraction.dp.toPx(),
+                                                    refractionAmount = s.tabRefraction.dp.toPx(),
                                                     depthEffect = true,
                                                     chromaticAberration = s.lensDispersion,
                                                 )
@@ -372,20 +376,22 @@ internal fun MoyuTabBar(
                                             alpha = s.lensShadow,
                                         )
                                     },
-                                    innerShadow = { InnerShadow(radius = 6.dp, alpha = s.lensShadow + .07f) },
+                                    // 3.26.60：内阴影只留深度，去掉 +.07 的 alpha 增量——
+                                    // 那点增量在没有纸色填充后会被读成一圈内衬料。
+                                    innerShadow = { InnerShadow(radius = 6.dp, alpha = s.lensShadow) },
                                     layerBlock = {
                                         scaleX = 1f
                                         scaleY = 1f
                                     },
                                     onDrawSurface = {
-                                        drawRect(selectedTint)
-                                        val v = s.tabLensOpacity.coerceIn(0f, 1f)
-                                        if (v > 0f) drawRect(p.paper.copy(alpha = v * .94f))
+                                        // 3.26.60：镜片不再画自己的填充（原 selectedTint +
+                                        // tabLensOpacity 纸色覆层）；栏的 tint / paperVeil 只在
+                                        // liquidGlassBar 里画一份，镜片没有第二套料。
                                         glassEdgeBand(
                                             lensShape,
                                             p,
                                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                                                s.lensRefraction > 0f
+                                                s.tabRefraction > 0f
                                             ) {
                                                 // 3.26.59：AGSL 路径上 shader 自带 Fresnel/赤道亮线，
                                                 // 再叠一条宽边带就是第二道亮环（3.26.13/14/52 三次被否的坑），

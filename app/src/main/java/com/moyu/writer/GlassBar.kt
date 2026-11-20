@@ -328,14 +328,24 @@ half4 main(float2 coord) {
 
     // 6. black top + equator line. The upper edge mirrors the dark room
     //    (ny -> +1 at the top); the bright equator line sits on the boundary
-    //    of that dark mirror, one bevel below the top.
+    //    of that dark mirror.
+    //    3.26.60: the black top used to be 2*bevel/size.y tall - .3055 on the
+    //    64dp bar but .379 on the 57dp lens, i.e. 15-19% of the height, with
+    //    the equator one bevel below the top. On the lens the paper veil is
+    //    not drawn (veilK was 0), so the unattenuated black showed as the
+    //    measured (3,4,6) = float3(.012,.015,.025)*255 band. Cap the ratio at
+    //    .10, i.e. 5% of the height on both surfaces, and blend at .35.
+    //    The equator keeps tracking b0, so it follows the new cap; its width
+    //    coefficient goes .09 -> .16 because b0 moved from 15.3% to 5% below
+    //    the top edge and .09 collapsed to the 0.012 floor there: a 1px
+    //    hairline hugging the top edge.
     float ny = -p.y / max(b.y, 1.0);
-    float bevelNy = clamp(2.0 * bevel / max(size.y, 1.0), 0.02, 0.9);
+    float bevelNy = clamp(2.0 * bevel / max(size.y, 1.0), 0.02, 0.10);
     float b0 = 1.0 - bevelNy;
     float b1 = min(1.0, b0 + 0.30 * bevelNy + 0.04);
     float blackMask = smoothstep(b0, b1, ny);
-    col = mix(col, float3(0.012, 0.015, 0.025), blackMask);
-    float eqW = max(0.012, bevelNy * 0.09);
+    col = mix(col, float3(0.012, 0.015, 0.025), blackMask * 0.35);
+    float eqW = max(0.012, bevelNy * 0.16);
     float eq = (ny - b0) / eqW;
     float equator = exp(-eq * eq);
     col += float3(0.78, 0.82, 0.90) * equator * 0.42 * edgeK * (1.0 - 0.72 * veil);
