@@ -65,7 +65,7 @@ object AiToolCatalog {
         // ── 搜索（1）
         AiToolMeta("search_book", AiToolGroup.SEARCH),
 
-        // ── 其他（28）：书籍 / 笔记 / 分组 / 设置 / 导出备份 / 附件联网
+        // ── 其他（29）：书籍 / 笔记 / 分组 / 设置 / 导出备份 / 附件联网 / 反问
         AiToolMeta("create_book", AiToolGroup.OTHER, write = true),
         AiToolMeta("edit_book", AiToolGroup.OTHER, write = true),
         AiToolMeta("delete_book", AiToolGroup.OTHER, write = true),
@@ -94,6 +94,8 @@ object AiToolCatalog {
         AiToolMeta("import_attachment", AiToolGroup.OTHER, write = true),
         AiToolMeta("web_search", AiToolGroup.OTHER),
         AiToolMeta("web_fetch", AiToolGroup.OTHER),
+        // 3.26.60：带选项反问。不改数据，所以不是 write；只读档下也能用。
+        AiToolMeta("ask_user", AiToolGroup.OTHER),
     )
 
     val byName: Map<String, AiToolMeta> by lazy { tools.associateBy { it.name } }

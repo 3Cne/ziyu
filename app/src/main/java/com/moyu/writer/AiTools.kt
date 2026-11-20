@@ -154,6 +154,7 @@ object AiTools {
      * · get_progress 并进 list_books（它本来就是「书 + 最近在读」）
      * · list_chapter_history 并进 read_chapter_history（不带 at 就是列版本）
      * 新增 set_story_time。
+     * 3.26.60：新增 ask_user（AI 不确定时带 2–4 个选项反问作者）→ 50 条；放在「其他」组末尾。
      *
      * 归组与 write 标志在 [AiToolCatalog] 里；两边的名字/顺序由 [AiToolCatalog.audit] 核对。
      * 改这张表时必须跑一次结构自检（3.26.23 就因为少一个 `}` 让运行时抛错）：
@@ -209,7 +210,8 @@ object AiTools {
       {"type":"function","function":{"name":"read_attachment","description":"读作者在这条对话里传的附件；一次最多 6000 字，用 from 翻页","parameters":{"type":"object","properties":{"name":{"type":"string","description":"附件名，或其中几个字"},"from":{"type":"integer","description":"从第几页开始，1 起"}},"required":["name"]}}},
       {"type":"function","function":{"name":"import_attachment","description":"把附件导入成一本新书或一条新笔记；要等作者确认","parameters":{"type":"object","properties":{"name":{"type":"string"},"as":{"type":"string","enum":["book","note"]}},"required":["name"]}}},
       {"type":"function","function":{"name":"web_search","description":"联网搜索，返回标题、网址和摘要；要作者先打开联网","parameters":{"type":"object","properties":{"query":{"type":"string"},"count":{"type":"integer","description":"几条，默认 5"}},"required":["query"]}}},
-      {"type":"function","function":{"name":"web_fetch","description":"抓一个网页的正文（Markdown），最多 6000 字","parameters":{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}}}
+      {"type":"function","function":{"name":"web_fetch","description":"抓一个网页的正文（Markdown），最多 6000 字","parameters":{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}}},
+      {"type":"function","function":{"name":"ask_user","description":"向作者反问，并给 2–4 个能直接点的候选。只在真的缺关键信息、且猜测会写错内容时用；能从书里查到的（先 read_* / search_book）、能用默认值的不许问；一轮最多问一次；问完不要同时继续改内容。作者点一个选项就等于回复了你","parameters":{"type":"object","properties":{"question":{"type":"string","description":"一句问作者的话，不超过 60 字，用口语"},"options":{"type":"array","items":{"type":"string"},"description":"2–4 个候选，每个不超过 16 字，要能直接当按钮点"}},"required":["question","options"]}}}
     ]
     """.trimIndent()
 
@@ -270,10 +272,34 @@ object AiTools {
         "import_attachment" -> "导入附件"
         "web_search" -> "联网搜索"
         "web_fetch" -> "抓网页"
+        "ask_user" -> "问作者"
         // 已下线的旧工具名：模型偶尔还会调，trace 里仍给个人话名字
         "save_memory" -> "存记忆"
         "delete_memory" -> "删记忆"
         else -> name
+    }
+
+    /**
+     * 3.26.60：`ask_user` 参数的唯一规范化解法。工具执行与 UI 渲染共用一个，
+     * 不会出现「工具回了 ok、界面却没得点」的两套判据。
+     *
+     * question 超 60 字、option 超 16 字就截断（胶囊是一行按钮，撑破布局点不中；
+     * 描述里已经要求模型自己写短，截断只是最后一道保险）。options 去掉空白项后
+     * 必须在 2–4 个，否则返回 null——工具据此回失败码，UI 据此不排胶囊。
+     *
+     * 返回 (question, options)；不合法返回 null。
+     */
+    fun askArgs(args: JSONObject): Pair<String, List<String>>? {
+        val question = args.optString("question").trim().take(60)
+        if (question.isBlank()) return null
+        val arr = args.optJSONArray("options") ?: return null
+        val options = ArrayList<String>()
+        for (i in 0 until arr.length()) {
+            val s = arr.optString(i).trim().take(16)
+            if (s.isNotBlank()) options += s
+        }
+        if (options.size !in 2..4) return null
+        return question to options
     }
 
     /**
@@ -1616,6 +1642,26 @@ object AiTools {
                                 )
                             }
                         }
+                    }
+                }
+
+                // 3.26.60：带选项的反问。工具本身不写任何东西，只把问题交给问书页：
+                // AI 不知道的关键信息（人称、名字、走向）让作者点一个候选，点选即回一条消息。
+                // 这里必须回「已交给作者」，不能让模型以为还在等它自己继续，也不能让它编一个答案。
+                "ask_user" -> {
+                    val ask = askArgs(args)
+                    if (ask == null) {
+                        bad(
+                            AiToolError.INVALID_ARG,
+                            "ask_user 没问成：question 不能空（一句口语化的问题，60 字内）；" +
+                                "options 要给 2–4 个能直接点的候选（每个 16 字内）。补好再调一次，" +
+                                "别把问题写进正文，也别自己替作者答。",
+                        )
+                    } else {
+                        ok(
+                            "已把问题交给作者，等作者点选。这一轮就停在问题上：不要再改任何内容、" +
+                                "不要再调别的工具、也不要替作者选；回复只用一句话请作者点一下。",
+                        )
                     }
                 }
 

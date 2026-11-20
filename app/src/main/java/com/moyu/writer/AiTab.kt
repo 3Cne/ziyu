@@ -64,6 +64,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -151,6 +152,20 @@ private fun traceArgs(raw: String): String {
     }
     return parts.joinToString("  ")
 }
+
+/**
+ * 3.26.60：AI 这一轮用 `ask_user` 反问了作者——问题一行小字 + 2–4 个候选胶囊，
+ * 铺在那条回答下面。作者点一个就当他回复了，AI 继续答。
+ *
+ * 只活在本会话内存里（`askPrompts` 的 value）：不进 MemoTurn、不进 moyu.json，
+ * 历史消息重新进入时不恢复选项——存的是纯文本，本来也没有候选可恢复。
+ * `chosen` 记录已经点过的那一项：点过后整行只读，那一项高亮、其余淡出，防重复发送。
+ */
+private data class AskPrompt(
+    val question: String,
+    val options: List<String>,
+    val chosen: String? = null,
+)
 
 /**
  * The per-step tool strip: one collapsed line ("用了 3 个工具 · 读章、联网搜索"),
@@ -538,6 +553,9 @@ fun AiScreen(
     // typing target now — it is never a message of its own, which is what made
     // the same answer appear twice.
     val chat = remember { ChatSession() }
+    // 3.26.60：这一轮反问过的候选（key = 回答行 id）。只存本会话内存，切书 / 清空对话时清掉；
+    // 历史消息从 MemoStore 重新载入时天然为空，不给存储加字段。
+    val askPrompts = remember { mutableStateMapOf<String, AskPrompt>() }
     var answerId by remember { mutableStateOf("") }
     var streamText by remember { mutableStateOf("") }
     val follow = remember { ScrollFollow() }
@@ -564,6 +582,7 @@ fun AiScreen(
     val chatList = rememberLazyListState()
     LaunchedEffect(bookId) {
         chat.load(memo.turns)
+        askPrompts.clear()
         follow.reset()
         // Entering 问书 must land on the newest message. Without this the list
         // opened at whatever offset the previous book left and the first row
@@ -588,6 +607,7 @@ fun AiScreen(
         val fresh = MemoStore.load(ctx, book.id).copy(facts = emptyList())
         memo = fresh
         chat.load(fresh.turns)
+        askPrompts.clear()
         undoSnapshot = null
         undoCount = 0
         pending = emptyList()
@@ -1516,6 +1536,16 @@ fun AiScreen(
                             put("content", reply)
                         }
                     )
+                    // 3.26.60：反问的候选挂到这条回答上。放在 trace 开关外面——关掉工具轨迹时
+                    // 选项也必须能点；参数规范化与工具执行共用 [AiTools.askArgs]，不会两套判据。
+                    if (call.name == "ask_user" && AiToolResult.isOk(reply)) {
+                        val ask = runCatching {
+                            AiTools.askArgs(JSONObject(call.args.ifBlank { "{}" }))
+                        }.getOrNull()
+                        if (ask != null && askPrompts[id] == null) {
+                            askPrompts[id] = AskPrompt(ask.first, ask.second)
+                        }
+                    }
                     if (settings.aiToolTrace) {
                         traces += ToolTrace(
                             id = call.id.ifBlank { "t" + traces.size },
@@ -1798,6 +1828,16 @@ fun AiScreen(
                     suggestions = suggestions.ifEmpty { FALLBACK_SUGGESTIONS },
                     onSend = { send(question) },
                     onSample = { send(it) },
+                    // 3.26.60：作者点一个候选 = 他回复了一条消息。先记下点过（那一行随即只读），
+                    // 再走本文件既有的 send 路径：它会加一条作者消息、发请求、AI 继续答。
+                    askPrompts = askPrompts,
+                    onPickAsk = { msgId, option ->
+                        val ask = askPrompts[msgId]
+                        if (ask != null && ask.chosen == null && !sending) {
+                            askPrompts[msgId] = ask.copy(chosen = option)
+                            send(option)
+                        }
+                    },
                     onOpenChapter = onOpenChapter,
                     onLongPressMessage = { id -> messageMenu = id },
                     menuId = messageMenu,
@@ -2131,6 +2171,48 @@ private fun ChatEditList(
     }
 }
 
+/**
+ * 3.26.60：一条回答下面的反问行。
+ *
+ * 问题一行小字（muted），下面 2–4 个胶囊候选——复用本页引用/建议同一个 [GlassChip]，
+ * 按压走 bouncy。点一个 = 作者回复了：调用方先记 chosen，再走既有的 send 路径。
+ * 点过之后那一项高亮（selected）、其余淡出且不再响应——同一个问题不会被重复发送。
+ * 问题/选项文本由 [AiTools.askArgs] 规范化（超长已截断），这里只排版。
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun AskOptions(msgId: String, ask: AskPrompt, onPick: (String, String) -> Unit) {
+    val ui = LocalInk.current
+    val p = ui.palette
+    Column(Modifier.fillMaxWidth().padding(start = 4.dp, top = 7.dp, end = 4.dp)) {
+        Txt(
+            ask.question,
+            size = 11.5f,
+            color = p.muted,
+            lineHeight = 17f,
+            maxLines = 3,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(start = 2.dp, bottom = 7.dp),
+        )
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            ask.options.forEach { option ->
+                val picked = ask.chosen == option
+                val dead = ask.chosen != null && !picked
+                Box(Modifier.alpha(if (dead) .42f else 1f)) {
+                    GlassChip(
+                        label = option,
+                        selected = picked,
+                        onClick = { if (ask.chosen == null) onPick(msgId, option) },
+                    )
+                }
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ChatPane(
@@ -2176,6 +2258,10 @@ private fun ChatPane(
     suggestions: List<String>,
     onSend: () -> Unit,
     onSample: (String) -> Unit,
+    /** 3.26.60：这一轮反问过的候选（msgId → 问题与选项）。只读内存态，不进存储。 */
+    askPrompts: Map<String, AskPrompt>,
+    /** 点中一个候选：调用方把它当作者的一条消息发出去。 */
+    onPickAsk: (String, String) -> Unit,
     onOpenChapter: (String, String) -> Unit,
     onLongPressMessage: (String) -> Unit = {},
     /** Row that owns the anchored menu; null when no menu is open. */
@@ -2903,6 +2989,13 @@ private fun ChatPane(
                             lineHeight = 17f,
                             modifier = Modifier.padding(start = 4.dp, top = 5.dp),
                         )
+                    }
+                    // 3.26.60：这一轮反问过，就在回答下面铺问题 + 选项胶囊。
+                    // 只在回答落定后出现（还在跑工具/流式时不给点，避免半截回答下面先冒一排按钮）；
+                    // 点一个就当作者回复发出去，点过之后整行只读（见 AskOptions）。
+                    val ask = if (!mine && !running) askPrompts[msg.id] else null
+                    MoyuExpand(expand = ask != null) {
+                        if (ask != null) AskOptions(msg.id, ask, onPickAsk)
                     }
                 }
             }
