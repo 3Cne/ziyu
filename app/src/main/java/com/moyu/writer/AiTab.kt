@@ -22,6 +22,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
@@ -1287,6 +1288,10 @@ fun AiScreen(
                     1 -> "\n现在是询问档：正文改动只会排成补丁，作者点「接受」才写进正文。"
                     else -> "\n现在是自动档：正文改动在你答完就写入，作者可以一步撤销。"
                 } +
+                // 3.26.61：工具描述放宽成「有明确收益就问」之后，系统层再点一句，否则模型
+                // 仍然默认自己猜（风格/篇幅/视角/改哪一章这类偏好，猜错等于白写一整章）。
+                "\n\n遇到会影响结果的多种做法、或作者没说的偏好（风格/篇幅/视角/是否保留原文/" +
+                "改哪一章这类）时，先用 ask_user 问作者，不要直接猜着写；能从书里查到的事实先查再答。" +
                 // 3.26.59：写入有三种落点，回复必须按工具实际返回的结果分开说。以前不管落在哪
                 // 都统一说「改好了，等你在下面确认」——问书页只给正文补丁确认卡，故事圣经的
                 // 改动进的是「待同意」（问书页输入框上方、故事页底部都有入口），照旧说会让
@@ -2994,8 +2999,36 @@ private fun ChatPane(
                     // 只在回答落定后出现（还在跑工具/流式时不给点，避免半截回答下面先冒一排按钮）；
                     // 点一个就当作者回复发出去，点过之后整行只读（见 AskOptions）。
                     val ask = if (!mine && !running) askPrompts[msg.id] else null
-                    MoyuExpand(expand = ask != null) {
-                        if (ask != null) AskOptions(msg.id, ask, onPickAsk)
+                    // 3.26.61（用户报「选项块出现时高度突变 / 跳动」）：落定那一帧同时发生三件事——
+                    // 气泡「正在读 → 全文」高度瞬变、同柔 pop 起步、列表尾随上滚修正；选项块的
+                    // 高度动画挤进同一帧，整段对话会被两次高度变化连着顶一下。所以：
+                    // ① 等落定帧画完再展开（withFrameNanos 跳过那一帧）；
+                    // ② 高度只由外层 animateContentSize 一条曲线给（阻尼 1 = 不过冲）：列表看到的
+                    //    item 高度是平滑的，内层进场动画即使被跳过，外层也照样把高度补成渐变。
+                    // motion=none：两处都退化成 tween(0)，直接显示、不动画。
+                    var askOpen by remember(msg.id) { mutableStateOf(ask != null) }
+                    LaunchedEffect(msg.id, ask != null) {
+                        if (ask == null) {
+                            askOpen = false
+                        } else if (!askOpen) {
+                            if (motionOn) withFrameNanos { }
+                            askOpen = true
+                        }
+                    }
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .animateContentSize(
+                                animationSpec = if (motionOn) {
+                                    spring(dampingRatio = 1f, stiffness = 380f)
+                                } else {
+                                    tween(0)
+                                },
+                            ),
+                    ) {
+                        MoyuExpand(expand = askOpen) {
+                            if (ask != null) AskOptions(msg.id, ask, onPickAsk)
+                        }
                     }
                 }
             }

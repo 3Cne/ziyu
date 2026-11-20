@@ -155,6 +155,9 @@ object AiTools {
      * · list_chapter_history 并进 read_chapter_history（不带 at 就是列版本）
      * 新增 set_story_time。
      * 3.26.60：新增 ask_user（AI 不确定时带 2–4 个选项反问作者）→ 50 条；放在「其他」组末尾。
+     * 3.26.61：ask_user 的口径从「只在真的缺关键信息、猜错会写坏时用」放宽成「有明确收益就问」——
+     * 旧描述限制太严，模型基本不敢问（用户报「有时不触发」）。只改 description 文案，
+     * 参数结构（question/options）与条数（50）不变。
      *
      * 归组与 write 标志在 [AiToolCatalog] 里；两边的名字/顺序由 [AiToolCatalog.audit] 核对。
      * 改这张表时必须跑一次结构自检（3.26.23 就因为少一个 `}` 让运行时抛错）：
@@ -211,7 +214,7 @@ object AiTools {
       {"type":"function","function":{"name":"import_attachment","description":"把附件导入成一本新书或一条新笔记；要等作者确认","parameters":{"type":"object","properties":{"name":{"type":"string"},"as":{"type":"string","enum":["book","note"]}},"required":["name"]}}},
       {"type":"function","function":{"name":"web_search","description":"联网搜索，返回标题、网址和摘要；要作者先打开联网","parameters":{"type":"object","properties":{"query":{"type":"string"},"count":{"type":"integer","description":"几条，默认 5"}},"required":["query"]}}},
       {"type":"function","function":{"name":"web_fetch","description":"抓一个网页的正文（Markdown），最多 6000 字","parameters":{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}}},
-      {"type":"function","function":{"name":"ask_user","description":"向作者反问，并给 2–4 个能直接点的候选。只在真的缺关键信息、且猜测会写错内容时用；能从书里查到的（先 read_* / search_book）、能用默认值的不许问；一轮最多问一次；问完不要同时继续改内容。作者点一个选项就等于回复了你","parameters":{"type":"object","properties":{"question":{"type":"string","description":"一句问作者的话，不超过 60 字，用口语"},"options":{"type":"array","items":{"type":"string"},"description":"2–4 个候选，每个不超过 16 字，要能直接当按钮点"}},"required":["question","options"]}}}
+      {"type":"function","function":{"name":"ask_user","description":"向作者反问，并给 2–4 个能直接点的候选。只要问一下能让结果明显更好就优先用：作者的要求有多个都合理的做法，或缺少一个会影响结果的偏好（风格/篇幅/视角/是否保留原文/改哪一章这类），不要替作者猜。能从书里查到的事实（先 read_* / search_book）不要问，纯闲聊不问；一次只问一个，问题要短、选项要能直接点；问完不要同时继续改内容。作者点一个选项就等于回复了你","parameters":{"type":"object","properties":{"question":{"type":"string","description":"一句问作者的话，不超过 60 字，用口语"},"options":{"type":"array","items":{"type":"string"},"description":"2–4 个候选，每个不超过 16 字，要能直接当按钮点"}},"required":["question","options"]}}}
     ]
     """.trimIndent()
 
