@@ -278,32 +278,67 @@ data class SelectionGeometry(
     val dragDirY: Float = 0f,
 )
 
-// ── 选区手柄放大镜（2026-11-20，3.26.60 / 3.26.61）─────────────────────────────
+// ── 选区手柄放大镜（2026-11-20，3.26.60 / 3.26.61 / 3.26.62）───────────────────
 // 系统手柄已经彻底关掉（prepareSelectionHandle 清 handle + 反射 hideSelectionHandles），
 // 所以放大镜也只能自己画，分两段：
 //   ① 采样在原生 BodyEditText 里做（view.draw 到软件位图，和 EditorBodyBackdrop 同一写法）；
 //   ② 绘制在 SelectionOverlay 的 Canvas 上——AndroidView 带 clipToBounds()，在
 //      EditText.onDraw 里画会被正文容器裁掉，盖不到手柄上方。
 // 位图**不进** SelectionGeometry（每帧新值会多一次重组），走独立回调 + 缓存。
-// 3.26.61：形状 88dp 圆 → 48×32dp 圆角矩形、去描边；永远在手柄正上方（不翻下方）；
-// 采样区按显示尺寸/倍率重算；起手先把被拖那行滚进视口，拖动中滚动/布局变化强制重采，
-// 采到空白纸时退回 caret 行再抓一次（「有时看不到内容」）。
+// 3.26.61：形状 88dp 圆 → 48×32dp、去描边；起手先把被拖那行滚进视口，拖动中滚动 / 布局
+// 变化强制重采，采到空白纸时退回 caret 行再抓一次（「有时看不到内容」）。
+// 3.26.62（用户四条）：① 倍率 2× → 1.45×，采样区从 24×16dp 放大到 33×22dp，才看得见整行字；
+//   ② 对准：采样 x 改用**真实选区边界**（不是滞后弹簧的 handleSpringX），y 用行盒中心，
+//      竖线落在镜片正中；③ 不再盖住手柄：上方间距 6→12dp、按手柄水滴**形变后**外沿算，
+//      上方放不下就移到左右两侧（空间大的一侧），绝不翻到下方；
+//   ④ 造型改水滴气泡（上宽下窄 + 顶部弧形高光 + 底部反向暗弧 + 极淡折射渐变），
+//      拖动做两轴不同刚度的软水滴拉伸，出现 / 消失 180ms / 90ms。
 
-/** 放大镜显示尺寸（dp）：48×32 的圆角矩形。比 3.26.60 的 88dp 圆形小一圈。 */
+/** 放大镜显示尺寸（dp）：水滴气泡的外接矩形。 */
 private const val MAG_W_DP = 48f
 private const val MAG_H_DP = 32f
 
-/** 圆角半径（dp）。不描边、不加阴影/内阴影。 */
-private const val MAG_CORNER_DP = 8f
-
-/** 放大镜与被拖手柄之间的空隙（dp）：6dp 比 8dp 更贴手柄。 */
-private const val MAG_GAP_DP = 6f
-
 /**
  * 放大倍数：采样区 = 显示尺寸 / [MAG_ZOOM]，画的时候再乘回去。
- * 镜片 48×32dp → 采 24×16dp 的正文 → 放大 2×；正文 1px 在镜片里就是 2px。
+ * 镜片 48×32dp → 采 33×22dp 的正文 → 放大 1.45×。
+ * 3.26.62 用户「放大倍数太大了」：2× 时 48dp 宽的镜片只装得下 1.4 个字、16dp 高还切掉
+ * 字头字脚，读出来全是字的碎片；1.45× 能装下约 2 个字、纵向 22dp 放下整行字形。
  */
-private const val MAG_ZOOM = 2f
+private const val MAG_ZOOM = 1.45f
+
+/**
+ * 与手柄水滴之间的空隙（dp）：6 → 12dp。
+ * 用户 3.26.61 报「跟手的是放大镜不是手柄」——镜片贴太近，手柄读成被镜片盖住的东西。
+ */
+private const val MAG_GAP_DP = 12f
+
+// —— 水滴气泡造型（3.26.62，用户点名「凹凸感和水滴气泡感、软水滴、同柔」）——
+/** 上两颗圆角半径（dp）：大圆角 = 水滴的圆头。 */
+private const val MAG_TOP_R_DP = 15f
+/** 下两颗圆角半径（dp）：底部收窄后的小圆角。 */
+private const val MAG_BOTTOM_R_DP = 6.5f
+/** 底部宽度占整体的比例：0.66 = 上宽下窄，读作水滴而不是圆角矩形。 */
+private const val MAG_BOTTOM_W = .66f
+/** 顶部弧形高光：白色 alpha、线宽（dp）——「凸」的上缘高光。 */
+private const val MAG_HILITE_ALPHA = .22f
+private const val MAG_HILITE_W_DP = 1.8f
+/** 高光 / 暗弧沿气泡内缘内缩的距离（dp）：贴边会读成描边。 */
+private const val MAG_LIP_INSET_DP = 2f
+/** 底部反向暗弧：墨色 alpha（与高光同一道内缩）——「凸」的下缘体积。 */
+private const val MAG_SHADE_ALPHA = .085f
+/** 中间折射渐变 alpha（上亮下暗）：极淡一层，不要读出第二块材质。 */
+private const val MAG_REFRACT_ALPHA = .05f
+/** 拖动速度形变：沿手指方向拉长 / 垂直压扁的上限（软水滴，数值越大越夸张）。 */
+private const val MAG_DEFORM_STRETCH = .20f
+private const val MAG_DEFORM_SQUASH = .08f
+/** 两轴跟随刚度：X 跟随慢（低刚度）、Y 跟随快——同一份拖动读数分出「被拉着走」的先后。 */
+private const val MAG_DEFORM_STIFFNESS_X = 150f
+private const val MAG_DEFORM_STIFFNESS_Y = 520f
+/** 出现 / 消失时长（ms）：出现轻微放大 180ms；消失 90ms 快速收（跟手，不能慢）。 */
+private const val MAG_IN_MS = 180
+private const val MAG_OUT_MS = 90
+/** 出现缩放的起点（.92 → 1）。 */
+private const val MAG_IN_SCALE = .92f
 
 /** 放大镜里落点指示线的宽度（dp）。 */
 private const val MAG_MARK_DP = 1f
@@ -319,8 +354,8 @@ private const val MAG_REFRESH_MS = 16L
  *
  * [centerX]/[centerY] 是**真实采样中心**（正文视图坐标 px，已夹进可视区）——
  * 绘制侧靠它把位图内容、落点竖线对齐到镜片里，而不是另建坐标系。
- * 采样位图是 `MAG_W/MAG_ZOOM × MAG_H/MAG_ZOOM` 的非方形区域（24×16dp），
- * 画进镜片时按 2× 铺满 48×32dp。
+ * 采样位图是 `MAG_W/MAG_ZOOM × MAG_H/MAG_ZOOM` 的非方形区域（1.45× 下 33×22dp），
+ * 画进镜片时按 1.45× 铺满 48×32dp。
  */
 private class MagnifierFrame(
     val bitmap: Bitmap,
@@ -350,6 +385,68 @@ private class MagnifierState {
     }
 }
 
+/**
+ * 放大镜收起的最后一帧（2026-11-20，3.26.62）。
+ *
+ * 松手瞬间原生侧就把采样帧清成 null（放大镜只服务拖选那段手势），但用户要求
+ * 消失是 90ms 快速收而不是硬切——这里多留一帧位图，收起动画跑完再放掉。
+ * 位图没有 recycle，交给 GC；持有者只在 SelectionOverlay 的 draw 阶段写，不参与组合。
+ */
+private class MagnifierKeeper {
+    var frame: MagnifierFrame? = null
+}
+
+/**
+ * 水滴气泡外轮廓（2026-11-20，3.26.62 用户点名「水滴气泡感 / 软水滴」）。
+ *
+ * 上宽下窄：上两颗大圆角做圆头、下两颗小圆角，底宽收 [bottomW] 倍（0.66），
+ * 两侧用三次曲线从圆头垂直收到底部圆角——读作软水滴，不是圆角矩形。
+ * 只画外轮廓：不描边、不加外发光，体积感全靠内部的顶部高光 / 底部暗弧 / 折射渐变。
+ */
+private fun bubblePath(
+    left: Float,
+    top: Float,
+    right: Float,
+    bottom: Float,
+    topR: Float,
+    bottomR: Float,
+    bottomW: Float,
+): Path {
+    val w = right - left
+    val h = bottom - top
+    val path = Path()
+    if (w <= 0f || h <= 0f) return path
+    val cx = left + w / 2f
+    val tR = topR.coerceIn(0f, minOf(w, h) / 2f)
+    val bR = bottomR.coerceIn(0f, minOf(w, h) / 2f)
+    val halfBottom = w * bottomW.coerceIn(0f, 1f) / 2f
+    val bl = cx - halfBottom
+    val br = cx + halfBottom
+    // 四分之一圆的三次曲线张力；ik 是它的补，用来给圆角两端的切线定位。
+    val k = .5523f
+    val ik = 1f - k
+    path.moveTo(left, top + tR)
+    path.cubicTo(left, top + tR * ik, left + tR * ik, top, left + tR, top)
+    path.lineTo(right - tR, top)
+    path.cubicTo(right - tR * ik, top, right, top + tR * ik, right, top + tR)
+    // 右侧：从圆头竖直下来，再收到下沿内侧；两端切线都竖直，接底部圆角不出折角。
+    path.cubicTo(
+        right, top + h * .58f,
+        br, bottom - bR - h * .14f,
+        br, bottom - bR,
+    )
+    path.cubicTo(br, bottom - bR * ik, br - bR * ik, bottom, br - bR, bottom)
+    path.lineTo(bl + bR, bottom)
+    path.cubicTo(bl + bR * ik, bottom, bl, bottom - bR * ik, bl, bottom - bR)
+    path.cubicTo(
+        bl, bottom - bR - h * .14f,
+        left, top + h * .58f,
+        left, top + tR,
+    )
+    path.close()
+    return path
+}
+
 @Composable
 private fun SelectionOverlay(
     geometry: SelectionGeometry?,
@@ -373,17 +470,22 @@ private fun SelectionOverlay(
         if (active) vis.animateTo(1f, spring(dampingRatio = .52f, stiffness = 300f))
         else vis.animateTo(0f, tween(150))
     }
-    // 放大镜起手淡入 + 轻微放大；松手时采样帧已经被原生侧清空，这里只把读数收回 0。
+    // 放大镜出现 / 消失（3.26.62）：出现轻微放大（.92→1）+ alpha 180ms；消失 90ms 快速收。
+    // 松手时原生侧已经把采样帧清空，收起这段用 [MagnifierKeeper] 留住的最后一帧继续画。
     val magT = remember { Animatable(0f) }
+    val magKeeper = remember { MagnifierKeeper() }
     LaunchedEffect(magnifier.visible) {
-        when {
-            !magnifier.visible -> magT.snapTo(0f)
-            animate -> magT.animateTo(1f, spring(dampingRatio = .52f, stiffness = 300f))
-            else -> magT.snapTo(1f)
+        if (magnifier.visible) {
+            magnifier.frame?.let { magKeeper.frame = it }
+            if (animate) magT.animateTo(1f, tween(MAG_IN_MS)) else magT.snapTo(1f)
+        } else {
+            if (animate && magT.value > .01f) magT.animateTo(0f, tween(MAG_OUT_MS)) else magT.snapTo(0f)
+            magKeeper.frame = null
         }
     }
-    // 放大镜画笔：颜色/透明度每次 draw 才定，不每帧 new Paint。
+    // 放大镜画笔：颜色 / 透明度每次 draw 才定，不每帧 new Paint。
     val magFill = remember { Paint(Paint.ANTI_ALIAS_FLAG) }
+    val magShade = remember { Paint(Paint.ANTI_ALIAS_FLAG) }
     val magMark = remember { Paint(Paint.ANTI_ALIAS_FLAG) }
     val g: SelectionGeometry = geometry?.takeIf { it.active } ?: last ?: return
     val v = vis.value
@@ -474,62 +576,163 @@ private fun SelectionOverlay(
             ay = if (dragEnd) dirScaleY else 1f,
         )
     }
-    // ── 拖柄放大镜（2026-11-20，3.26.60 / 3.26.61）─────────────────────────────
+    // ── 拖柄放大镜（2026-11-20，3.26.60 / 3.26.61 / 3.26.62）─────────────────────
     // 单独一层 Canvas 画在手柄之上：拖终点柄时放大镜会盖住起点柄，这是正常遮挡；
     // 也避开上面那层在「拿不到手柄 drawable」时的提前 return。
     // 只显示、不吃触摸（SelectionOverlay 本来就不挂 pointerInput）；位置只取
     // SelectionGeometry 的手柄盒 + 原生推来的采样帧，没有第二套坐标系。
     if (active) {
+        // 软水滴形变（同柔）：同一份拖动读数分成两轴目标——X 轴低刚度（跟随慢）、Y 轴
+        // 高刚度（跟随快），镜片被手指「拉着走」时先后到位；松手 / 落定后目标回到 1，
+        // 弹簧自己收敛（形变始终是时间的函数，不会一帧切回原形）。motion=none 固定 1。
+        val defPull = if (g.dragSide >= 0) g.dragPull.coerceIn(0f, 1f) else 0f
+        val defDirX = abs(g.dragDirX).coerceIn(0f, 1f)
+        val defDirY = abs(g.dragDirY).coerceIn(0f, 1f)
+        val squeezeX by animateFloatAsState(
+            targetValue = if (animate) {
+                1f + MAG_DEFORM_STRETCH * defPull * defDirX - MAG_DEFORM_SQUASH * defPull * defDirY
+            } else {
+                1f
+            },
+            animationSpec = spring(dampingRatio = 1f, stiffness = MAG_DEFORM_STIFFNESS_X),
+            label = "magSqueezeX",
+        )
+        val squeezeY by animateFloatAsState(
+            targetValue = if (animate) {
+                1f + MAG_DEFORM_STRETCH * defPull * defDirY - MAG_DEFORM_SQUASH * defPull * defDirX
+            } else {
+                1f
+            },
+            animationSpec = spring(dampingRatio = 1f, stiffness = MAG_DEFORM_STIFFNESS_Y),
+            label = "magSqueezeY",
+        )
         Canvas(Modifier.fillMaxSize()) {
-            val mag = magnifier.frame
+            // 松手时原生侧已经把采样帧清空：收起那 90ms 用最后一帧接着画。
+            val cur = magnifier.frame
+            if (cur != null) magKeeper.frame = cur
+            val mag = cur ?: magKeeper.frame ?: return@Canvas
             val magV = magT.value
-            if (mag != null && magV > .01f) {
-                val side = if (g.dragSide >= 0) g.dragSide else mag.side
-                val box = if (side == 0) g.startHandle else g.endHandle
-                val w = MAG_W_DP.dp.toPx()
-                val h = MAG_H_DP.dp.toPx()
-                val gap = MAG_GAP_DP.dp.toPx()
-                val corner = MAG_CORNER_DP.dp.toPx().coerceAtMost(minOf(w, h) / 2f)
-                val a = magV.coerceIn(0f, 1f)
-                // 永远在被拖手柄的**正上方**、水平居中于手柄；上方放不下就夹在顶部安全区里，
-                // 绝不翻到下方——手指在下面操作手柄，翻下去会被手指挡住（2026-11-20 用户定）。
-                val halfW = w / 2f
-                val cx = box.centerX.coerceIn(halfW, (size.width - halfW).coerceAtLeast(halfW))
-                val lensTop = (box.top - gap - h).coerceIn(0f, (size.height - h).coerceAtLeast(0f))
-                val cy = lensTop + h / 2f
-                val lens = RectF(cx - halfW, lensTop, cx + halfW, lensTop + h)
-                // 落点指示线：正文里 1px 在镜片里是 MAG_ZOOM px，按采样中心换算。
-                val caretX = if (side == 0) g.startCaretX else g.endCaretX
-                val markX = (cx + (caretX - mag.centerX) * MAG_ZOOM)
-                    .coerceIn(lens.left + corner * .6f, lens.right - corner * .6f)
-                // 弹簧会出现轻微过冲，缩放据此弹一下再落定（motion=none 时 a 直接是 1）。
-                val magScale = .88f + .12f * a
-                drawIntoCanvas { canvas ->
-                    val native = canvas.nativeCanvas
-                    native.save()
-                    native.scale(magScale, magScale, cx, cy)
-                    // 纸底：正文纸色画在 Compose 层、EditText 自己没背景，采样位图只有文字
-                    // 透出来，不铺纸色的话镜片会透出下面的正文。
-                    magFill.color = palette.paper.toArgb()
-                    magFill.alpha = (255 * a).toInt()
-                    magFill.style = Paint.Style.FILL
-                    native.save()
-                    // 圆角矩形裁形：纸底 + 放大后的正文 + 落点竖线都裁在这个圆角里。
-                    // 不描边、不加阴影/内阴影（用户 2026-11-20：「不要边框」）。
-                    val clip = Path().apply { addRoundRect(lens, corner, corner, Path.Direction.CW) }
-                    native.clipPath(clip)
-                    native.drawRect(lens, magFill)
-                    magFill.isFilterBitmap = true
-                    native.drawBitmap(mag.bitmap, null, lens, magFill)
-                    magMark.color = palette.muted.toArgb()
-                    magMark.alpha = (140 * a).toInt()
-                    magMark.style = Paint.Style.STROKE
-                    magMark.strokeWidth = MAG_MARK_DP.dp.toPx()
-                    magMark.strokeCap = Paint.Cap.ROUND
-                    native.drawLine(markX, lens.top + h * .12f, markX, lens.bottom - h * .12f, magMark)
-                    native.restore()
-                    native.restore()
-                }
+            if (magV <= .01f) return@Canvas
+            val side = if (g.dragSide >= 0) g.dragSide else mag.side
+            val box = if (side == 0) g.startHandle else g.endHandle
+            val w = MAG_W_DP.dp.toPx()
+            val h = MAG_H_DP.dp.toPx()
+            val gap = MAG_GAP_DP.dp.toPx()
+            val halfW = w / 2f
+            val a = magV.coerceIn(0f, 1f)
+            // 被拖手柄**形变后**的水滴外沿：拖动中它会被 ViscousDrop 沿手指方向拉长
+            // （最多 1.75×），按未形变的 handle box 算间距，镜片就会压住正在跟手的水滴。
+            val handleScale = (.55f + .45f * v).coerceIn(0f, 1.25f)
+            val handleStretchX = ViscousDrop.scaleX(defPull * defDirX, defPull * defDirY)
+            val handleStretchY = ViscousDrop.scaleY(defPull * defDirX, defPull * defDirY)
+            val isDragged = g.dragSide == side
+            val drawW = (box.right - box.left) * handleScale * (if (isDragged) handleStretchX else 1f)
+            val drawH = (box.bottom - box.top) * handleScale * (if (isDragged) handleStretchY else 1f)
+            val anchorY = if (side == 0) box.bottom else box.top
+            val visualTop = if (side == 0) anchorY - drawH else anchorY
+            val visualLeft = box.centerX - drawW / 2f
+            val visualRight = box.centerX + drawW / 2f
+            // 落位（3.26.62）：优先被拖手柄**正上方**、间距 12dp，镜片底边不碰手柄水滴；
+            // 上方放不下（贴着正文顶部）就移到手柄左侧 / 右侧——取屏幕空间大的一侧、垂直
+            // 对准采样行；**绝不翻到下方**：下面是指尖和手柄，翻下去等于把镜片塞进指尖底下。
+            val maxLeft = (size.width - w).coerceAtLeast(0f)
+            val maxTop = (size.height - h).coerceAtLeast(0f)
+            // 水平对准选区边界（采样中心），只有贴屏幕边时夹回来——边界竖线才落在正中。
+            val cx = mag.centerX.coerceIn(halfW, (size.width - halfW).coerceAtLeast(halfW))
+            val aboveTop = visualTop - gap - h
+            val lens = if (aboveTop >= 0f) {
+                RectF(cx - halfW, aboveTop, cx + halfW, aboveTop + h)
+            } else {
+                val toRight = size.width - visualRight >= visualLeft
+                val left = (if (toRight) visualRight + gap else visualLeft - gap - w)
+                    .coerceIn(0f, maxLeft)
+                val top = (mag.centerY - h / 2f).coerceIn(0f, maxTop)
+                RectF(left, top, left + w, top + h)
+            }
+            val lensCx = (lens.left + lens.right) / 2f
+            val lensCy = (lens.top + lens.bottom) / 2f
+            // 落点指示线：正文里 1px 在镜片里是 MAG_ZOOM px，按采样中心换算。
+            val caretX = if (side == 0) g.startCaretX else g.endCaretX
+            val markX = (lensCx + (caretX - mag.centerX) * MAG_ZOOM)
+                .coerceIn(lens.left + w * .16f, lens.right - w * .16f)
+            // 出现：.92→1 轻微放大 + alpha；消失：同一条曲线反向 90ms 收掉。
+            val appear = MAG_IN_SCALE + (1f - MAG_IN_SCALE) * a
+            val topR = MAG_TOP_R_DP.dp.toPx()
+            val bottomR = MAG_BOTTOM_R_DP.dp.toPx()
+            val inset = MAG_LIP_INSET_DP.dp.toPx()
+            val bubble = bubblePath(lens.left, lens.top, lens.right, lens.bottom, topR, bottomR, MAG_BOTTOM_W)
+            // 上 / 下两道内缩弧：只在气泡内部做体积，不画外轮廓描边。
+            val lipTop = Path().apply {
+                moveTo(lens.left + topR * .92f, lens.top + inset)
+                quadTo(lensCx, lens.top + inset * .2f, lens.right - topR * .92f, lens.top + inset)
+            }
+            val halfBottom = w * MAG_BOTTOM_W / 2f
+            val lipBottom = Path().apply {
+                moveTo(lensCx - halfBottom + bottomR, lens.bottom - inset)
+                quadTo(lensCx, lens.bottom - inset * .2f, lensCx + halfBottom - bottomR, lens.bottom - inset)
+            }
+            drawIntoCanvas { canvas ->
+                val native = canvas.nativeCanvas
+                native.save()
+                native.scale(appear * squeezeX, appear * squeezeY, lensCx, lensCy)
+                // 纸底：正文纸色画在 Compose 层、EditText 自己没背景，采样位图只有文字
+                // 透出来，不铺纸色的话镜片会透出下面的正文。
+                magFill.reset()
+                magFill.isAntiAlias = true
+                magFill.style = Paint.Style.FILL
+                magFill.color = palette.paper.toArgb()
+                magFill.alpha = (255 * a).toInt()
+                native.save()
+                native.clipPath(bubble)
+                native.drawRect(lens, magFill)
+                magFill.isFilterBitmap = true
+                native.drawBitmap(mag.bitmap, null, lens, magFill)
+                // ② 中间折射渐变：极淡的上亮下暗，只加 .05 的玻璃厚度读感。
+                val ink = palette.ink.toArgb()
+                val refract = (MAG_REFRACT_ALPHA * 255).toInt()
+                magShade.reset()
+                magShade.isAntiAlias = true
+                magShade.style = Paint.Style.FILL
+                magShade.alpha = (255 * a).toInt()
+                magShade.shader = android.graphics.LinearGradient(
+                    lens.left, lens.top, lens.left, lens.bottom,
+                    intArrayOf(
+                        android.graphics.Color.argb(refract, 255, 255, 255),
+                        android.graphics.Color.argb(0, 255, 255, 255),
+                        android.graphics.Color.argb(
+                            refract,
+                            android.graphics.Color.red(ink),
+                            android.graphics.Color.green(ink),
+                            android.graphics.Color.blue(ink),
+                        ),
+                    ),
+                    floatArrayOf(0f, .55f, 1f),
+                    android.graphics.Shader.TileMode.CLAMP,
+                )
+                native.drawRect(lens, magShade)
+                magShade.shader = null
+                // ① 顶部弧形高光（白 .22）/ ③ 底部反向暗弧（ink .085）：都沿气泡内缘
+                // 内缩 2dp，是内部体积层不是描边——只有上、下各一小段。
+                magShade.style = Paint.Style.STROKE
+                magShade.strokeWidth = MAG_HILITE_W_DP.dp.toPx()
+                magShade.strokeCap = Paint.Cap.ROUND
+                magShade.color = android.graphics.Color.WHITE
+                magShade.alpha = (255 * MAG_HILITE_ALPHA * a).toInt()
+                native.drawPath(lipTop, magShade)
+                magShade.color = ink
+                magShade.alpha = (255 * MAG_SHADE_ALPHA * a).toInt()
+                native.drawPath(lipBottom, magShade)
+                // 落点指示线：被拖的选区边界在镜片里的位置（正常正好在正中）。
+                magMark.reset()
+                magMark.isAntiAlias = true
+                magMark.color = palette.muted.toArgb()
+                magMark.alpha = (140 * a).toInt()
+                magMark.style = Paint.Style.STROKE
+                magMark.strokeWidth = MAG_MARK_DP.dp.toPx()
+                magMark.strokeCap = Paint.Cap.ROUND
+                native.drawLine(markX, lens.top + h * .18f, markX, lens.bottom - h * .18f, magMark)
+                native.restore()
+                native.restore()
             }
         }
     }
@@ -2910,13 +3113,16 @@ private class BodyEditText(
     }
 
     /**
-     * 拖柄放大镜的采样 + 节流（2026-11-20，3.26.60；3.26.61 修「有时看不到内容」）。
+     * 拖柄放大镜的采样 + 节流（2026-11-20，3.26.60 / 3.26.61 / 3.26.62）。
      *
-     * 采样区 = 镜片显示尺寸 / [MAG_ZOOM]（48×32dp → 24×16dp），画的时候再放大 2×。
+     * 采样区 = 镜片显示尺寸 / [MAG_ZOOM]（48×32dp → 33×22dp），画的时候再放大 1.45×。
      * 采样中心 = **被拖手柄所在行**的文字中心：
-     *   x 跟着手柄（弹簧位置，和手柄是同一条竖线，不是另算一个光标点）；
+     *   x 用**真实选区边界**（caret 的 x，和竖线画的是同一个值）——3.26.62 用户
+     *     「不是对准文字的」：之前跟的是滞后的弹簧 handleSpringX，拖动中最多落后 24dp
+     *     ≈ 1.5 个字，镜片里看到的是边界旁边的字，落点竖线也被顶到镜片边上；
      *   y 取那一行行盒的中心——`getLineTop/getLineBottom` 是内容坐标，减 `scrollY`
-     *   换成视图坐标，`View.draw` 画的正是这个坐标系。
+     *   换成视图坐标，`View.draw` 画的正是这个坐标系；行盒中心 = 字形中心，
+     *   22dp 高的采样区正好把整行字形包住（用户 3.26.62：「我都看不见文字」）。
      * 采样用 `View.draw` 画进小位图，和 [EditorBodyBackdrop]/[renderDockSlice] 同一条路，
      * 不新开渲染管线；位图**不铺纸色**，纸底由 SelectionOverlay 在镜片里铺。
      *
@@ -2949,12 +3155,11 @@ private class BodyEditText(
         } else {
             (caret.top + caret.bottom) / 2f
         }
-        // 退路模式只用 caret 自己的 x：弹簧落后时采样会飘到行外。
-        val desiredX = if (!fromCaretLine && handleSpringOn && !handleSpringX.isNaN()) {
-            handleSpringX
-        } else {
-            caret.x
-        }
+        // 采样 x 永远用**真实选区边界**（caret 的 x），不用滞后弹簧的 handleSpringX：
+        // 弹簧拖动中最多落后 24dp ≈ 1.5 个字，3.26.61 采在滞后位置上，镜片里看到的
+        // 不是边界处的字（用户 3.26.62：「不是对准文字的」）。手柄水滴本来就故意滞后、
+        // 边界竖线画在真位置，镜片跟真位置才对得准。
+        val desiredX = caret.x
         // 中心夹进可视区，保证整块采样区都在 View 内（`View.draw` 采不到 View 外的像素）。
         val halfW = sampleW / 2f
         val halfH = sampleH / 2f
@@ -2984,9 +3189,9 @@ private class BodyEditText(
         canvas.translate(-left.toFloat(), -top.toFloat())
         draw(canvas)
         if (!fromCaretLine && !hasInk(bmp)) {
-            // 一个文字像素都没有：这 24×16dp 落在空白纸上（行被滚出视口 / 夹到页边空白）。
-            // 先把被拖那行滚回视口，再退回「当前 caret 行 + caret 自己的 x」重抓一次；
-            // 仍然空白就照发——空行本来就是空白，不能因此把镜片藏掉。
+            // 一个文字像素都没有：这 33×22dp 落在空白纸上（行被滚出视口 / 夹到页边空白）。
+            // 先把被拖那行滚回视口，再按当前 caret 行重抓一次；仍然空白就照发——
+            // 空行本来就是空白，不能因此把镜片藏掉。fromCaretLine 同时是「已重抓一次」的防递归标记。
             bmp.recycle()
             scrollDragLineIntoView()
             refreshMagnifier(force = true, fromCaretLine = true)
