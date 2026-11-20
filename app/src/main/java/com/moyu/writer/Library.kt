@@ -25,7 +25,6 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -1233,6 +1232,14 @@ fun BookDetailScreen(
                     val chapter = book.lastChapter() ?: book.chapters.firstOrNull()
                     if (chapter != null) onOpenChapter(book.id, chapter.id)
                 }
+                // 3.26.16：故事圣经入口。角色 / 关系 / 时间线 / 大纲都是「这本书的」，
+                // 所以挂在书籍详情而不是新开一个 tab。3.26.60 从独立整行卡并进按钮排。
+                val haptic = LocalHaptic.current
+                // 3.26.54：故事入口的点击逻辑只留一份——按钮本体与引导锚点共用同一个回调。
+                val openStory: () -> Unit = {
+                    haptic(1)
+                    storyOpen = true
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     PrimaryButton(
                         "继续写作",
@@ -1243,46 +1250,20 @@ fun BookDetailScreen(
                         ).testTag("book.detail.continue"),
                         glyph = Glyph.Edit,
                     )
+                    // 3.26.60：故事并进按钮排，用 GlassButton 而不是 PrimaryButton——两块墨底
+                    // 会互抢主次。宽度取 92dp 而非 88dp：GlassButton 内部水平内边距 18dp×2、
+                    // 图标 18dp + 8dp 间距、「故事」两字 ≈28dp，最小需要 90dp；88dp 会把
+                    // 文字挤成两行、按钮被撑到 ≈69dp 高。留 2dp 抗字体度量的取整误差。
+                    GlassButton(
+                        "故事",
+                        openStory,
+                        Modifier.width(92.dp).tutorialAnchor(
+                            "book.story",
+                            onActivate = openStory,
+                        ).testTag("book.detail.story"),
+                        glyph = Glyph.Book,
+                    )
                     GlassButton("导出", { exportOpen = true }, Modifier.width(104.dp), glyph = Glyph.Export)
-                }
-            }
-            item {
-                // 3.26.16：故事圣经入口。角色 / 关系 / 时间线 / 大纲都是「这本书的」，
-                // 所以挂在书籍详情而不是新开一个 tab；空着也常驻，点进去是带引导的空态。
-                val bible = book.bible
-                val haptic = LocalHaptic.current
-                // 3.26.54：故事行的点击逻辑只留一份——整行 clickable 与引导锚点共用同一个回调。
-                val openStory: () -> Unit = {
-                    haptic(1)
-                    storyOpen = true
-                }
-                MoyuSurface(
-                    Modifier.fillMaxWidth().tutorialAnchor(
-                        "book.story",
-                        onActivate = openStory,
-                    ).testTag("book.detail.story"),
-                    radius = 20f,
-                    flat = true,
-                ) {
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .clickable(onClick = openStory)
-                            .padding(horizontal = 16.dp, vertical = 14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(Modifier.weight(1f)) {
-                            Txt("故事", size = 15f, weight = FontWeight.Medium)
-                            Spacer(Modifier.height(4.dp))
-                            Txt(
-                                "${bible.characters.size} 位角色 · ${bible.relations.size} 条关系 · " +
-                                    "${bible.events.size} 个事件 · ${bible.outline.size} 章大纲",
-                                size = 10.5f,
-                                color = ui.palette.muted,
-                            )
-                        }
-                        LineIcon(Glyph.Chevron, ui.palette.muted, 16.dp, 1.4f)
-                    }
                 }
             }
             item {
