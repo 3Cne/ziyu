@@ -233,6 +233,10 @@ private fun MoyuRoot(store: AppStore, initialNote: String?, consumeInitialNote: 
     // TabBar 是 root 的兄弟节点、画在页面之上，不收面板底部会被盖住、点不到。
     var sheetSuppressed by remember { mutableStateOf(false) }
     val suppressSheet: (Boolean) -> Unit = remember { { v -> sheetSuppressed = v } }
+    // 兜底：根 tab 变化时强制复位。风险场景 = 面板打开中按系统返回、栈被重置回书架，
+    // 而所有根 tab 页常驻组合（TabPager.kt:106），面板所在页不会 dispose → suppress 只置位不复位，
+    // TabBar 会永久消失。TabBar 被 suppress 时用户无法切 tab，所以这里只会被「返回重置栈」触发。
+    LaunchedEffect(rootTab) { sheetSuppressed = false }
 
     // 教练式引导：控制器与锚点表由 MainActivity 的 CompositionLocal 提供。
     val tutorial = LocalTutorialController.current
