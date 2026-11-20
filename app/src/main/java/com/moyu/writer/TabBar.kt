@@ -71,6 +71,18 @@ private val LensSettle = spring<Float>(dampingRatio = .78f, stiffness = 380f, vi
 /** 镜片抬起/放下：快起、略带过冲，读作「提起来」。 */
 private val LensLift = spring<Float>(dampingRatio = .56f, stiffness = 520f, visibilityThreshold = 1e-3f)
 
+// ── 3.26.60 镜片倍率换算常量（集中一处，改口径只改这几行）──────────────
+// 镜片组 5 个滑杆不再各自是一套绝对材质参数，而是乘在「栏的值」上的倍率：
+// 默认读数必须刚好落在 1× 恒等点（见 MoyuTabBar 内「镜片倍率」段的逐项说明）。
+/** 折射：lensRefraction 默认 9 → 1×；上限 LENS_REFRACTION_MAX×（18 → 2×）。 */
+private const val LENS_REFRACTION_BASE = 9f
+/** 折射倍率上限（再往上拉仍是 2×，避免 bevel 无意义地变大）。 */
+private const val LENS_REFRACTION_MAX = 2f
+/** 模糊：lensBlur 0..9 → 倍率 1×..2×。 */
+private const val LENS_BLUR_SPAN = 9f
+/** 不透明度：tabLensOpacity 0..1 → 倍率 1×..2×。 */
+private const val LENS_OPACITY_SPAN = 1f
+
 /**
  * Floating four-tab bar made from a real liquid-glass surface.
  *
@@ -162,10 +174,40 @@ internal fun MoyuTabBar(
     // 整段删掉。镜片与栏只剩同一套材质（同一 AGSL 厚度场 / 同一 veil / 同一
     // 基础模糊），选中感只由图标与文字的墨色承担（见下方 fg）。
     // 3.26.60：镜片补上栏的两层表面料。栏在 liquidGlassBar().onDrawSurface 里
-    // 先画 tint、再画 paperVeil；这里按同一顺序、同一表达式、同一取值来源补：
-    // tint 与栏同一个表达式，veil 取栏的 s.tabBarOpacity，公式同为 veil*.94。
+    // 先画 tint、再画 paperVeil；这里按同一顺序补：tint 与栏同一个表达式，
+    // paperVeil 的取值见下方「镜片倍率」（默认 1× 时就是栏的 veil）。
+    //
+    // ── 镜片倍率（3.26.60）─────────────────────────────────────────────
+    // 3d80122 把镜片材质全部改成与栏同源后，镜片组 5 个滑杆在 TabBar.kt 里
+    // 0 处读取 ——「设置 → 玻璃 → 镜片」的滑杆调了看不出任何变化。这里统一
+    // 改成「栏的值 × 倍率」：
+    //   折射 lensRefraction / 模糊 lensBlur / 不透明度 tabLensOpacity /
+    //   边缘 lensEdge / 色散 lensDispersion
+    // **默认值 = 1× 恒等**：默认读数换算后与栏逐项相等（折射 9→1×、模糊
+    // 0→1×、不透明度 0→1×、边缘 1→1×、色散 true→取栏的 tabDispersion），
+    // 所以默认观感与 3.26.60 完全一致，只上调某个滑杆才会让镜片比栏更强。
+    // **不迁移旧数据**：同一字段从「绝对值」改读为「倍率」；旧备份里
+    // 1 / 0 / 9 这些默认读数正好落在恒等点，不会突变；只有作者确实动过镜片
+    // 滑杆的旧数据会被按倍率解读（如 18 → 2× 上限、0 → 0×），不写盘、不改码。
+    // 五个滑杆由此恢复真实落点：下方 effects 与 onDrawSurface 都消费这组值。
+    val lensRefractionFactor = (s.lensRefraction / LENS_REFRACTION_BASE).coerceIn(0f, LENS_REFRACTION_MAX)
+    val lensBlurFactor = 1f + (s.lensBlur / LENS_BLUR_SPAN).coerceIn(0f, 1f)
+    val lensOpacityFactor = 1f + (s.tabLensOpacity / LENS_OPACITY_SPAN).coerceIn(0f, 1f)
+    // ① 折射：bevel = 栏的 tabRefraction × 倍率（栏自己是 0 时仍为 0）。
+    val lensBevelDp = s.tabRefraction * lensRefractionFactor
+    // ② 模糊：栏的 tabBlur>0 时按倍率放大；栏为 0（默认）时乘出来还是 0，
+    //    改让镜片单独吃 lensBlur 的量。默认 lensBlur=0 → 仍是 0 = 与栏一致。
+    val lensBlurDp = if (s.tabBlur > 0f) s.tabBlur * lensBlurFactor else s.lensBlur * (lensBlurFactor - 1f)
+    // ③ 不透明度：×倍率后**必须夹 0..1**，否则 2× 会溢出。paperVeil 与
+    //    AGSL 的 veilK 共用这一个值（默认 = 栏的 tabBarOpacity）。
+    val lensVeil = (s.tabBarOpacity * lensOpacityFactor).coerceIn(0f, 1f)
+    // ④ 边缘带：栏的 tabEdge × lensEdge，再夹 0..1。
+    val lensEdgeStrength = (s.tabEdge * s.lensEdge).coerceIn(0f, 1f)
+    // ⑤ 色散：两边都开才有（默认 lensDispersion=true → 与栏的 tabDispersion 同值）。
+    val lensDispersion = s.tabDispersion && s.lensDispersion
+
     val glassTint = if (p.isDark) Color.White.copy(alpha = .06f) else p.ink.copy(alpha = .045f)
-    val glassVeil = s.tabBarOpacity.coerceIn(0f, 1f)
+    val glassVeil = lensVeil
     val glassPaperVeil = p.paper.copy(alpha = glassVeil * .94f)
 
     // 镜片只在「切页」和「拖动」时抬起；按住不抬（2026-11-15 用户报：按住别的格也抬）。
@@ -340,25 +382,24 @@ internal fun MoyuTabBar(
                                     backdrop = backdrop!!,
                                     shape = { lensShape },
                                     effects = {
-                                        // 3.26.60：镜片与栏同一材质——同一 vibrancy、同一个基础
-                                        // 模糊来源（栏用 tabBlur，镜片不再读自己的 lensBlur）。
+                                        // 镜片与栏同一材质，参数 = 栏的值 × 镜片滑杆倍率
+                                        // （默认 1× 时逐项等于栏；见上方「镜片倍率」段）。
                                         vibrancy()
-                                        if (s.tabBlur > 0f) blur(s.tabBlur.dp.toPx())
-                                        if (s.tabRefraction > 0f) {
+                                        if (lensBlurDp > 0f) blur(lensBlurDp.dp.toPx())
+                                        if (lensBevelDp > 0f) {
                                             // 3.26.59：选中镜片与玻璃条同源。API 33+ 走 GlassBar 的
                                             // 真厚度场 AGSL；31–32 或 shader 构建失败仍回退 Backdrop
                                             // 的 lens()，不崩、不画空。
-                                            // 3.26.60：bevel 不再取 1.2×镜片折射，直接与栏同值
-                                            // tabRefraction；veilK 取栏的 tabBarOpacity。亮环
-                                            // edgeStrength 与色散 dispersion 也改成栏的两个设置
-                                            // tabEdge / tabDispersion——镜片不再有第二套光照参数。
+                                            // 3.26.60：bevel / veilK / 亮环 / 色散都取上方倍率换算值，
+                                            // 默认 1× 时与栏同值；折射 0× 时整段跳过（与栏 tabRefraction=0
+                                            // 同义：不折射），下面的回退 lens() 用的也是这组换算值。
                                             val ags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                                                 runCatching {
                                                     buildLensEffect(
-                                                        bevelDp = s.tabRefraction,
-                                                        edgeStrength = s.tabEdge,
-                                                        veilK = s.tabBarOpacity,
-                                                        dispersion = s.tabDispersion,
+                                                        bevelDp = lensBevelDp,
+                                                        edgeStrength = lensEdgeStrength,
+                                                        veilK = lensVeil,
+                                                        dispersion = lensDispersion,
                                                     )
                                                 }.getOrNull()
                                             } else {
@@ -368,10 +409,10 @@ internal fun MoyuTabBar(
                                                 effect(ags)
                                             } else {
                                                 lens(
-                                                    refractionHeight = s.tabRefraction.dp.toPx(),
-                                                    refractionAmount = s.tabRefraction.dp.toPx(),
+                                                    refractionHeight = lensBevelDp.dp.toPx(),
+                                                    refractionAmount = lensBevelDp.dp.toPx(),
                                                     depthEffect = true,
-                                                    chromaticAberration = s.tabDispersion,
+                                                    chromaticAberration = lensDispersion,
                                                 )
                                             }
                                         }
@@ -399,15 +440,16 @@ internal fun MoyuTabBar(
                                             lensShape,
                                             p,
                                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                                                s.tabRefraction > 0f
+                                                lensBevelDp > 0f
                                             ) {
                                                 // 3.26.59：AGSL 路径上 shader 自带 Fresnel/赤道亮线，
                                                 // 再叠一条宽边带就是第二道亮环（3.26.13/14/52 三次被否的坑），
                                                 // 与 GlassBar 同口径：AGSL 生效时跳过宽边带。
                                                 0f
                                             } else {
-                                                // 3.26.60：非 AGSL 回退路径的亮环也改用栏的 tabEdge。
-                                                s.tabEdge
+                                                // 3.26.60：非 AGSL 回退路径的亮环 = 栏的 tabEdge × lensEdge
+                                                // （默认 lensEdge=1 → 与栏同值）。
+                                                lensEdgeStrength
                                             },
                                         )
                                     },
