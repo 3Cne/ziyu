@@ -6,13 +6,12 @@ import org.json.JSONObject
 import java.io.File
 
 /**
- * 3.26.64：问书页与 AI 工具下线后，这里只剩「校核 / 修饰 / 问」还要读的那一层——
- * 每本书一个记忆文件 `filesDir/ai/<bookId>.json`：
- *  - `chapters` 是各章摘要（「问」的本章摘要从这里读，见 AskPanel.chapterSummary）；
+ * 3.26.64：问书页与 AI 工具下线；3.26.66：正文「问」也下线后，这一层只剩磁盘上的
+ * 旧数据格式，代码里已无调用方。每本书一个记忆文件 `filesDir/ai/<bookId>.json`：
+ *  - `chapters` 是各章摘要（历史格式，现在没有读取方）；
  *  - `turns` 是旧问书留下的对话记录（AiCleanup 首启清空，格式保留以免旧备份解析失败）。
  *
- * 已删除：facts 长期记忆层、引文引用、检索索引（跨章检索改由 AskPanel 里的
- * AskCross 纯本地实现）。
+ * 已删除：facts 长期记忆层、引文引用、检索索引。
  *
  * Nothing here is stored in `moyu.json`: that file goes through `normalize()` on
  * every launch, and anything the normalizer does not copy forward would be

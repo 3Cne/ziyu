@@ -145,23 +145,15 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.CompositingStrategy
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.nativeCanvas
-import androidx.compose.ui.graphics.GraphicsLayerScope
-import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.boundsInRoot
-import androidx.compose.ui.unit.Density
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -189,13 +181,6 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.kyant.backdrop.Backdrop
-import com.kyant.backdrop.backdrops.layerBackdrop
-import com.kyant.backdrop.backdrops.rememberCanvasBackdrop
-import com.kyant.backdrop.backdrops.rememberLayerBackdrop
-import com.kyant.backdrop.effects.blur
-import com.kyant.backdrop.effects.lens
-import com.kyant.backdrop.effects.vibrancy
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.findViewTreeLifecycleOwner
@@ -554,13 +539,6 @@ fun WritingScreen(
     // 标题框的实测高度：用来算正文要往上让多少，纯位移、不改布局。
     var titleBoxH by remember { mutableIntStateOf(0) }
 
-    // A Compose layerBackdrop records Compose draw content only, so it cannot
-    // see the native BodyEditText (AndroidView). This backdrop draws the real
-    // view into a software bitmap that the dock's 1型玻璃 samples; see
-    // EditorBodyBackdrop at the bottom of this file.
-    val editorBodyBackdrop = remember(p.paper) {
-        EditorBodyBackdrop({ bodyEditor }, p.paper)
-    }
     // 1型玻璃 only re-samples when its draw node records a new frame. The body
     // is a native EditText, so Compose never sees its scroll. Bump this tick on
     // every body scroll / text change and pass it as the glass epoch.
@@ -2001,7 +1979,6 @@ fun WritingScreen(
                     },
                     onProof = { startProof() },
                     onPolish = { startPolish() },
-                    backdrop = editorBodyBackdrop,
                     epoch = bodyScrollTick.intValue,
                     scrollTick = bodyScrollTick,
                     bodyEditor = bodyEditor,
@@ -2496,8 +2473,7 @@ private class BodyEditText(
     var autoIndent = false
     var indentGuard = false
     private var redirectingSelection = false
-    /** Bumped on every text or scroll change; EditorBodyBackdrop caches its
-     *  software bitmap against this instead of redrawing each frame. */
+    /** Bumped on every text or scroll change. */
     var renderRevision = 0L
     var lastTextLength = 0
 
@@ -4864,9 +4840,6 @@ private fun EditorDock(
     onProof: (() -> Unit)? = null,
     /** AI 入口里的「修饰」：只顺句，出改写版本；点一个才替换正文。 */
     onPolish: (() -> Unit)? = null,
-    /** 1型玻璃 sampling source. Pass the body's software backdrop so the real
-     *  EditText text shows through the dock; null falls back to a paper bar. */
-    backdrop: Backdrop? = null,
     /** Bumped on every body scroll / text change so the glass re-samples the
      *  native EditText instead of freezing on its first frame. */
     epoch: Int = 0,
@@ -5987,82 +5960,6 @@ private fun EditorDockPreview() {
                     onDelete = {},
                     onCancelSelection = {},
                     scrub = scrub,
-                )
-            }
-        }
-    }
-}
-
-/**
- * Draws the native editor view into the dock's 1型玻璃 backdrop.
- *
- * A Compose `layerBackdrop` records Compose draw content only, so it cannot see
- * the `AndroidView` `BodyEditText`; `View.draw` into a software bitmap can. The
- * bitmap is cached against [BodyEditText.renderRevision] so scrolling and
- * typing re-record it, while a still page costs one cached draw per frame.
- */
-private class EditorBodyBackdrop(
-    private val body: () -> BodyEditText?,
-    private val paper: Color,
-) : Backdrop {
-
-    override val isCoordinatesDependent: Boolean = true
-
-    private var cache: Bitmap? = null
-    private var cacheWidth = 0
-    private var cacheHeight = 0
-    private var cacheRevision = -1L
-    private var cachePaper = 0uL
-
-    override fun DrawScope.drawBackdrop(
-        density: Density,
-        coordinates: LayoutCoordinates?,
-        layerBlock: (GraphicsLayerScope.() -> Unit)?,
-    ) {
-        val view = body() ?: return
-        val dock = coordinates ?: return
-        if (!view.isAttachedToWindow || !view.isLaidOut || view.width == 0) return
-        val viewLoc = IntArray(2)
-        view.getLocationInWindow(viewLoc)
-        val dockLoc = dock.positionInWindow()
-        // Opaque paper first, otherwise the sharp text underneath ghosts through
-        // the blurred copy.
-        drawRect(paper)
-        clipRect(0f, 0f, size.width, size.height) {
-            // Re-record the body every draw. renderRevision stayed 0 in practice
-            // (BodyEditText.onScrollChanged does not fire for this viewport), so
-            // a revision-keyed cache froze the glass on its first frame. The
-            // dock's draw is already invalidated by bodyScrollTick, so redrawing
-            // here is what makes the text follow the scroll.
-            val w = view.width
-            val h = view.height
-            var bitmap = cache
-            if (bitmap == null || bitmap.width != w || bitmap.height != h ||
-                cachePaper != paper.value
-            ) {
-                bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-                cache = bitmap
-                cacheWidth = w
-                cacheHeight = h
-                cachePaper = paper.value
-            } else {
-                bitmap.eraseColor(0)
-            }
-            view.draw(Canvas(bitmap))
-            cacheRevision = view.renderRevision
-            // Crop only the slice under the dock instead of drawing the whole
-            // bitmap at a large negative offset.
-            val srcX = (dockLoc.x - viewLoc[0]).toInt().coerceAtLeast(0)
-            val srcY = (dockLoc.y - viewLoc[1]).toInt().coerceAtLeast(0)
-            val srcW = min(size.width.toInt(), bitmap.width - srcX)
-            val srcH = min(size.height.toInt(), bitmap.height - srcY)
-            if (srcW > 0 && srcH > 0) {
-                drawImage(
-                    image = bitmap.asImageBitmap(),
-                    srcOffset = androidx.compose.ui.unit.IntOffset(srcX, srcY),
-                    srcSize = androidx.compose.ui.unit.IntSize(srcW, srcH),
-                    dstOffset = androidx.compose.ui.unit.IntOffset.Zero,
-                    dstSize = androidx.compose.ui.unit.IntSize(srcW, srcH),
                 )
             }
         }
