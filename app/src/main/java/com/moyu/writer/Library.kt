@@ -65,6 +65,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
@@ -84,6 +85,8 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
@@ -1152,6 +1155,88 @@ private fun saveCoverImage(context: Context, uri: Uri): String? {
     }
 }
 
+/**
+ * 3.26.61：书籍详情三个操作按钮的统一高度。
+ * 三处按钮都读这一个常量，不要散三个 50.dp 魔法数；高度锁死以后，
+ * 即使某颗按钮的文本因为字体度量变化而变宽，也不会再把整排拉成高矮不一。
+ */
+private val BookActionButtonHeight = 50.dp
+
+/**
+ * 3.26.61：书籍详情「继续写作」的窄版主按钮。
+ *
+ * 为什么不直接用 [PrimaryButton]：它的水平内边距 22dp 是按整行宽按钮定的。详情页按钮排
+ * 可用宽度 = 屏 375.4dp − 页边距 20×2 = 335.4dp，减掉 故事 92 + 导出 104 + 8dp×2 间距，
+ * 主按钮只剩 **123.4dp**；而 22×2 内边距 + 图标 18 + 间距 8 + 「继续写作」四字
+ * 4×(14.5+0.3) ≈ 59.2 共需 **129.2dp**，差 5.8dp 放不下 → 折成两行，
+ * 被 `heightIn(min = 50dp)` 撑到 2×21.0 + 28 ≈ 70dp，于是三颗按钮高矮不一。
+ *
+ * 这里按 [PrimaryButton] 同一套规格本地实现（同反相墨底、同顶部 1px 高光、同 bouncy 按压、
+ * 同 14.5sp / Medium / .3 字距），只把水平内边距降到 18dp（与 [GlassButton] 内部一致，
+ * 需要 121.2dp ≤ 123.4dp 放得下），并给文本 `maxLines = 1`：以后字体度量再宽，也只会在
+ * 同一行里截断，不可能再长出第二行把按钮撑高。
+ *
+ * 更干净的做法是给 [PrimaryButton] 加一个 contentPadding 参数复用同一份实现，但那要改
+ * Design.kt；本轮写作用域只有 Library.kt，所以先在这里落地（样式与本文件其它墨底按钮一致）。
+ */
+@Composable
+private fun CompactPrimaryButton(
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    glyph: Glyph? = null,
+) {
+    val ui = LocalInk.current
+    // 与 PrimaryButton 完全同源的反相规则：浅色主题墨底浅字、深色主题纸质底墨字，
+    // 中间按 darkAmount 连续插值（不硬翻，和 3.26.49 起全局过渡口径一致）。
+    val darkAmount = ui.palette.darkAmount
+    val bg = lerp(ui.palette.ink, Color(0xFFF3EFE6), darkAmount)
+    val fg = lerp(ui.palette.bgTop, Color(0xFF191813), darkAmount)
+    Box(
+        modifier
+            .clip(SmoothCorner(999.dp))
+            .background(bg)
+            .drawWithCache {
+                onDrawWithContent {
+                    drawContent()
+                    drawLine(
+                        Brush.horizontalGradient(
+                            listOf(Color.Transparent, Color.White.copy(alpha = .24f), Color.Transparent),
+                            startX = size.width * .1f,
+                            endX = size.width * .9f,
+                        ),
+                        Offset(size.width * .1f, 1f),
+                        Offset(size.width * .9f, 1f),
+                        1f,
+                    )
+                }
+            }
+            .bouncy { onClick() }
+            .padding(horizontal = 18.dp, vertical = 14.dp)
+            .semantics { contentDescription = label },
+        contentAlignment = Alignment.Center,
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center,
+        ) {
+            if (glyph != null) {
+                LineIcon(glyph, fg, 18.dp, modifier = Modifier.padding(end = 8.dp))
+            }
+            // Txt 没有暴露 softWrap（Design.kt 本轮不可改）；`maxLines = 1` 已经是高度上的
+            // 一票否决——文本永远只占一行，按钮高度不可能再被折行撑开，这就是要的“不换行”。
+            Txt(
+                label,
+                size = 14.5f,
+                color = fg,
+                weight = FontWeight.Medium,
+                letterSpacing = .3f,
+                maxLines = 1,
+            )
+        }
+    }
+}
+
 @Composable
 fun BookDetailScreen(
     store: AppStore,
@@ -1240,14 +1325,24 @@ fun BookDetailScreen(
                     haptic(1)
                     storyOpen = true
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    PrimaryButton(
+                // 3.26.61：三个按钮统一 50dp 高（宽度照旧：主按钮吃剩余宽度、故事 92、导出 104）。
+                // 以前「继续写作」在窄屏上被挤成两行、由 heightIn(min = 50dp) 撑到 ≈70dp，
+                // 另外两颗 50dp —— 这就是三个高矮不一的根因；宽度算账见 CompactPrimaryButton。
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    CompactPrimaryButton(
                         "继续写作",
                         openChapter,
-                        Modifier.weight(1f).tutorialAnchor(
-                            "book.continue",
-                            onActivate = openChapter,
-                        ).testTag("book.detail.continue"),
+                        Modifier
+                            .weight(1f)
+                            .height(BookActionButtonHeight)
+                            .tutorialAnchor(
+                                "book.continue",
+                                onActivate = openChapter,
+                            )
+                            .testTag("book.detail.continue"),
                         glyph = Glyph.Edit,
                     )
                     // 3.26.60：故事并进按钮排，用 GlassButton 而不是 PrimaryButton——两块墨底
@@ -1257,13 +1352,22 @@ fun BookDetailScreen(
                     GlassButton(
                         "故事",
                         openStory,
-                        Modifier.width(92.dp).tutorialAnchor(
-                            "book.story",
-                            onActivate = openStory,
-                        ).testTag("book.detail.story"),
+                        Modifier
+                            .width(92.dp)
+                            .height(BookActionButtonHeight)
+                            .tutorialAnchor(
+                                "book.story",
+                                onActivate = openStory,
+                            )
+                            .testTag("book.detail.story"),
                         glyph = Glyph.Book,
                     )
-                    GlassButton("导出", { exportOpen = true }, Modifier.width(104.dp), glyph = Glyph.Export)
+                    GlassButton(
+                        "导出",
+                        { exportOpen = true },
+                        Modifier.width(104.dp).height(BookActionButtonHeight),
+                        glyph = Glyph.Export,
+                    )
                 }
             }
             item {
